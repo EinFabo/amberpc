@@ -57,38 +57,57 @@ export async function send(method: "GET" | "POST", path: string): Promise<unknow
 
 /**
  * Asks Amber how things stand while at least one key is visible - one poll for all keys,
- * and none at all with no Amber key on the page.
+ * and none at all with no Amber key on the page. Never more than one request in flight;
+ * while Amber is not reachable it asks less often.
  */
 export class Poller {
 	#watchers = new Set<(status: Status | null) => void>();
 	#timer: NodeJS.Timeout | null = null;
-	#last: string | null = null;
+	#busy = false;
+	/** Undefined until the first answer; null while Amber is not reachable. */
+	#status: Status | null | undefined = undefined;
 
-	constructor(private readonly intervalMs: number) {}
+	readonly #intervalMs: number;
+	readonly #offlineMs: number;
+
+	constructor(intervalMs: number, offlineMs: number) {
+		this.#intervalMs = intervalMs;
+		this.#offlineMs = offlineMs;
+	}
 
 	watch(watcher: (status: Status | null) => void): () => void {
 		this.#watchers.add(watcher);
-		if (this.#timer === null) {
-			this.#timer = setInterval(() => void this.poll(), this.intervalMs);
-			void this.poll();
-		}
+		// A key that appears later gets the current state at once, not at the next change.
+		if (this.#status !== undefined) watcher(this.#status);
+		if (this.#timer === null) void this.#tick();
 		return () => {
 			this.#watchers.delete(watcher);
 			if (this.#watchers.size === 0 && this.#timer !== null) {
-				clearInterval(this.#timer);
+				clearTimeout(this.#timer);
 				this.#timer = null;
-				this.#last = null;
+				this.#status = undefined;
 			}
 		};
 	}
 
-	/** Right after a press, so the key does not wait for the next tick. */
+	async #tick(): Promise<void> {
+		await this.poll();
+		if (this.#watchers.size === 0) return;
+		this.#timer = setTimeout(() => void this.#tick(), this.#status ? this.#intervalMs : this.#offlineMs);
+	}
+
+	/** Also right after a press, so the key does not wait for the next tick. */
 	async poll(): Promise<void> {
-		const status = (await send("GET", "/v1/status")) as Status | null;
-		const key = JSON.stringify(status?.phase ?? null);
-		// Redraw only on change: setImage on every tick would flicker on some devices.
-		if (key === this.#last) return;
-		this.#last = key;
-		for (const w of this.#watchers) w(status);
+		if (this.#busy) return;
+		this.#busy = true;
+		try {
+			const status = (await send("GET", "/v1/status")) as Status | null;
+			// Redraw only on change: setImage on every tick would flicker on some devices.
+			const changed = this.#status === undefined || (this.#status?.phase ?? null) !== (status?.phase ?? null);
+			this.#status = status;
+			if (changed) for (const w of this.#watchers) w(status);
+		} finally {
+			this.#busy = false;
+		}
 	}
 }

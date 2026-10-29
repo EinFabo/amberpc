@@ -109,15 +109,11 @@ pub fn save_settings(app: AppHandle, core: State<Core>, settings: Settings) -> R
         });
     }
     if after.cleanup != before.cleanup {
+        // ensure() reads the settings under its lock: it loads, swaps or stops the model,
+        // whichever the latest settings want.
         let app = app.clone();
-        let wants = crate::llm::wants_local(&after);
         std::thread::spawn(move || {
-            let core = app.state::<Core>();
-            if wants {
-                let _ = core.llm.ensure(&app);
-            } else {
-                core.llm.stop(&app);
-            }
+            let _ = app.state::<Core>().llm.ensure(&app);
         });
     }
     if after.phone != before.phone {
@@ -408,9 +404,16 @@ pub fn download(app: AppHandle, core: State<Core>, kind: Kind, id: String, selec
             }
             offset += f.size;
         }
+        let unpacks = install.is_some();
         if result.is_ok() {
             if let Some(install) = install {
                 result = install(&app);
+            }
+        }
+        if result.is_err() && unpacks {
+            // A runtime's archives are useless alone: an earlier one that did arrive goes too.
+            for f in &fetches {
+                let _ = std::fs::remove_file(&f.file);
             }
         }
         app.state::<Core>().downloads.lock().unwrap().remove(&key);
@@ -569,9 +572,7 @@ pub async fn phone_new_key(app: AppHandle) -> Result<crate::phone::Info, String>
 /// Loads the cleanup model now instead of on the first dictation.
 #[tauri::command]
 pub fn start_llm(app: AppHandle) {
-    std::thread::spawn(move || {
-        let _ = app.state::<Core>().llm.ensure(&app);
-    });
+    app.state::<Core>().llm.warm(&app, true);
 }
 
 #[derive(Serialize)]
@@ -595,7 +596,7 @@ pub async fn cleanup_preview(app: AppHandle, text: String) -> Preview {
             return Preview { fillers, smart: None, error: None, ms: 0 };
         }
         let t0 = Instant::now();
-        let result = crate::llm::cleaner(&app, &s).and_then(|c| c.clean(&fillers).map_err(|e| e.message));
+        let result = crate::llm::cleaner(&app, &s, true).and_then(|c| c.clean(&fillers).map_err(|e| e.message));
         let ms = t0.elapsed().as_millis() as u64;
         match result {
             Ok(smart) => Preview { fillers, smart: Some(smart), error: None, ms },

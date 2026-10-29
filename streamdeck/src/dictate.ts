@@ -3,8 +3,8 @@ import { action, SingletonAction, type KeyAction, type KeyDownEvent, type KeyUpE
 import { Poller, send, type Status } from "./client.js";
 import { keyImage, keyTitle } from "./keys.js";
 
-/** Fast enough that "Listening" shows the moment the key goes down. */
-const poller = new Poller(300);
+/** Fast enough that "Listening" shows the moment the key goes down; calm while Amber is off. */
+const poller = new Poller(300, 2000);
 
 /**
  * Hold to dictate, let go to insert; a short tap starts, the next tap stops. What a press
@@ -13,15 +13,23 @@ const poller = new Poller(300);
 @action({ UUID: "com.einfabo.amber.dictate" })
 export class Dictate extends SingletonAction {
 	#stops = new Map<string, () => void>();
+	/**
+	 * The SDK does not wait for a handler before calling the next one, so a quick tap could
+	 * send "release" before "press" has arrived. Requests go out strictly one after another.
+	 */
+	#queue: Promise<unknown> = Promise.resolve();
+
+	#send(path: string): Promise<void> {
+		this.#queue = this.#queue.then(() => send("POST", path)).catch(() => null);
+		return this.#queue.then(() => void poller.poll());
+	}
 
 	override async onKeyDown(_ev: KeyDownEvent): Promise<void> {
-		await send("POST", "/v1/press");
-		void poller.poll();
+		await this.#send("/v1/press");
 	}
 
 	override async onKeyUp(_ev: KeyUpEvent): Promise<void> {
-		await send("POST", "/v1/release");
-		void poller.poll();
+		await this.#send("/v1/release");
 	}
 
 	override onWillAppear(ev: WillAppearEvent): void {
