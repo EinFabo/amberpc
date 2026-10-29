@@ -6,7 +6,7 @@ use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use amber_core::cleanup::{self, ChatCleaner};
+use amber_core::cleanup::ChatCleaner;
 use amber_core::local;
 use amber_core::providers;
 use amber_core::settings::{EngineKind, Settings};
@@ -125,7 +125,7 @@ impl Llm {
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(format!("The cleanup engine stopped while loading ({status}). {}", self.explain()));
             }
-            if cleanup::local_server_ready(&base) {
+            if amber_core::engine::local_server_ready(&base) {
                 return Ok(Running { child, port, key: key.clone() });
             }
             if Instant::now() > deadline {

@@ -140,17 +140,6 @@ fn fail(message: &str, detail: &str) -> SttError {
     SttError { kind: ErrorKind::BadResponse, message: message.into(), detail: detail.chars().take(300).collect() }
 }
 
-/// llama.cpp's server answers 503 while it loads the model and 200 once it is ready.
-pub fn local_server_ready(base_url: &str) -> bool {
-    let url = format!("{}/health", base_url.trim_end_matches('/'));
-    Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .ok()
-        .and_then(|c| c.get(url).send().ok())
-        .is_some_and(|r| r.status().is_success())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,10 +193,4 @@ mod tests {
         assert_eq!(chat_url("https://api.groq.com/openai/v1/"), "https://api.groq.com/openai/v1/chat/completions");
     }
 
-    #[test]
-    fn local_server_health() {
-        let (url, _rx) = serve(vec![(503, "application/json", b"{}".to_vec()), (200, "application/json", b"{}".to_vec())]);
-        assert!(!local_server_ready(&url));
-        assert!(local_server_ready(&url));
-    }
 }
