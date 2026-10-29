@@ -36,7 +36,7 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow};
 
     /// The program file of a process, lowercase: "discord.exe".
-    fn exe_of_pid(pid: u32) -> Option<String> {
+    pub fn exe_of_pid(pid: u32) -> Option<String> {
         use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
         let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
         let mut buf = [0u16; 1024];
@@ -325,7 +325,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{insert, program_of_window, remember, running_programs, to_clipboard};
+pub use win::{exe_of_pid, insert, program_of_window, remember, running_programs, to_clipboard};
 
 impl Target {
     /// The target's program, lowercase ("discord.exe"), for its profile.

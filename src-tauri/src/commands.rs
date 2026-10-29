@@ -710,13 +710,6 @@ pub fn copy_text(text: String) -> Result<(), String> {
     crate::insert::to_clipboard(&text)
 }
 
-/// Presses the Push to Mute key once after a moment, so it can be recorded in Discord.
-#[tauri::command]
-pub fn discord_press_key(key: String, delay_ms: u64) {
-    let s = amber_core::settings::DiscordSettings { mute_while_dictating: true, key };
-    crate::mute::press_later(s.key_number(), delay_ms.min(30_000));
-}
-
 #[tauri::command]
 pub async fn recognize_again(app: AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || crate::dictation::recognize_again(&app)).await.map_err(|e| e.to_string())?
