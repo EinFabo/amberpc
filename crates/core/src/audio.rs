@@ -197,6 +197,9 @@ pub fn encode_wav(samples: &[f32], rate: u32) -> Vec<u8> {
     out
 }
 
+/// The longest recording [decode_wav] accepts.
+pub const MAX_DECODE_SECONDS: u64 = 15 * 60;
+
 /// Reads a WAV file as mono samples and its rate: 16-bit PCM or 32-bit float, any channel
 /// count, other chunks (LIST, fact, ...) skipped. What other apps send to the phone API.
 pub fn decode_wav(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
@@ -224,8 +227,14 @@ pub fn decode_wav(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
                     (3, 32) => data.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
                     _ => return Err(format!("unsupported WAV encoding (format {tag}, {bits} bit) - send 16-bit PCM")),
                 };
-                if channels == 0 || rate == 0 {
-                    return Err("WAV with zero channels or rate".into());
+                // Rates and channel counts real recorders use. A made-up rate would make the
+                // resampler allocate without bound (1 Hz -> 16 000 times the input).
+                if !(8_000..=192_000).contains(&rate) || !(1..=8).contains(&channels) {
+                    return Err(format!("unsupported WAV ({rate} Hz, {channels} channels)"));
+                }
+                let frames = interleaved.len() / channels as usize;
+                if frames as u64 > rate as u64 * MAX_DECODE_SECONDS {
+                    return Err("WAV longer than 15 minutes".into());
                 }
                 return Ok((downmix(&interleaved, channels), rate));
             }
@@ -410,6 +419,12 @@ mod tests {
         let mut wav = encode_wav(&[0.1; 4], 16_000);
         wav[34] = 24; // 24-bit
         assert!(decode_wav(&wav).unwrap_err().contains("16-bit"));
+        for (rate, channels) in [(1u32, 1u16), (4_000_000_004, 1), (16_000, 0), (16_000, 9)] {
+            let mut wav = encode_wav(&[0.1; 4], 16_000);
+            wav[24..28].copy_from_slice(&rate.to_le_bytes());
+            wav[22..24].copy_from_slice(&channels.to_le_bytes());
+            assert!(decode_wav(&wav).unwrap_err().contains("unsupported"), "{rate} Hz, {channels} ch");
+        }
     }
 
     #[test]
