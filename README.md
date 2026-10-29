@@ -99,10 +99,15 @@ models, `logs\amber.log`).
 
 ## Releases and updates
 
-A `v*` tag builds the installer in GitHub Actions and publishes it with `latest.json`
-(`.github/workflows/release.yml`). Installed copies check
+`tools/release.sh "notes"` runs the tests, builds and signs the installer on this PC and
+publishes it as a GitHub release together with `latest.json`. The signing key stays in
+`~/.amberpc/` and never goes to GitHub. Bump `version` in `package.json` and `Cargo.toml`
+first.
+
+Installed copies check
 `github.com/EinFabo/amberpc/releases/latest/download/latest.json` at start and every six
 hours, download in the background, and install once no dictation has run for a minute.
+GitHub Actions (`.github/workflows/ci.yml`) runs the tests and a Windows build on every push.
 
 ## System requirements
 
