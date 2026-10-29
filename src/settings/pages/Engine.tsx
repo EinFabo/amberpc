@@ -134,6 +134,12 @@ function LocalEngine({ s, save, toast }: PageProps) {
         <Row label="Load when Amber starts" hint="The first dictation then does not wait for the model to load. Uses memory while Amber runs.">
           <Switch on={s.local.keepLoaded} onChange={(v) => save((x) => (x.local.keepLoaded = v))} />
         </Row>
+        <Row
+          label="Recognize while speaking"
+          hint="Long dictations are cut at pauses and recognized part by part while you keep talking - after you stop, only the last part is left to wait for."
+        >
+          <Switch on={s.local.chunking} onChange={(v) => save((x) => (x.local.chunking = v))} />
+        </Row>
         <Row label="CPU threads" hint="Automatic uses half of your processor's threads.">
           <select value={s.local.threads} onChange={(e) => save((x) => (x.local.threads = Number(e.target.value)))}>
             <option value={0}>Automatic</option>

@@ -92,6 +92,12 @@ impl Recorder {
         }
     }
 
+    /// The samples recorded so far (mono, at [rate]), growing while the recording runs - for
+    /// recognizing finished parts while the user is still speaking.
+    pub fn shared_samples(&self) -> Arc<Mutex<Vec<f32>>> {
+        self.samples.clone()
+    }
+
     pub fn finish(mut self) -> Recording {
         let _ = self.stop.send(());
         if let Some(t) = self.thread.take() {

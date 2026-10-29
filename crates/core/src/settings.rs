@@ -92,11 +92,13 @@ pub struct LocalSettings {
     pub threads: u32,
     /// Start the local engine with the app, so the first dictation does not wait for loading.
     pub keep_loaded: bool,
+    /// Recognize long dictations in parts while still speaking (see `chunking`).
+    pub chunking: bool,
 }
 
 impl Default for LocalSettings {
     fn default() -> Self {
-        LocalSettings { runtime: "cpu".into(), model: "futo-multilingual-244".into(), threads: 0, keep_loaded: true }
+        LocalSettings { runtime: "cpu".into(), model: "futo-multilingual-244".into(), threads: 0, keep_loaded: true, chunking: true }
     }
 }
 

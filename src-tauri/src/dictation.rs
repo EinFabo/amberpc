@@ -1,11 +1,13 @@
 //! One dictation at a time: Idle -> Recording -> Transcribing -> Inserting -> Done -> Idle,
 //! or -> Error -> Idle. Every step is announced to the bubble and the settings window.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use amber_core::audio::{self, Rejected};
 use amber_core::engine::{ErrorKind, OpenAiTranscriber, TranscribeOptions, Transcriber, WhisperServerTranscriber};
+use amber_core::chunking::{self, ChunkPlanner, FrameVad};
 use amber_core::{estimate, local};
 use amber_core::providers;
 use amber_core::settings::{EngineKind, Settings};
@@ -49,6 +51,8 @@ struct Inner {
     started: Option<Instant>,
     /// Stop arrived while the microphone was still opening (a very short hold).
     stop_requested: bool,
+    /// Recognizes finished parts while the user is still speaking.
+    chunks: Option<ChunkJob>,
 }
 
 pub struct Dictation {
@@ -57,7 +61,7 @@ pub struct Dictation {
 
 impl Default for Dictation {
     fn default() -> Self {
-        Dictation { inner: Mutex::new(Inner { phase: Phase::Idle, session: 0, recorder: None, target: None, program: None, started: None, stop_requested: false }) }
+        Dictation { inner: Mutex::new(Inner { phase: Phase::Idle, session: 0, recorder: None, target: None, program: None, started: None, stop_requested: false, chunks: None }) }
     }
 }
 
@@ -156,6 +160,9 @@ pub fn start(app: &AppHandle) {
                 // Cancelled while the microphone was opening.
                 return;
             }
+            if settings.engine == EngineKind::Local && settings.local.chunking {
+                inner.chunks = Some(ChunkJob::start(&app, &settings, recorder.shared_samples(), recorder.rate));
+            }
             inner.recorder = Some(recorder);
             std::mem::take(&mut inner.stop_requested)
         };
@@ -189,7 +196,7 @@ pub fn start(app: &AppHandle) {
 /// Ends the recording and sends it off.
 pub fn stop(app: &AppHandle) {
     let core = app.state::<Core>();
-    let (recorder, target, program, session, started) = {
+    let (recorder, target, program, session, started, chunks) = {
         let mut inner = core.dictation.inner.lock().unwrap();
         if inner.phase != Phase::Recording {
             return;
@@ -199,14 +206,16 @@ pub fn stop(app: &AppHandle) {
             return;
         };
         inner.phase = Phase::Transcribing;
-        (recorder, inner.target.take(), inner.program.take(), inner.session, inner.started.take())
+        (recorder, inner.target.take(), inner.program.take(), inner.session, inner.started.take(), inner.chunks.take())
     };
     announce(app, Phase::Transcribing, None);
     let app = app.clone();
     std::thread::spawn(move || {
         let recording = recorder.finish();
+        // Waits for a part still being recognized; what is left after it is the tail.
+        let parts = chunks.map(ChunkJob::finish);
         let held_ms = started.map(|s| s.elapsed().as_millis() as u64).unwrap_or(0);
-        run(&app, session, recording, target, program, held_ms);
+        run(&app, session, recording, parts, target, program, held_ms);
     });
 }
 
@@ -220,6 +229,9 @@ pub fn cancel(app: &AppHandle) {
         }
         inner.phase = Phase::Idle;
         inner.target = None;
+        if let Some(job) = inner.chunks.take() {
+            job.abandon();
+        }
         inner.recorder.take()
     };
     drop(recorder);
@@ -235,7 +247,7 @@ pub fn toggle(app: &AppHandle) {
     }
 }
 
-fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Option<Target>, program: Option<String>, held_ms: u64) {
+fn run(app: &AppHandle, session: u64, recording: capture::Recording, parts: Option<Parts>, target: Option<Target>, program: Option<String>, held_ms: u64) {
     let core = app.state::<Core>();
     // What the user waits: from the stop to the text being there.
     let stopped = Instant::now();
@@ -252,16 +264,43 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
         }
     };
 
+    // Recognized while speaking: only the tail after the last cut is left.
+    let parts = parts.filter(|p| !p.failed && p.cut_at > 0 && !p.texts.is_empty() && p.cut_at <= recording.samples.len());
+    let tail = parts.as_ref().map(|p| audio::prepare(&recording.samples[p.cut_at..], recording.rate));
+
     // The bubble's ring fills against what recognition is expected to take here.
     let (estimate_key, typical) = match settings.engine {
         EngineKind::Local => (estimate::key("local", &settings.local.runtime, &settings.local.model), 0.1),
         EngineKind::Server => (estimate::key(&settings.server.provider, "", &settings.server.model), 0.05),
     };
-    let expected = core.estimates.expected_ms(&estimate_key, prepared.spoken_ms, typical, OVERHEAD_MS);
+    let left_ms = match &tail {
+        Some(Ok(t)) => t.spoken_ms,
+        Some(Err(_)) => 0,
+        None => prepared.spoken_ms,
+    };
+    let expected = core.estimates.expected_ms(&estimate_key, left_ms, typical, OVERHEAD_MS);
     let _ = app.emit("dictation-state", StateEvent { state: Phase::Transcribing, message: None, expected_ms: Some(expected) });
 
-    let options = TranscribeOptions::new(&settings.language, &settings.vocabulary);
-    let (raw, engine, recognize_ms) = match recognize(app, &settings, &prepared.wav, &options, prepared.spoken_ms) {
+    let recognized = match (&parts, tail) {
+        (Some(p), Some(Ok(t))) => {
+            let options = TranscribeOptions::new(&settings.language, &chunking::prompt(&settings.vocabulary, &p.texts));
+            recognize(app, &settings, &t.wav, &options, t.spoken_ms).map(|(raw, engine, ms)| {
+                let mut all = p.texts.clone();
+                all.push(raw);
+                (chunking::join(&all), engine, ms)
+            })
+        }
+        // The tail held no speech: the parts are the whole dictation.
+        (Some(p), Some(Err(_))) => Ok((chunking::join(&p.texts), "local (parts)".to_string(), 0)),
+        _ => {
+            let options = TranscribeOptions::new(&settings.language, &settings.vocabulary);
+            recognize(app, &settings, &prepared.wav, &options, prepared.spoken_ms)
+        }
+    };
+    if let Some(p) = &parts {
+        crate::diag::info(format!("recognized while speaking: {} parts, then the last {} ms", p.texts.len(), left_ms));
+    }
+    let (raw, engine, recognize_ms) = match recognized {
         Ok(r) => r,
         Err(message) => {
             // Kept in memory for a few minutes: one click recognizes it again.
@@ -269,7 +308,6 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
             return fail(app, session, format!("{message} The recording is kept - tray → \"Recognize again\"."), true);
         }
     };
-    // Fillers out, and - if switched on - the model's tidy-up; a failing cleanup keeps the text.
     let profile = program.as_deref().and_then(|p| amber_core::profiles::find(&settings.profiles, p));
     let (cleaned, _skipped) = crate::llm::tidy(app, &settings, &text::clean(&raw), profile);
     if cleaned.is_empty() {
@@ -349,6 +387,87 @@ pub fn recognize_again(app: &AppHandle) -> Result<String, String> {
     core.memory.remember(&settings, &text, failed.program.as_deref().unwrap_or(""), &engine, false, failed.spoken_ms, started.elapsed().as_millis() as u64);
     crate::diag::info(format!("recognized again: {} words, on the clipboard", text::words(&text)));
     Ok(text)
+}
+
+/// What was recognized while the user was still speaking.
+pub struct Parts {
+    texts: Vec<String>,
+    /// Where the tail begins, in samples of the recording.
+    cut_at: usize,
+    /// A part failed: the parts are worthless as a set, the whole recording goes instead.
+    failed: bool,
+}
+
+/// Watches the growing recording, cuts it at real pauses (`chunking::ChunkPlanner`) and
+/// recognizes each finished part in order, with the text so far as its prompt.
+struct ChunkJob {
+    stop: Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<Parts>,
+}
+
+impl ChunkJob {
+    fn start(app: &AppHandle, settings: &Settings, samples: Arc<Mutex<Vec<f32>>>, rate: u32) -> ChunkJob {
+        // Short parts only pay off where a short part is also cheap: models tuned to a short
+        // encoder context. A stock model works through 30 s for any part.
+        let short = local::model(&settings.local.model).is_some_and(|m| m.short_context);
+        let min_ms = if short { 4_000 } else { 20_000 };
+        let stop = Arc::new(AtomicBool::new(false));
+        let (app, settings, flag) = (app.clone(), settings.clone(), stop.clone());
+        let handle = std::thread::spawn(move || {
+            let mut planner = ChunkPlanner::new(rate, min_ms);
+            let mut vad = FrameVad::default();
+            let frame = planner.frame_samples();
+            let mut parts = Parts { texts: Vec::new(), cut_at: 0, failed: false };
+            let mut pos = 0;
+            loop {
+                let stopping = flag.load(Ordering::SeqCst);
+                let fresh: Vec<f32> = {
+                    let all = samples.lock().unwrap();
+                    let whole_frames = (all.len().saturating_sub(pos)) / frame * frame;
+                    all[pos..pos + whole_frames].to_vec()
+                };
+                for f in fresh.chunks_exact(frame) {
+                    pos += frame;
+                    let rms = audio::rms(f);
+                    let Some(cut) = planner.on_frame(pos, rms, vad.is_speech(rms)) else { continue };
+                    let slice: Vec<f32> = samples.lock().unwrap()[cut.start..cut.end].to_vec();
+                    let Ok(part) = audio::prepare(&slice, rate) else {
+                        // A cough, a breath: nothing to recognize, but the tail starts after it.
+                        parts.cut_at = cut.end;
+                        continue;
+                    };
+                    let options = TranscribeOptions::new(&settings.language, &chunking::prompt(&settings.vocabulary, &parts.texts));
+                    match transcriber(&app, &settings).and_then(|p| p.transcriber.transcribe(&part.wav, &options).map_err(|e| e.message)) {
+                        Ok(text) => {
+                            parts.texts.push(text::clean(&text));
+                            parts.cut_at = cut.end;
+                        }
+                        Err(e) => {
+                            crate::diag::warn(format!("a part failed ({e}), the whole recording will be recognized"));
+                            parts.failed = true;
+                            return parts;
+                        }
+                    }
+                }
+                if stopping {
+                    return parts;
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
+        });
+        ChunkJob { stop, handle }
+    }
+
+    /// The parts recognized until now - waits for one still being recognized.
+    fn finish(self) -> Parts {
+        self.stop.store(true, Ordering::SeqCst);
+        self.handle.join().unwrap_or(Parts { texts: Vec::new(), cut_at: 0, failed: true })
+    }
+
+    /// The recording was thrown away: the job ends on its own, nobody waits for it.
+    fn abandon(self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
 }
 
 /// An engine ready for one request, with the names it is logged and measured under.
