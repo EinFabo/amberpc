@@ -12,6 +12,7 @@ import { BubblePage } from "./pages/Bubble";
 import { InsertPage } from "./pages/Insert";
 import { AppPage } from "./pages/AppPage";
 import { WelcomePage } from "./pages/Welcome";
+import { PhonePage } from "./pages/Phone";
 
 export interface PageProps {
   ov: Overview;
@@ -23,7 +24,7 @@ export interface PageProps {
   phase: Phase;
 }
 
-export type PageId = "welcome" | "engine" | "microphone" | "hotkeys" | "bubble" | "insert" | "app";
+export type PageId = "welcome" | "engine" | "microphone" | "hotkeys" | "bubble" | "insert" | "phone" | "app";
 
 const PAGES: { id: PageId; label: string; value: (o: Overview) => string }[] = [
   { id: "engine", label: "Engine", value: (o) => (o.settings.engine === "local" ? "Local" : providerName(o)) },
@@ -31,6 +32,7 @@ const PAGES: { id: PageId; label: string; value: (o: Overview) => string }[] = [
   { id: "hotkeys", label: "Hotkeys", value: (o) => o.settings.hotkey.dictate || "None" },
   { id: "bubble", label: "Bubble", value: (o) => ({ always: "Shown", whileDictating: "When used", hidden: "Hidden" })[o.settings.bubble.visibility] },
   { id: "insert", label: "Inserting", value: (o) => (o.settings.insert.method === "paste" ? "Paste" : "Type") },
+  { id: "phone", label: "Phone", value: (o) => (o.settings.phone.enabled ? "On" : "Off") },
   { id: "app", label: "App", value: (o) => `v${o.version}` },
 ];
 
@@ -40,7 +42,7 @@ function providerName(o: Overview) {
 
 function initialPage(): PageId {
   const p = new URLSearchParams(location.search).get("page");
-  return (["welcome", "engine", "microphone", "hotkeys", "bubble", "insert", "app"] as PageId[]).includes(p as PageId)
+  return (["welcome", "engine", "microphone", "hotkeys", "bubble", "insert", "phone", "app"] as PageId[]).includes(p as PageId)
     ? (p as PageId)
     : "engine";
 }
@@ -122,6 +124,7 @@ export function App() {
         {page === "hotkeys" && <HotkeysPage {...props} />}
         {page === "bubble" && <BubblePage {...props} />}
         {page === "insert" && <InsertPage {...props} />}
+        {page === "phone" && <PhonePage {...props} />}
         {page === "app" && <AppPage {...props} />}
       </main>
       {toastMsg && <div className={`toast ${toastMsg.ok ? "ok" : ""}`}>{toastMsg.text}</div>}

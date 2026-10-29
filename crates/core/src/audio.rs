@@ -197,6 +197,46 @@ pub fn encode_wav(samples: &[f32], rate: u32) -> Vec<u8> {
     out
 }
 
+/// Reads a WAV file as mono samples and its rate: 16-bit PCM or 32-bit float, any channel
+/// count, other chunks (LIST, fact, ...) skipped. What other apps send to the phone API.
+pub fn decode_wav(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("not a WAV file".into());
+    }
+    let u16_at = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+    let u32_at = |i: usize| u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+    let mut pos = 12;
+    let mut format: Option<(u16, u16, u32, u16)> = None;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let len = u32_at(pos + 4) as usize;
+        let body = pos + 8;
+        let end = body.saturating_add(len).min(bytes.len());
+        match id {
+            b"fmt " if len >= 16 && body + 16 <= bytes.len() => {
+                format = Some((u16_at(body), u16_at(body + 2), u32_at(body + 4), u16_at(body + 14)));
+            }
+            b"data" => {
+                let (tag, channels, rate, bits) = format.ok_or("WAV without a format chunk")?;
+                let data = &bytes[body..end];
+                let interleaved: Vec<f32> = match (tag, bits) {
+                    (1, 16) => data.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect(),
+                    (3, 32) => data.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect(),
+                    _ => return Err(format!("unsupported WAV encoding (format {tag}, {bits} bit) - send 16-bit PCM")),
+                };
+                if channels == 0 || rate == 0 {
+                    return Err("WAV with zero channels or rate".into());
+                }
+                return Ok((downmix(&interleaved, channels), rate));
+            }
+            _ => {}
+        }
+        // Chunks are padded to an even length.
+        pos = body.saturating_add(len + (len & 1));
+    }
+    Err("WAV without audio data".into())
+}
+
 /// Everything from the device to the engine in one go.
 pub struct Prepared {
     pub wav: Vec<u8>,
@@ -328,6 +368,48 @@ mod tests {
         assert_eq!(wav.len(), 44 + 6);
         assert_eq!(i16::from_le_bytes([wav[46], wav[47]]), i16::MAX);
         assert_eq!(i16::from_le_bytes([wav[48], wav[49]]), -i16::MAX);
+    }
+
+    #[test]
+    fn decode_reads_what_encode_wrote() {
+        let wav = encode_wav(&[0.0, 0.5, -0.5], 16_000);
+        let (samples, rate) = decode_wav(&wav).unwrap();
+        assert_eq!(rate, 16_000);
+        assert_eq!(samples.len(), 3);
+        assert!((samples[1] - 0.5).abs() < 1e-3 && (samples[2] + 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn decode_handles_stereo_float_and_extra_chunks() {
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF\0\0\0\0WAVE");
+        wav.extend_from_slice(b"LIST");
+        wav.extend_from_slice(&3u32.to_le_bytes());
+        wav.extend_from_slice(b"abc\0"); // odd length, padded
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&3u16.to_le_bytes()); // float
+        wav.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&(48_000u32 * 8).to_le_bytes());
+        wav.extend_from_slice(&8u16.to_le_bytes());
+        wav.extend_from_slice(&32u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        for v in [1.0f32, 0.0, 0.5, 0.5] {
+            wav.extend_from_slice(&v.to_le_bytes());
+        }
+        let (samples, rate) = decode_wav(&wav).unwrap();
+        assert_eq!(rate, 48_000);
+        assert_eq!(samples, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn decode_refuses_what_it_cannot_read() {
+        assert!(decode_wav(b"ID3 not a wav").is_err());
+        let mut wav = encode_wav(&[0.1; 4], 16_000);
+        wav[34] = 24; // 24-bit
+        assert!(decode_wav(&wav).unwrap_err().contains("16-bit"));
     }
 
     #[test]

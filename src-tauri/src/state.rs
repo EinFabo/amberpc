@@ -33,6 +33,7 @@ pub struct Core {
     pub downloads: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// The settings window's microphone meter.
     pub mic_test: Mutex<Option<(Recorder, Instant)>>,
+    pub phone: crate::phone::PhoneApi,
     epoch: Instant,
 }
 
@@ -55,6 +56,7 @@ impl Core {
             pointer_gesture: Mutex::new(Gesture::for_pointer(Mode::Both)),
             downloads: Mutex::new(HashMap::new()),
             mic_test: Mutex::new(None),
+            phone: crate::phone::PhoneApi::default(),
             epoch: Instant::now(),
         }
     }
