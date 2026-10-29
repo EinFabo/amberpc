@@ -1,0 +1,503 @@
+/* Amber's "Hearth": near-black surfaces, one amber accent, quiet type. */
+:root {
+  --bg: #0a0a0a;
+  --surface: #161616;
+  --elevated: #1f1f1f;
+  --outline: #262626;
+  --primary: #ffb020;
+  --primary-ink: #0a0a0a;
+  --text: #ededed;
+  --muted: #8a8a8a;
+  --error: #f07167;
+  --ok: #6ccb8f;
+  --radius: 10px;
+  color-scheme: dark;
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  user-select: none;
+}
+
+#root {
+  display: flex;
+  height: 100vh;
+}
+
+nav {
+  width: 210px;
+  flex-shrink: 0;
+  padding: 18px 10px;
+  border-right: 1px solid var(--outline);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+nav .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px 18px;
+  font-weight: 600;
+  font-size: 16px;
+}
+
+nav .brand .disc {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--primary);
+}
+
+nav button {
+  all: unset;
+  cursor: pointer;
+  padding: 8px 12px;
+  border-radius: 8px;
+  color: var(--muted);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+nav button:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+nav button.active {
+  background: var(--elevated);
+  color: var(--text);
+}
+
+nav button .value {
+  font-size: 12px;
+  color: var(--muted);
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+nav .spacer {
+  flex: 1;
+}
+
+nav .status {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px 36px 48px;
+}
+
+h1 {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.lead {
+  color: var(--muted);
+  margin: 0 0 24px;
+  max-width: 620px;
+  line-height: 1.5;
+}
+
+section {
+  background: var(--surface);
+  border: 1px solid var(--outline);
+  border-radius: var(--radius);
+  margin-bottom: 18px;
+}
+
+section > h2 {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0;
+  padding: 14px 18px 4px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 18px;
+  min-height: 52px;
+}
+
+.row + .row {
+  border-top: 1px solid var(--outline);
+}
+
+.row .label {
+  flex: 1;
+  min-width: 0;
+}
+
+.row .label .hint {
+  color: var(--muted);
+  font-size: 12.5px;
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+.row.column {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+button.btn {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--outline);
+  background: var(--elevated);
+  color: var(--text);
+  padding: 7px 14px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+button.btn:hover:not(:disabled) {
+  border-color: #3a3a3a;
+}
+
+button.btn.primary {
+  background: var(--primary);
+  color: var(--primary-ink);
+  border-color: var(--primary);
+  font-weight: 600;
+}
+
+button.btn.danger {
+  color: var(--error);
+}
+
+button.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+input[type="text"],
+input[type="password"],
+textarea,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--outline);
+  border-radius: 8px;
+  padding: 7px 10px;
+  outline: none;
+  user-select: text;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--primary);
+}
+
+select {
+  min-width: 220px;
+}
+
+textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 70px;
+}
+
+.seg {
+  display: inline-flex;
+  background: var(--bg);
+  border: 1px solid var(--outline);
+  border-radius: 9px;
+  padding: 2px;
+}
+
+.seg button {
+  all: unset;
+  cursor: pointer;
+  padding: 6px 12px;
+  border-radius: 7px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.seg button.on {
+  background: var(--elevated);
+  color: var(--text);
+}
+
+.switch {
+  all: unset;
+  cursor: pointer;
+  width: 38px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--outline);
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.15s, background 0.15s;
+}
+
+.switch.on {
+  background: var(--primary);
+}
+
+.switch.on::after {
+  transform: translateX(16px);
+  background: var(--primary-ink);
+}
+
+input[type="range"] {
+  accent-color: var(--primary);
+  width: 200px;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.card {
+  all: unset;
+  cursor: pointer;
+  border: 1px solid var(--outline);
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+
+.card.on {
+  border-color: var(--primary);
+}
+
+.card .title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.card .hint {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 18px;
+}
+
+.item + .item {
+  border-top: 1px solid var(--outline);
+}
+
+.item .radio {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--outline);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.item .radio.on {
+  border-color: var(--primary);
+  background: radial-gradient(var(--primary) 0 45%, transparent 50%);
+}
+
+.item .radio.disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.item .name {
+  flex: 1;
+}
+
+.item .name .hint {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.tag {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--elevated);
+  color: var(--muted);
+  margin-left: 6px;
+}
+
+.tag.amber {
+  color: var(--primary);
+}
+
+.tag.ok {
+  color: var(--ok);
+}
+
+.progress {
+  width: 140px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--outline);
+  overflow: hidden;
+}
+
+.progress > div {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.2s;
+}
+
+.meter {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--outline);
+  overflow: hidden;
+  width: 100%;
+}
+
+.meter > div {
+  height: 100%;
+  background: var(--primary);
+  transition: width 60ms linear;
+}
+
+.note {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.note.error {
+  color: var(--error);
+}
+
+.note.ok {
+  color: var(--ok);
+}
+
+.hotkey {
+  min-width: 190px;
+  text-align: center;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+}
+
+.hotkey.recording {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.log {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 10px 18px 14px;
+  user-select: text;
+}
+
+.log .warn {
+  color: var(--primary);
+}
+
+.log .error {
+  color: var(--error);
+}
+
+.log .time {
+  color: var(--muted);
+  margin-right: 8px;
+}
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 24px;
+  max-width: 420px;
+  background: var(--elevated);
+  border: 1px solid var(--outline);
+  border-left: 3px solid var(--error);
+  border-radius: 8px;
+  padding: 12px 16px;
+  line-height: 1.45;
+}
+
+.toast.ok {
+  border-left-color: var(--ok);
+}
+
+a.link {
+  color: var(--primary);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+a.link:hover {
+  text-decoration: underline;
+}
+
+.dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 7px;
+  background: var(--muted);
+}
+
+.dot.ready {
+  background: var(--ok);
+}
+
+.dot.starting {
+  background: var(--primary);
+}
+
+.dot.failed {
+  background: var(--error);
+}
+
+.welcome-steps {
+  display: grid;
+  gap: 12px;
+}
