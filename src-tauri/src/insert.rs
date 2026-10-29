@@ -304,15 +304,13 @@ mod win {
 
     pub fn insert(text: &str, settings: &InsertSettings, target: Option<Target>) -> Result<Outcome, String> {
         if blocked_by_uipi(target) {
-            let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-            set_clipboard(&mut cb, text)?;
+            to_clipboard(text)?;
             return Ok(Outcome::OnClipboard(
                 "Windows blocks typing into this window (it probably runs as administrator). The text is on the clipboard - press Ctrl+V.".into(),
             ));
         }
         if target.is_some_and(|t| !still_in_front(t)) {
-            let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-            set_clipboard(&mut cb, text)?;
+            to_clipboard(text)?;
             return Ok(Outcome::OnClipboard("You switched to another window, so the text is on the clipboard - press Ctrl+V where you want it.".into()));
         }
         wait_for_modifiers();

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use amber_core::audio::{self, Rejected};
 use amber_core::engine::{ErrorKind, OpenAiTranscriber, TranscribeOptions, Transcriber, WhisperServerTranscriber};
-use amber_core::chunking::{self, ChunkPlanner, FrameVad};
+use amber_core::chunking::{self, ChunkPlanner, FrameVad, Parts};
 use amber_core::{estimate, local};
 use amber_core::providers;
 use amber_core::settings::{EngineKind, Settings};
@@ -161,7 +161,7 @@ pub fn start(app: &AppHandle) {
                 return;
             }
             if settings.engine == EngineKind::Local && settings.local.chunking {
-                inner.chunks = Some(ChunkJob::start(&app, &settings, recorder.shared_samples(), recorder.rate));
+                inner.chunks = ChunkJob::start(&app, &settings, recorder.shared_samples(), recorder.rate);
             }
             inner.recorder = Some(recorder);
             std::mem::take(&mut inner.stop_requested)
@@ -211,11 +211,14 @@ pub fn stop(app: &AppHandle) {
     announce(app, Phase::Transcribing, None);
     let app = app.clone();
     std::thread::spawn(move || {
+        // What the user waits from here on counts as the wait - also for a part still being
+        // recognized.
+        let stopped = Instant::now();
+        let held_ms = started.map(|s| s.elapsed().as_millis() as u64).unwrap_or(0);
         let recording = recorder.finish();
         // Waits for a part still being recognized; what is left after it is the tail.
         let parts = chunks.map(ChunkJob::finish);
-        let held_ms = started.map(|s| s.elapsed().as_millis() as u64).unwrap_or(0);
-        run(&app, session, recording, parts, target, program, held_ms);
+        run(&app, session, recording, parts, target, program, held_ms, stopped);
     });
 }
 
@@ -247,10 +250,18 @@ pub fn toggle(app: &AppHandle) {
     }
 }
 
-fn run(app: &AppHandle, session: u64, recording: capture::Recording, parts: Option<Parts>, target: Option<Target>, program: Option<String>, held_ms: u64) {
+#[allow(clippy::too_many_arguments)]
+fn run(
+    app: &AppHandle,
+    session: u64,
+    recording: capture::Recording,
+    parts: Option<Parts>,
+    target: Option<Target>,
+    program: Option<String>,
+    held_ms: u64,
+    stopped: Instant,
+) {
     let core = app.state::<Core>();
-    // What the user waits: from the stop to the text being there.
-    let stopped = Instant::now();
     let settings = core.settings();
     if recording.interrupted && recording.samples.is_empty() {
         return fail(app, session, "The microphone stopped delivering sound.".into(), true);
@@ -265,7 +276,7 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, parts: Opti
     };
 
     // Recognized while speaking: only the tail after the last cut is left.
-    let parts = parts.filter(|p| !p.failed && p.cut_at > 0 && !p.texts.is_empty() && p.cut_at <= recording.samples.len());
+    let parts = parts.filter(|p| p.usable(recording.samples.len()));
     let tail = parts.as_ref().map(|p| audio::prepare(&recording.samples[p.cut_at..], recording.rate));
 
     // The bubble's ring fills against what recognition is expected to take here.
@@ -283,18 +294,18 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, parts: Opti
 
     let recognized = match (&parts, tail) {
         (Some(p), Some(Ok(t))) => {
-            let options = TranscribeOptions::new(&settings.language, &chunking::prompt(&settings.vocabulary, &p.texts));
-            recognize(app, &settings, &t.wav, &options, t.spoken_ms).map(|(raw, engine, ms)| {
-                let mut all = p.texts.clone();
-                all.push(raw);
-                (chunking::join(&all), engine, ms)
-            })
+            // The tail in the parts' language, with the text so far as its prompt.
+            let language = p.language.clone().unwrap_or_else(|| settings.language.clone());
+            let options = TranscribeOptions::new(&language, &chunking::prompt(&settings.vocabulary, &p.texts));
+            // A short tail costs the context floor, not its length: not worth learning from.
+            let learn = t.spoken_ms >= 5_000;
+            recognize(app, &settings, &t.wav, &options, t.spoken_ms, learn).map(|(raw, engine, ms)| (p.with_tail(Some(&raw)), engine, ms))
         }
         // The tail held no speech: the parts are the whole dictation.
-        (Some(p), Some(Err(_))) => Ok((chunking::join(&p.texts), "local (parts)".to_string(), 0)),
+        (Some(p), Some(Err(_))) => Ok((p.with_tail(None), p.engine.clone(), 0)),
         _ => {
             let options = TranscribeOptions::new(&settings.language, &settings.vocabulary);
-            recognize(app, &settings, &prepared.wav, &options, prepared.spoken_ms)
+            recognize(app, &settings, &prepared.wav, &options, prepared.spoken_ms, true)
         }
     };
     if let Some(p) = &parts {
@@ -329,7 +340,7 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, parts: Opti
     let what = if settings.log_text { format!("\"{cleaned}\"") } else { format!("{} words", text::words(&cleaned)) };
     let inserted = matches!(outcome, Ok(Outcome::Pasted | Outcome::Typed));
     core.memory.remember(
-        &settings,
+        &core.settings(),
         &cleaned,
         program.as_deref().unwrap_or(""),
         &engine,
@@ -358,7 +369,16 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, parts: Opti
             announce(app, Phase::Done, Some(cleaned));
             settle(app, session, Duration::from_millis(900));
         }
-        Err(e) => fail(app, session, format!("The text could not be inserted ({e}). It is in the history."), true),
+        Err(e) => {
+            // Never lost: on the clipboard if it can go there, and in the history if it is on.
+            let where_ = match (insert::to_clipboard(&final_text).is_ok(), settings.history) {
+                (true, true) => " It is on the clipboard and in the history.",
+                (true, false) => " It is on the clipboard.",
+                (false, true) => " It is in the history.",
+                (false, false) => "",
+            };
+            fail(app, session, format!("The text could not be inserted ({e}).{where_}"), true)
+        }
     }
 }
 
@@ -370,7 +390,7 @@ pub fn recognize_again(app: &AppHandle) -> Result<String, String> {
     let settings = core.settings();
     let started = Instant::now();
     let options = TranscribeOptions::new(&settings.language, &settings.vocabulary);
-    let (raw, engine, _) = match recognize(app, &settings, &failed.wav, &options, failed.spoken_ms) {
+    let (raw, engine, _) = match recognize(app, &settings, &failed.wav, &options, failed.spoken_ms, true) {
         Ok(r) => r,
         Err(e) => {
             // Still there for another try (another engine, the key fixed).
@@ -389,57 +409,65 @@ pub fn recognize_again(app: &AppHandle) -> Result<String, String> {
     Ok(text)
 }
 
-/// What was recognized while the user was still speaking.
-pub struct Parts {
-    texts: Vec<String>,
-    /// Where the tail begins, in samples of the recording.
-    cut_at: usize,
-    /// A part failed: the parts are worthless as a set, the whole recording goes instead.
-    failed: bool,
-}
-
 /// Watches the growing recording, cuts it at real pauses (`chunking::ChunkPlanner`) and
-/// recognizes each finished part in order, with the text so far as its prompt.
+/// recognizes each finished part in order, with the text so far as its prompt and the first
+/// part's language kept for the rest.
 struct ChunkJob {
     stop: Arc<AtomicBool>,
     handle: std::thread::JoinHandle<Parts>,
 }
 
 impl ChunkJob {
-    fn start(app: &AppHandle, settings: &Settings, samples: Arc<Mutex<Vec<f32>>>, rate: u32) -> ChunkJob {
-        // Short parts only pay off where a short part is also cheap: models tuned to a short
-        // encoder context. A stock model works through 30 s for any part.
-        let short = local::model(&settings.local.model).is_some_and(|m| m.short_context);
-        let min_ms = if short { 4_000 } else { 20_000 };
+    /// Only for models tuned to a short encoder context - a stock model works through 30 s
+    /// for any part, and parts would only make it slower. Judged by the model the server
+    /// actually runs, which may still be the previous one while the chosen one downloads.
+    fn start(app: &AppHandle, settings: &Settings, samples: Arc<Mutex<Vec<f32>>>, rate: u32) -> Option<ChunkJob> {
+        let model = app.state::<Core>().whisper.running_model().unwrap_or_else(|| settings.local.model.clone());
+        if !local::model(&model).is_some_and(|m| m.short_context) {
+            return None;
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let (app, settings, flag) = (app.clone(), settings.clone(), stop.clone());
         let handle = std::thread::spawn(move || {
-            let mut planner = ChunkPlanner::new(rate, min_ms);
+            let mut planner = ChunkPlanner::new(rate, 4_000);
             let mut vad = FrameVad::default();
             let frame = planner.frame_samples();
-            let mut parts = Parts { texts: Vec::new(), cut_at: 0, failed: false };
+            let mut parts = Parts::default();
             let mut pos = 0;
             loop {
-                let stopping = flag.load(Ordering::SeqCst);
-                let fresh: Vec<f32> = {
+                // The recording's buffer is emptied by the stop; reading past it means: done.
+                let Some(fresh) = ({
                     let all = samples.lock().unwrap();
-                    let whole_frames = (all.len().saturating_sub(pos)) / frame * frame;
-                    all[pos..pos + whole_frames].to_vec()
+                    all.get(pos..).map(|rest| rest[..rest.len() / frame * frame].to_vec())
+                }) else {
+                    return parts;
                 };
                 for f in fresh.chunks_exact(frame) {
+                    if flag.load(Ordering::SeqCst) {
+                        // Stopped: whatever is not recognized yet belongs to the tail.
+                        return parts;
+                    }
                     pos += frame;
                     let rms = audio::rms(f);
                     let Some(cut) = planner.on_frame(pos, rms, vad.is_speech(rms)) else { continue };
-                    let slice: Vec<f32> = samples.lock().unwrap()[cut.start..cut.end].to_vec();
+                    let Some(slice) = samples.lock().unwrap().get(cut.start..cut.end).map(<[f32]>::to_vec) else { return parts };
                     let Ok(part) = audio::prepare(&slice, rate) else {
                         // A cough, a breath: nothing to recognize, but the tail starts after it.
                         parts.cut_at = cut.end;
                         continue;
                     };
-                    let options = TranscribeOptions::new(&settings.language, &chunking::prompt(&settings.vocabulary, &parts.texts));
-                    match transcriber(&app, &settings).and_then(|p| p.transcriber.transcribe(&part.wav, &options).map_err(|e| e.message)) {
-                        Ok(text) => {
-                            parts.texts.push(text::clean(&text));
+                    let language = parts.language.clone().unwrap_or_else(|| settings.language.clone());
+                    let options = TranscribeOptions::new(&language, &chunking::prompt(&settings.vocabulary, &parts.texts));
+                    let result = transcriber(&app, &settings).and_then(|p| {
+                        parts.engine = p.label.clone();
+                        p.transcriber.transcribe_detecting(&part.wav, &options).map_err(|e| e.message)
+                    });
+                    match result {
+                        Ok((text, detected)) => {
+                            if settings.language == "auto" && parts.language.is_none() {
+                                parts.language = detected.as_deref().and_then(chunking::language_code).map(str::to_string);
+                            }
+                            parts.texts.push(text);
                             parts.cut_at = cut.end;
                         }
                         Err(e) => {
@@ -449,22 +477,22 @@ impl ChunkJob {
                         }
                     }
                 }
-                if stopping {
+                if flag.load(Ordering::SeqCst) {
                     return parts;
                 }
                 std::thread::sleep(Duration::from_millis(150));
             }
         });
-        ChunkJob { stop, handle }
+        Some(ChunkJob { stop, handle })
     }
 
     /// The parts recognized until now - waits for one still being recognized.
     fn finish(self) -> Parts {
         self.stop.store(true, Ordering::SeqCst);
-        self.handle.join().unwrap_or(Parts { texts: Vec::new(), cut_at: 0, failed: true })
+        self.handle.join().unwrap_or(Parts { failed: true, ..Parts::default() })
     }
 
-    /// The recording was thrown away: the job ends on its own, nobody waits for it.
+    /// The recording was thrown away: the job stops at the next frame, nobody waits for it.
     fn abandon(self) {
         self.stop.store(true, Ordering::SeqCst);
     }
@@ -483,7 +511,14 @@ const OVERHEAD_MS: u64 = 200;
 /// Recognizes [wav] with the engine the settings ask for. A local server that went away
 /// mid-request gets one more try; a server that cannot be reached hands the recording to a
 /// downloaded local model (if allowed) - never the other way round. Learns how long it took.
-fn recognize(app: &AppHandle, settings: &Settings, wav: &[u8], options: &TranscribeOptions, spoken_ms: u64) -> Result<(String, String, u128), String> {
+fn recognize(
+    app: &AppHandle,
+    settings: &Settings,
+    wav: &[u8],
+    options: &TranscribeOptions,
+    spoken_ms: u64,
+    learn: bool,
+) -> Result<(String, String, u128), String> {
     let core = app.state::<Core>();
     let mut picked = transcriber(app, settings)?;
     let mut t0 = Instant::now();
@@ -523,7 +558,9 @@ fn recognize(app: &AppHandle, settings: &Settings, wav: &[u8], options: &Transcr
     match result {
         Ok(raw) => {
             let took = t0.elapsed().as_millis();
-            core.estimates.learn(&picked.estimate_key, spoken_ms, took as u64, OVERHEAD_MS);
+            if learn {
+                core.estimates.learn(&picked.estimate_key, spoken_ms, took as u64, OVERHEAD_MS);
+            }
             Ok((raw, picked.label, took))
         }
         Err(e) => {

@@ -24,6 +24,8 @@ pub struct Failed {
 pub struct Memory {
     history_path: PathBuf,
     history: Mutex<History>,
+    /// The history switch as it is now, not as a dictation's settings snapshot had it.
+    enabled: std::sync::atomic::AtomicBool,
     pub ledger: Ledger,
     failed: Mutex<Option<Failed>>,
 }
@@ -35,13 +37,26 @@ pub fn now_ms() -> u64 {
 impl Memory {
     pub fn load(data_dir: &Path, settings: &Settings) -> Memory {
         let history_path = data_dir.join("history.bin");
-        let mut history = std::fs::read(&history_path)
-            .ok()
-            .and_then(|blob| crate::secrets::unprotect(&blob).ok())
-            .map(|plain| History::from_bytes(&plain))
-            .unwrap_or_default();
+        let mut history = match std::fs::read(&history_path) {
+            Ok(blob) => match crate::secrets::unprotect(&blob) {
+                Ok(plain) => History::from_bytes(&plain),
+                Err(e) => {
+                    // Another Windows account, a restored backup: kept aside, not overwritten.
+                    crate::diag::warn(format!("history unreadable ({e}), kept as history.unreadable.bin"));
+                    let _ = std::fs::rename(&history_path, data_dir.join("history.unreadable.bin"));
+                    History::default()
+                }
+            },
+            Err(_) => History::default(),
+        };
         history.prune(now_ms(), settings.history_days);
-        Memory { history_path, history: Mutex::new(history), ledger: Ledger::new(&data_dir.join("stats.jsonl")), failed: Mutex::new(None) }
+        Memory {
+            history_path,
+            history: Mutex::new(history),
+            enabled: std::sync::atomic::AtomicBool::new(settings.history),
+            ledger: Ledger::new(&data_dir.join("stats.jsonl")),
+            failed: Mutex::new(None),
+        }
     }
 
     fn save(&self, history: &History) {
@@ -59,7 +74,12 @@ impl Memory {
     pub fn remember(&self, s: &Settings, text: &str, program: &str, engine: &str, inserted: bool, audio_ms: u64, wait_ms: u64) {
         let at = now_ms();
         if s.history {
+            // Under the lock, so switching the history off (which clears under it too) wins
+            // over a dictation that was still being recognized.
             let mut history = self.history.lock().unwrap();
+            if !self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
             history.add(Entry { at, text: text.to_string(), program: program.to_string(), engine: engine.to_string(), inserted }, at, s.history_days);
             self.save(&history);
         }
@@ -88,6 +108,12 @@ impl Memory {
         let mut history = self.history.lock().unwrap();
         history.remove(at);
         self.save(&history);
+    }
+
+    /// Follows the history switch: off clears what is kept and refuses what is still coming.
+    pub fn set_enabled(&self, on: bool) {
+        let _guard = self.history.lock().unwrap();
+        self.enabled.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn clear_history(&self) {

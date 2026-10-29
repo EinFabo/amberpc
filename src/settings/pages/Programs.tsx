@@ -102,7 +102,7 @@ function Instruction({ value, onSave }: { value: string; onSave: (v: string) => 
     <input
       type="text"
       style={{ flex: 1 }}
-      maxLength={300}
+      maxLength={2000}
       value={text}
       placeholder="Own instruction, e.g. “use Du”, “no exclamation marks”"
       onChange={(e) => setText(e.target.value)}

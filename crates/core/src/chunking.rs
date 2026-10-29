@@ -135,6 +135,70 @@ pub fn join(parts: &[String]) -> String {
     })
 }
 
+/// What was recognized while the user was still speaking.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Parts {
+    pub texts: Vec<String>,
+    /// Where the tail begins, in samples of the recording.
+    pub cut_at: usize,
+    /// A part failed: the parts are worthless as a set, the whole recording goes instead.
+    pub failed: bool,
+    /// The language the first part was recognized in, kept for the rest.
+    pub language: Option<String>,
+    /// The engine the parts went to, for the history and statistics.
+    pub engine: String,
+}
+
+impl Parts {
+    /// Worth using for a recording of [total] samples: something recognized, nothing failed.
+    pub fn usable(&self, total: usize) -> bool {
+        !self.failed && self.cut_at > 0 && self.cut_at <= total && !self.texts.is_empty()
+    }
+
+    /// The whole dictation: the parts and the tail, each cleaned on its own - Whisper's
+    /// hallucinated credits are recognized only as a whole part, not inside the joined text.
+    pub fn with_tail(&self, tail: Option<&str>) -> String {
+        let mut all: Vec<String> = self.texts.iter().map(|t| crate::text::clean(t)).collect();
+        if let Some(t) = tail {
+            all.push(crate::text::clean(t));
+        }
+        join(&all)
+    }
+}
+
+/// Whisper names the language it detected ("german"); the next request wants the code.
+pub fn language_code(name: &str) -> Option<&'static str> {
+    const NAMES: &[(&str, &str)] = &[
+        ("english", "en"),
+        ("german", "de"),
+        ("french", "fr"),
+        ("spanish", "es"),
+        ("italian", "it"),
+        ("dutch", "nl"),
+        ("polish", "pl"),
+        ("turkish", "tr"),
+        ("portuguese", "pt"),
+        ("russian", "ru"),
+        ("ukrainian", "uk"),
+        ("czech", "cs"),
+        ("swedish", "sv"),
+        ("danish", "da"),
+        ("norwegian", "no"),
+        ("finnish", "fi"),
+        ("greek", "el"),
+        ("hungarian", "hu"),
+        ("romanian", "ro"),
+        ("croatian", "hr"),
+        ("serbian", "sr"),
+        ("arabic", "ar"),
+        ("japanese", "ja"),
+        ("chinese", "zh"),
+        ("korean", "ko"),
+    ];
+    let lower = name.trim().to_lowercase();
+    NAMES.iter().find(|(n, c)| *n == lower || *c == lower).map(|(_, c)| *c)
+}
+
 /// What the next chunk gets as its prompt: the user's words and the end of the text so far -
 /// Whisper's prompt holds about 224 tokens, and the end is what carries the sentence.
 pub fn prompt(vocabulary: &str, so_far: &[String]) -> String {
@@ -245,6 +309,26 @@ mod tests {
         let long = "ä".repeat(300);
         let p = prompt("", &[long]);
         assert_eq!(p.chars().count(), 200, "cut by characters, not bytes");
+    }
+
+    #[test]
+    fn parts_join_with_the_tail_each_cleaned() {
+        let parts = Parts { texts: vec![" Das ist".into(), "ein Test.".into()], cut_at: 100, ..Parts::default() };
+        assert!(parts.usable(200) && !parts.usable(50));
+        assert_eq!(parts.with_tail(Some(" und noch mehr.")), "Das ist ein Test. und noch mehr.");
+        // A credit Whisper invents on the quiet tail is dropped, not glued to the text.
+        assert_eq!(parts.with_tail(Some(" Untertitel der Amara.org-Community")), "Das ist ein Test.");
+        assert_eq!(parts.with_tail(None), "Das ist ein Test.");
+        assert!(!Parts { failed: true, ..parts.clone() }.usable(200));
+        assert!(!Parts { texts: vec![], ..parts }.usable(200));
+    }
+
+    #[test]
+    fn language_names_become_codes() {
+        assert_eq!(language_code("german"), Some("de"));
+        assert_eq!(language_code(" English "), Some("en"));
+        assert_eq!(language_code("de"), Some("de"));
+        assert_eq!(language_code("klingon"), None);
     }
 
     #[test]

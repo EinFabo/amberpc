@@ -24,7 +24,11 @@ export function SnippetsPage({ s, save }: PageProps) {
               className="btn primary"
               disabled={!trigger.trim() || !text.trim()}
               onClick={() => {
-                void save((x) => x.snippets.unshift({ trigger: trigger.trim(), text }));
+                // The same phrase again replaces the saved one, openly.
+                const same = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+                void save((x) => {
+                  x.snippets = [{ trigger: trigger.trim(), text }, ...x.snippets.filter((sn) => same(sn.trigger) !== same(trigger))];
+                });
                 setTrigger("");
                 setText("");
               }}
@@ -38,7 +42,7 @@ export function SnippetsPage({ s, save }: PageProps) {
         <Section title="Saved">
           {s.snippets.map((sn, i) => (
             <Editable
-              key={sn.trigger}
+              key={`${i}:${sn.trigger}`}
               snippet={sn}
               onSave={(next) => save((x) => (x.snippets[i] = next))}
               onRemove={() => save((x) => x.snippets.splice(i, 1))}

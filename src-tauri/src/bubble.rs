@@ -265,26 +265,16 @@ mod win {
         (pid != std::process::id()).then_some(fg.0 as isize)
     }
 
-    /// A window covering its whole monitor - a game, a video. The desktop's own windows
-    /// (Progman, WorkerW) cover it too and do not count.
-    pub fn is_fullscreen(h: isize) -> bool {
-        use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
-        use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
-        let mut class = [0u16; 64];
-        let n = unsafe { GetClassNameW(hwnd(h), &mut class) };
-        let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
-        if class == "Progman" || class == "WorkerW" {
-            return false;
-        }
-        let r = rect(h);
-        let Some(m) = (unsafe { info_full(MonitorFromWindow(hwnd(h), MONITOR_DEFAULTTONEAREST)) }) else { return false };
-        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
-    }
-
-    /// The whole monitor, taskbar included (rcMonitor, not the work area).
-    unsafe fn info_full(m: HMONITOR) -> Option<RECT> {
-        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-        GetMonitorInfoW(m, &mut info).as_bool().then_some(info.rcMonitor)
+    /// Something runs full screen - a game, a video, a presentation - as Windows itself judges
+    /// it when it holds back notifications. A maximized window does not count.
+    pub fn is_fullscreen(_h: isize) -> bool {
+        use windows::Win32::UI::Shell::{
+            SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+        };
+        matches!(
+            unsafe { SHQueryUserNotificationState() },
+            Ok(state) if state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE
+        )
     }
 
     pub fn make_unfocusable(h: isize) {

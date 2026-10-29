@@ -25,6 +25,12 @@ impl TranscribeOptions {
 
 pub trait Transcriber: Send + Sync {
     fn transcribe(&self, wav: &[u8], options: &TranscribeOptions) -> Result<String, SttError>;
+
+    /// The text and, where the engine says so, the language it detected (Whisper's name,
+    /// "german") - for keeping one language across the parts of a long dictation.
+    fn transcribe_detecting(&self, wav: &[u8], options: &TranscribeOptions) -> Result<(String, Option<String>), SttError> {
+        self.transcribe(wav, options).map(|t| (t, None))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,9 +158,19 @@ impl WhisperServerTranscriber {
 
 impl Transcriber for WhisperServerTranscriber {
     fn transcribe(&self, wav: &[u8], options: &TranscribeOptions) -> Result<String, SttError> {
+        self.request(wav, options, "json").map(|(text, _)| text)
+    }
+
+    fn transcribe_detecting(&self, wav: &[u8], options: &TranscribeOptions) -> Result<(String, Option<String>), SttError> {
+        self.request(wav, options, "verbose_json")
+    }
+}
+
+impl WhisperServerTranscriber {
+    fn request(&self, wav: &[u8], options: &TranscribeOptions, format: &str) -> Result<(String, Option<String>), SttError> {
         let mut form = multipart::Form::new()
             .part("file", wav_part(wav))
-            .text("response_format", "json")
+            .text("response_format", format.to_string())
             .text("temperature", "0.0")
             // As Amber for Android decodes (and measured its speed): no timestamp tokens.
             .text("no_timestamps", "true")
@@ -171,14 +187,23 @@ impl Transcriber for WhisperServerTranscriber {
             }
             full_window = ctx == 0;
         }
-        let result = read_text(self.http.post(format!("{}/inference", self.base_url)).multipart(form).send().map_err(network_error)?);
+        let resp = self.http.post(format!("{}/inference", self.base_url)).multipart(form).send().map_err(network_error)?;
+        let status = resp.status().as_u16();
+        let body = resp.text().map_err(network_error)?;
         if full_window {
             // whisper.cpp detects the language with the previous request's context; after a
             // full window that would cost the next short dictation a 30 s encoder pass.
             let (http, base) = (self.http.clone(), self.base_url.clone());
             std::thread::spawn(move || reset_context(&http, &base));
         }
-        result
+        if !(200..300).contains(&status) {
+            return Err(status_error(status, &body));
+        }
+        let text = parse_text(&body)?;
+        let language = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("language").and_then(|l| l.as_str()).map(str::to_string));
+        Ok((text, language))
     }
 }
 
@@ -428,6 +453,14 @@ mod tests {
         assert!(!first.contains("audio_ctx") && first.contains("name=\"no_timestamps\"\r\n\r\ntrue"));
         let reset = String::from_utf8_lossy(&rx.recv_timeout(Duration::from_secs(5)).unwrap().body).to_string();
         assert!(reset.contains("name=\"audio_ctx\"\r\n\r\n256") && reset.contains("name=\"language\"\r\n\r\nen"));
+    }
+
+    #[test]
+    fn the_detected_language_comes_along() {
+        let (url, rx) = serve(vec![json(200, r#"{"task":"transcribe","language":"german","text":" Hallo.","segments":[]}"#)]);
+        let (text, lang) = WhisperServerTranscriber::new(&url, None).transcribe_detecting(b"wav", &TranscribeOptions::default()).unwrap();
+        assert_eq!((text.as_str(), lang.as_deref()), (" Hallo.", Some("german")));
+        assert!(String::from_utf8_lossy(&rx.recv().unwrap().body).contains("verbose_json"));
     }
 
     #[test]

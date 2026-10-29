@@ -33,7 +33,7 @@ pub(crate) fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
     unsafe {
         let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
         let mut output = CRYPT_INTEGER_BLOB::default();
-        CryptProtectData(&input, windows::core::w!("Amber API keys"), None, None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut output)
+        CryptProtectData(&input, windows::core::w!("Amber"), None, None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut output)
             .map_err(|e| e.to_string())?;
         Ok(take_blob(output))
     }

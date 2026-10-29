@@ -22,14 +22,20 @@ fn normalize(text: &str) -> String {
     text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect::<Vec<_>>().join(" ")
 }
 
+/// Lowercase words without a leading "Snippet" / "Baustein" - for the dictation and the
+/// trigger alike, so a trigger saved as "Snippet Signatur" matches too.
+fn key(text: &str) -> String {
+    let words = normalize(text);
+    LEADS.iter().find_map(|lead| words.strip_prefix(lead).and_then(|r| r.strip_prefix(' ')).map(str::to_string)).unwrap_or(words)
+}
+
 /// The snippet the whole dictation names, if any.
 pub fn find<'a>(snippets: &'a [Snippet], dictation: &str) -> Option<&'a Snippet> {
-    let said = normalize(dictation);
-    let said = LEADS.iter().find_map(|lead| said.strip_prefix(lead).and_then(|r| r.strip_prefix(' '))).unwrap_or(&said);
-    if said.is_empty() {
+    let said = key(dictation);
+    if said.is_empty() || LEADS.contains(&said.as_str()) {
         return None;
     }
-    snippets.iter().find(|s| !s.text.trim().is_empty() && normalize(&s.trigger) == said)
+    snippets.iter().find(|s| !s.text.trim().is_empty() && key(&s.trigger) == said)
 }
 
 /// Keeps an edited list usable: triggers with words, no duplicates (the first wins).
@@ -38,7 +44,7 @@ pub fn sanitize(snippets: Vec<Snippet>) -> Vec<Snippet> {
     snippets
         .into_iter()
         .filter(|s| {
-            let key = normalize(&s.trigger);
+            let key = key(&s.trigger);
             !key.is_empty() && seen.insert(key)
         })
         .map(|mut s| {
@@ -66,6 +72,9 @@ mod tests {
         assert!(find(&all, "Schick mir bitte meine Adresse.").is_none());
         assert!(find(&all, "Snippet").is_none());
         assert!(find(&[snip("leer", "  ")], "leer").is_none(), "an empty text inserts nothing");
+        // A trigger saved with the lead word matches with or without it.
+        let led = vec![snip("Snippet Signatur", "Gruß")];
+        assert!(find(&led, "Snippet Signatur").is_some() && find(&led, "Signatur").is_some());
     }
 
     #[test]

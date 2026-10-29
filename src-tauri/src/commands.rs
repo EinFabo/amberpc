@@ -116,6 +116,7 @@ pub fn save_settings(app: AppHandle, core: State<Core>, settings: Settings) -> R
             let _ = app.state::<Core>().llm.ensure(&app);
         });
     }
+    core.memory.set_enabled(after.history);
     if before.history && !after.history {
         // Switched off: what was kept goes too.
         core.memory.clear_history();
