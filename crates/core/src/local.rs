@@ -287,15 +287,16 @@ pub fn install_runtime(zip_path: &Path, dest: &Path, rt: &Runtime) -> Result<(),
     result
 }
 
-/// What whisper-server's start-up output says about the GPU: `Some(true)` when it picked a
-/// GPU backend, `Some(false)` when it found none, `None` when it has not said yet.
+/// What whisper-server's start-up output says about the GPU: `Some(true)` when a CUDA device
+/// shows up at all (only a loaded GPU backend can list one, and weights placed on it are
+/// proof), `Some(false)` when it found none, `None` when it has not said yet.
 pub fn gpu_in_use<'a>(output: impl IntoIterator<Item = &'a str>) -> Option<bool> {
     for line in output {
         let l = line.to_ascii_lowercase();
         if l.contains("no gpu found") {
             return Some(false);
         }
-        if l.contains("whisper_backend_init_gpu: using") && !l.contains("using cpu") {
+        if l.contains("cuda0") || (l.contains("whisper_backend_init_gpu: using") && !l.contains("using cpu")) {
             return Some(true);
         }
     }
@@ -349,6 +350,15 @@ mod tests {
         let fallback = ["whisper_init_with_params_no_state: use gpu    = 1", "whisper_backend_init_gpu: no GPU found"];
         assert_eq!(gpu_in_use(fallback), Some(false));
         assert_eq!(gpu_in_use(["whisper_model_load: loading model"]), None);
+        // What b5454 printed on Fabi's RTX 3070 when the "using" line had not come yet: the
+        // weights on CUDA0 are proof enough.
+        let loaded = [
+            "whisper_backend_init_gpu: device 0: CUDA0 (type: 1)",
+            "whisper_model_load: n_langs       = 100",
+            "whisper_model_load:        CUDA0 total size =   573.45 MB",
+        ];
+        assert_eq!(gpu_in_use(loaded), Some(true));
+        assert_eq!(gpu_in_use(["whisper_model_load:        CUDA0 total size =   573.45 MB"]), Some(true));
     }
 
     #[test]

@@ -28,9 +28,15 @@ pub fn notify(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
 }
 
+/// Debug builds and release builds run straight from the build folder (`target\release`)
+/// must not point Windows' autostart at themselves - only the installed app registers.
+fn is_installed() -> bool {
+    !cfg!(debug_assertions)
+        && std::env::current_exe().map(|p| !p.to_string_lossy().to_lowercase().contains(r"\target\")).unwrap_or(false)
+}
+
 pub fn sync_autostart(app: &AppHandle, on: bool) {
-    // A debug build would register itself from the build folder.
-    if cfg!(debug_assertions) {
+    if !is_installed() {
         return;
     }
     let launcher = app.autolaunch();

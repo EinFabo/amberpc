@@ -111,14 +111,16 @@ impl Whisper {
                 let url = format!("http://127.0.0.1:{}", r.port);
                 crate::diag::info(format!("local engine ready: {} on {} in {} ms", model.label, rt.label, started.elapsed().as_millis()));
                 *running = Some(r);
-                let message = match (rt.id, self.gpu_in_use()) {
-                    ("cuda", Some(true)) | ("cpu", _) => format!("{} on {}", model.label, rt.label),
-                    ("cuda", _) => {
-                        // whisper.cpp falls back to the CPU without complaint; say it out loud.
-                        crate::diag::warn(format!("GPU not used, running on the CPU: {}", self.last_output()));
-                        format!("{} - running on the CPU: the GPU could not be used (update the NVIDIA driver?)", model.label)
+                let gpu = if rt.id == "cuda" { self.gpu_in_use() } else { None };
+                let message = if gpu == Some(false) {
+                    // whisper.cpp falls back to the CPU without complaint; say it out loud.
+                    crate::diag::warn(format!("GPU not used, running on the CPU: {}", self.last_output()));
+                    format!("{} - running on the CPU: the GPU could not be used (update the NVIDIA driver?)", model.label)
+                } else {
+                    if rt.id == "cuda" && gpu.is_none() {
+                        crate::diag::info("local engine did not report its backend");
                     }
-                    _ => format!("{} on {}", model.label, rt.label),
+                    format!("{} on {}", model.label, rt.label)
                 };
                 self.set_status(app, Status::of("ready", Some(message)));
                 Ok(url)
@@ -195,10 +197,10 @@ impl Whisper {
     /// The server prints its backend while loading, before it opens the port; the reader
     /// threads may lag a moment behind.
     fn gpu_in_use(&self) -> Option<bool> {
-        for _ in 0..20 {
+        for _ in 0..60 {
             let out = self.output.lock().unwrap();
             if let Some(answer) = local::gpu_in_use(out.iter().map(String::as_str)) {
-                if let Some(line) = out.iter().find(|l| l.contains("whisper_backend_init_gpu")) {
+                if let Some(line) = out.iter().find(|l| l.contains("CUDA0") || l.contains("no GPU found")) {
                     crate::diag::info(format!("local engine: {}", line.trim()));
                 }
                 return Some(answer);
