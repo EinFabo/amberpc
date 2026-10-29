@@ -7,3 +7,4 @@ src-tauri/gen
 *.password
 src-tauri/icons/android
 src-tauri/icons/ios
+shot*.png
