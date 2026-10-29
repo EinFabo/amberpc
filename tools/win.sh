@@ -8,8 +8,16 @@
 #   tools/win.sh build       tauri build -> NSIS installer
 #   tools/win.sh dev         tauri dev
 #   tools/win.sh <anything>  run it in the mirrored folder
+#
+# WIN_SRC=<dir> builds from another tree (the release script's clean export of a commit).
+# One build at a time: the mirror and target folder are shared, and two builds in them
+# delete each other's files.
 set -euo pipefail
-SRC="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="${WIN_SRC:-$(cd "$(dirname "$0")/.." && pwd)}"
+if [ -z "${AMBER_BUILD_LOCKED:-}" ]; then
+  exec 9>"${TMPDIR:-/tmp}/amberpc-build.lock"
+  flock -n 9 || { echo "waiting for another Amber build to finish..."; flock 9; }
+fi
 WIN_DIR='C:\Users\fabia\build\amberpc'
 DEST="/mnt/c/Users/fabia/build/amberpc"
 mkdir -p "$DEST"
