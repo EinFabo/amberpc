@@ -108,6 +108,18 @@ pub fn save_settings(app: AppHandle, core: State<Core>, settings: Settings) -> R
             }
         });
     }
+    if after.cleanup != before.cleanup {
+        let app = app.clone();
+        let wants = crate::llm::wants_local(&after);
+        std::thread::spawn(move || {
+            let core = app.state::<Core>();
+            if wants {
+                let _ = core.llm.ensure(&app);
+            } else {
+                core.llm.stop(&app);
+            }
+        });
+    }
     if after.phone != before.phone {
         // Stopping may wait for a phone dictation in progress.
         let app = app.clone();
@@ -214,6 +226,9 @@ pub struct LocalInfo {
     status: whisper::Status,
     downloads: Vec<String>,
     folder: String,
+    llm_runtimes: Vec<LocalItem>,
+    llm_models: Vec<LocalItem>,
+    llm_status: whisper::Status,
 }
 
 #[tauri::command]
@@ -234,6 +249,15 @@ pub fn local_info(core: State<Core>) -> LocalInfo {
         status: core.whisper.status(),
         downloads: core.downloads.lock().unwrap().keys().cloned().collect(),
         folder: layout.root.display().to_string(),
+        llm_runtimes: local::LLM_RUNTIMES
+            .iter()
+            .map(|r| LocalItem { id: r.id, label: r.label, note: r.note, size_mb: r.size_mb(), installed: layout.llm_runtime_installed(r), wants_gpu: r.id == "cuda" })
+            .collect(),
+        llm_models: local::LLM_MODELS
+            .iter()
+            .map(|m| LocalItem { id: m.id, label: m.label, note: m.note, size_mb: m.size_mb, installed: layout.llm_model_installed(m), wants_gpu: true })
+            .collect(),
+        llm_status: core.llm.status(),
     }
 }
 
@@ -259,10 +283,91 @@ struct DownloadEvent {
 pub enum Kind {
     Runtime,
     Model,
+    LlmRuntime,
+    LlmModel,
+}
+
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Runtime => "runtime",
+            Kind::Model => "model",
+            Kind::LlmRuntime => "llmRuntime",
+            Kind::LlmModel => "llmModel",
+        }
+    }
+    fn is_llm(self) -> bool {
+        matches!(self, Kind::LlmRuntime | Kind::LlmModel)
+    }
 }
 
 fn key_of(kind: Kind, id: &str) -> String {
-    format!("{}:{id}", if kind == Kind::Runtime { "runtime" } else { "model" })
+    format!("{}:{id}", kind.name())
+}
+
+/// One file to fetch: where from, its checksum, where to, and roughly how big.
+struct Fetch {
+    url: String,
+    sha256: &'static str,
+    file: std::path::PathBuf,
+    size: u64,
+}
+
+/// Unpacks runtime archives once all of them are verified.
+type Install = Box<dyn FnOnce(&AppHandle) -> Result<(), DownloadError> + Send>;
+
+fn plan(core: &Core, kind: Kind, id: &str) -> Result<(Vec<Fetch>, Option<Install>), String> {
+    let layout = core.paths.layout.clone();
+    let downloads = layout.root.join("downloads");
+    const MB: u64 = 1 << 20;
+    Ok(match kind {
+        Kind::Runtime => {
+            let rt = local::runtime(id).ok_or("Unknown runtime.")?;
+            let zip = downloads.join(format!("whisper-{}-{}.zip", rt.id, local::WHISPER_CPP_BUILD));
+            let fetch = Fetch { url: rt.url.into(), sha256: rt.sha256, file: zip.clone(), size: rt.size_mb as u64 * MB };
+            let install: Install = Box::new(move |app| {
+                // A runtime in use cannot be replaced while its server runs.
+                app.state::<Core>().whisper.stop_runtime(app, rt.id);
+                let r = local::install_runtime(&zip, &layout.runtime_dir(rt), rt);
+                let _ = std::fs::remove_file(&zip);
+                r
+            });
+            (vec![fetch], Some(install))
+        }
+        Kind::Model => {
+            let m = local::model(id).ok_or("Unknown model.")?;
+            (vec![Fetch { url: m.url(), sha256: m.sha256, file: layout.model_path(m), size: m.size_mb as u64 * MB }], None)
+        }
+        Kind::LlmRuntime => {
+            let rt = local::llm_runtime(id).ok_or("Unknown runtime.")?;
+            let fetches: Vec<Fetch> = rt
+                .archives
+                .iter()
+                .enumerate()
+                .map(|(i, a)| Fetch {
+                    url: a.url.into(),
+                    sha256: a.sha256,
+                    file: downloads.join(format!("llama-{}-{}-{i}.zip", rt.id, local::LLAMA_CPP_BUILD)),
+                    size: a.size_mb as u64 * MB,
+                })
+                .collect();
+            let zips: Vec<std::path::PathBuf> = fetches.iter().map(|f| f.file.clone()).collect();
+            let install: Install = Box::new(move |app| {
+                app.state::<Core>().llm.stop_runtime(app, rt.id);
+                let paths: Vec<&std::path::Path> = zips.iter().map(|z| z.as_path()).collect();
+                let r = local::install_llm_runtime(&paths, &layout.llm_runtime_dir(rt), rt);
+                for z in &zips {
+                    let _ = std::fs::remove_file(z);
+                }
+                r
+            });
+            (fetches, Some(install))
+        }
+        Kind::LlmModel => {
+            let m = local::llm_model(id).ok_or("Unknown model.")?;
+            (vec![Fetch { url: m.url.into(), sha256: m.sha256, file: layout.llm_model_path(m), size: m.size_mb as u64 * MB }], None)
+        }
+    })
 }
 
 /// Downloads a runtime or a model in the background; progress arrives as "download" events.
@@ -271,17 +376,7 @@ fn key_of(kind: Kind, id: &str) -> String {
 #[tauri::command]
 pub fn download(app: AppHandle, core: State<Core>, kind: Kind, id: String, select: bool) -> Result<(), String> {
     let key = key_of(kind, &id);
-    let (url, sha, dest, staging) = match kind {
-        Kind::Runtime => {
-            let rt = local::runtime(&id).ok_or("Unknown runtime.")?;
-            let zip = core.paths.layout.root.join("downloads").join(format!("whisper-{}-{}.zip", rt.id, local::WHISPER_CPP_BUILD));
-            (rt.url.to_string(), rt.sha256, core.paths.layout.runtime_dir(rt), Some((zip, rt)))
-        }
-        Kind::Model => {
-            let m = local::model(&id).ok_or("Unknown model.")?;
-            (m.url(), m.sha256, core.paths.layout.model_path(m), None)
-        }
-    };
+    let (fetches, install) = plan(&core, kind, &id)?;
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let mut downloads = core.downloads.lock().unwrap();
@@ -295,14 +390,27 @@ pub fn download(app: AppHandle, core: State<Core>, kind: Kind, id: String, selec
             let _ = app.emit("download", DownloadEvent { key: key.clone(), done, total, state, message });
         };
         crate::diag::info(format!("download {key} started"));
-        let file = staging.as_ref().map(|(zip, _)| zip.clone()).unwrap_or_else(|| dest.clone());
-        let mut result = local::download_verified(&url, sha, &file, &cancel, &mut |d, t| emit(d, t, "running", None));
+        // Several archives show as one bar over their combined size.
+        let combined: u64 = fetches.iter().map(|f| f.size).sum();
+        let single = fetches.len() == 1;
+        let mut offset = 0u64;
+        let mut result = Ok(());
+        for f in &fetches {
+            result = local::download_verified(&f.url, f.sha256, &f.file, &cancel, &mut |d, t| {
+                if single {
+                    emit(d, t, "running", None)
+                } else {
+                    emit(offset + d, Some(combined), "running", None)
+                }
+            });
+            if result.is_err() {
+                break;
+            }
+            offset += f.size;
+        }
         if result.is_ok() {
-            if let Some((zip, rt)) = &staging {
-                // A runtime in use cannot be replaced while its server runs.
-                app.state::<Core>().whisper.stop_runtime(&app, &id);
-                result = local::install_runtime(zip, &dest, rt);
-                let _ = std::fs::remove_file(zip);
+            if let Some(install) = install {
+                result = install(&app);
             }
         }
         app.state::<Core>().downloads.lock().unwrap().remove(&key);
@@ -315,12 +423,18 @@ pub fn download(app: AppHandle, core: State<Core>, kind: Kind, id: String, selec
                     let after = core.update_settings(|s| match kind {
                         Kind::Runtime => s.local.runtime = id.clone(),
                         Kind::Model => s.local.model = id.clone(),
+                        Kind::LlmRuntime => s.cleanup.local_runtime = id.clone(),
+                        Kind::LlmModel => s.cleanup.local_model = id.clone(),
                     });
                     let _ = app.emit("settings-changed", after);
                 }
                 // If this completed what the settings ask for, load it right away.
                 let s = core.settings();
-                if s.engine == EngineKind::Local && s.local.keep_loaded {
+                if kind.is_llm() {
+                    if crate::llm::wants_local(&s) {
+                        let _ = core.llm.ensure(&app);
+                    }
+                } else if s.engine == EngineKind::Local && s.local.keep_loaded {
                     let _ = core.whisper.ensure(&app);
                 }
             }
@@ -349,10 +463,14 @@ pub async fn remove_download(app: AppHandle, kind: Kind, id: String) -> Result<(
         match kind {
             Kind::Runtime => core.whisper.stop_runtime(&app, &id),
             Kind::Model => core.whisper.stop_model(&app, &id),
+            Kind::LlmRuntime => core.llm.stop_runtime(&app, &id),
+            Kind::LlmModel => core.llm.stop_model(&app, &id),
         }
         match kind {
             Kind::Runtime => std::fs::remove_dir_all(layout.runtime_dir(local::runtime(&id).ok_or("Unknown runtime.")?)),
             Kind::Model => std::fs::remove_file(layout.model_path(local::model(&id).ok_or("Unknown model.")?)),
+            Kind::LlmRuntime => std::fs::remove_dir_all(layout.llm_runtime_dir(local::llm_runtime(&id).ok_or("Unknown runtime.")?)),
+            Kind::LlmModel => std::fs::remove_file(layout.llm_model_path(local::llm_model(&id).ok_or("Unknown model.")?)),
         }
         .map_err(|e| format!("Could not delete: {e}"))
     })
@@ -446,4 +564,67 @@ pub async fn phone_new_key(app: AppHandle) -> Result<crate::phone::Info, String>
     crate::phone::new_key(&core)?;
     crate::diag::info("phone API: new key");
     Ok(crate::phone::info(&core))
+}
+
+/// Loads the cleanup model now instead of on the first dictation.
+#[tauri::command]
+pub fn start_llm(app: AppHandle) {
+    std::thread::spawn(move || {
+        let _ = app.state::<Core>().llm.ensure(&app);
+    });
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Preview {
+    /// The text after the fillers rule.
+    fillers: String,
+    /// After the model, if the smart cleanup is on and worked.
+    smart: Option<String>,
+    error: Option<String>,
+    ms: u64,
+}
+
+/// The settings page's "Try it": what the cleanup makes of a typed text.
+#[tauri::command]
+pub async fn cleanup_preview(app: AppHandle, text: String) -> Preview {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = app.state::<Core>().settings();
+        let fillers = if s.cleanup.fillers { amber_core::text::strip_fillers(&text) } else { text.clone() };
+        if !s.cleanup.smart {
+            return Preview { fillers, smart: None, error: None, ms: 0 };
+        }
+        let t0 = Instant::now();
+        let result = crate::llm::cleaner(&app, &s).and_then(|c| c.clean(&fillers).map_err(|e| e.message));
+        let ms = t0.elapsed().as_millis() as u64;
+        match result {
+            Ok(smart) => Preview { fillers, smart: Some(smart), error: None, ms },
+            Err(e) => Preview { fillers, smart: None, error: Some(e), ms },
+        }
+    })
+    .await
+    .unwrap_or(Preview { fillers: String::new(), smart: None, error: Some("Preview failed.".into()), ms: 0 })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatProvider {
+    id: &'static str,
+    name: &'static str,
+    models: Vec<ModelInfo>,
+    has_key: bool,
+}
+
+/// The chat models per provider for the cleanup page.
+#[tauri::command]
+pub fn chat_providers(core: State<Core>) -> Vec<ChatProvider> {
+    providers::ALL
+        .iter()
+        .map(|p| ChatProvider {
+            id: p.id,
+            name: p.name,
+            models: p.chat_models.iter().map(|m| ModelInfo { id: m.id, label: m.label, note: m.note }).collect(),
+            has_key: core.has_key(p.id),
+        })
+        .collect()
 }

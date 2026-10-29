@@ -9,12 +9,22 @@ pub struct SpeechModel {
     pub note: &'static str,
 }
 
+/// A chat model for the smart cleanup.
+pub struct ChatModel {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub note: &'static str,
+    /// Extra request fields as JSON, e.g. how hard a reasoning model may think.
+    pub extra: Option<&'static str>,
+}
+
 pub struct Provider {
     pub id: &'static str,
     pub name: &'static str,
     /// Empty for an own server.
     pub base_url: &'static str,
     pub models: &'static [SpeechModel],
+    pub chat_models: &'static [ChatModel],
     /// Where to get a key.
     pub key_url: &'static str,
     pub needs_key: bool,
@@ -23,6 +33,10 @@ pub struct Provider {
 impl Provider {
     pub fn default_model(&self) -> &'static str {
         self.models.first().map(|m| m.id).unwrap_or("whisper-1")
+    }
+
+    pub fn chat_model(&self, id: &str) -> Option<&'static ChatModel> {
+        self.chat_models.iter().find(|m| m.id == id)
     }
 }
 
@@ -34,6 +48,12 @@ pub const GROQ: Provider = Provider {
     models: &[
         SpeechModel { id: "whisper-large-v3-turbo", label: "Whisper large-v3-turbo", note: "fast · $0.04 per hour" },
         SpeechModel { id: "whisper-large-v3", label: "Whisper large-v3", note: "a little more accurate · $0.11 per hour" },
+    ],
+    chat_models: &[
+        // Reasons first; "low" keeps that short and cheap.
+        ChatModel { id: "openai/gpt-oss-20b", label: "gpt-oss 20B", note: "cheap and quick", extra: Some(r#"{"reasoning_effort":"low"}"#) },
+        ChatModel { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", note: "no reasoning, steady", extra: None },
+        ChatModel { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B", note: "fastest, simplest", extra: None },
     ],
     key_url: "https://console.groq.com/keys",
     needs_key: true,
@@ -48,6 +68,12 @@ pub const OPENAI: Provider = Provider {
         SpeechModel { id: "gpt-4o-transcribe", label: "GPT-4o Transcribe", note: "most accurate · $0.006 per minute" },
         SpeechModel { id: "whisper-1", label: "Whisper", note: "$0.006 per minute" },
     ],
+    // Not the GPT-5 family: reasoning models refuse temperature 0.
+    chat_models: &[
+        ChatModel { id: "gpt-4.1-nano", label: "GPT-4.1 nano", note: "cheapest", extra: None },
+        ChatModel { id: "gpt-4o-mini", label: "GPT-4o mini", note: "cheap", extra: None },
+        ChatModel { id: "gpt-4.1-mini", label: "GPT-4.1 mini", note: "smarter", extra: None },
+    ],
     key_url: "https://platform.openai.com/api-keys",
     needs_key: true,
 };
@@ -57,6 +83,7 @@ pub const CUSTOM: Provider = Provider {
     name: "Own server",
     base_url: "",
     models: &[],
+    chat_models: &[],
     key_url: "",
     needs_key: false,
 };
@@ -128,6 +155,14 @@ mod tests {
             }
         }
         assert_eq!(GROQ.default_model(), "whisper-large-v3-turbo");
+        for p in ALL {
+            for m in p.chat_models {
+                if let Some(extra) = m.extra {
+                    assert!(serde_json::from_str::<serde_json::Value>(extra).unwrap().is_object(), "{}", m.id);
+                }
+            }
+        }
+        assert!(GROQ.chat_model("openai/gpt-oss-20b").unwrap().extra.is_some());
         assert_eq!(CUSTOM.default_model(), "whisper-1");
     }
 

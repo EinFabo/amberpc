@@ -190,7 +190,7 @@ pub fn status_error(status: u16, body: &str) -> SttError {
     }
 }
 
-fn network_error(e: reqwest::Error) -> SttError {
+pub(crate) fn network_error(e: reqwest::Error) -> SttError {
     if e.is_timeout() {
         SttError::new(ErrorKind::Timeout, "The engine took too long to answer.", e.to_string())
     } else if e.is_connect() {

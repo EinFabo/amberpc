@@ -34,6 +34,8 @@ pub struct Core {
     /// The settings window's microphone meter.
     pub mic_test: Mutex<Option<(Recorder, Instant)>>,
     pub phone: crate::phone::PhoneApi,
+    /// The smart cleanup's local model.
+    pub llm: crate::llm::Llm,
     epoch: Instant,
 }
 
@@ -57,6 +59,7 @@ impl Core {
             downloads: Mutex::new(HashMap::new()),
             mic_test: Mutex::new(None),
             phone: crate::phone::PhoneApi::default(),
+            llm: crate::llm::Llm::default(),
             epoch: Instant::now(),
         }
     }

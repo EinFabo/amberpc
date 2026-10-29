@@ -124,6 +124,107 @@ pub const MODELS: [Model; 5] = [
     },
 ];
 
+/// One download of a package.
+pub struct Archive {
+    pub url: &'static str,
+    pub sha256: &'static str,
+    pub size_mb: u32,
+}
+
+/// llama.cpp's prebuilt Windows binaries for the smart cleanup, release b11981 (2026-10-29).
+pub const LLAMA_CPP_BUILD: &str = "b11981";
+pub const LLM_SERVER_EXE: &str = "llama-server.exe";
+
+pub struct LlmRuntime {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub note: &'static str,
+    pub archives: &'static [Archive],
+    pub required: &'static [&'static str],
+}
+
+impl LlmRuntime {
+    pub fn size_mb(&self) -> u32 {
+        self.archives.iter().map(|a| a.size_mb).sum()
+    }
+    /// What `.installed` holds: every archive's checksum, so a changed package reinstalls.
+    pub fn marker(&self) -> String {
+        self.archives.iter().map(|a| a.sha256).collect::<Vec<_>>().join(",")
+    }
+}
+
+pub const LLM_RUNTIMES: [LlmRuntime; 2] = [
+    LlmRuntime {
+        id: "cpu",
+        label: "CPU",
+        note: "slow - a few seconds per sentence on a fast CPU",
+        archives: &[Archive {
+            url: "https://github.com/ggml-org/llama.cpp/releases/download/b11981/llama-b11981-bin-win-cpu-x64.zip",
+            sha256: "626dd4136947fb9cdf755523fefcad3d414858a4beca06ce424fcd3ee0a948c9",
+            size_mb: 23,
+        }],
+        required: &["llama-server.exe", "llama-server-impl.dll", "llama.dll", "ggml.dll", "ggml-base.dll"],
+    },
+    LlmRuntime {
+        id: "cuda",
+        label: "NVIDIA GPU (CUDA)",
+        note: "well under a second per sentence",
+        // The CUDA build and, separately, the CUDA runtime with cuBLAS it needs to load.
+        archives: &[
+            Archive {
+                url: "https://github.com/ggml-org/llama.cpp/releases/download/b11981/llama-b11981-bin-win-cuda-12.4-x64.zip",
+                sha256: "dcb0f6be103aec6c55a365be71a678c0cf620f9c85bf9a16de78090edd44ddbb",
+                size_mb: 267,
+            },
+            Archive {
+                url: "https://github.com/ggml-org/llama.cpp/releases/download/b11981/cudart-llama-bin-win-cuda-12.4-x64.zip",
+                sha256: "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+                size_mb: 374,
+            },
+        ],
+        required: &[
+            "llama-server.exe",
+            "llama-server-impl.dll",
+            "llama.dll",
+            "ggml.dll",
+            "ggml-base.dll",
+            "ggml-cuda.dll",
+            "cublas64_12.dll",
+            "cublasLt64_12.dll",
+            "cudart64_12.dll",
+        ],
+    },
+];
+
+pub struct LlmModel {
+    pub id: &'static str,
+    pub file: &'static str,
+    pub label: &'static str,
+    pub note: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+    pub size_mb: u32,
+}
+
+/// Apache 2.0, no thinking mode (no time spent before the answer), good at German.
+pub const LLM_MODELS: [LlmModel; 1] = [LlmModel {
+    id: "qwen3-4b-instruct-2507-q4km",
+    file: "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    label: "Qwen3 4B Instruct",
+    note: "good German, about 3 GB of graphics memory",
+    url: "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/a06e946bb6b655725eafa393f4a9745d460374c9/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    sha256: "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
+    size_mb: 2_382,
+}];
+
+pub fn llm_runtime(id: &str) -> Option<&'static LlmRuntime> {
+    LLM_RUNTIMES.iter().find(|r| r.id == id)
+}
+
+pub fn llm_model(id: &str) -> Option<&'static LlmModel> {
+    LLM_MODELS.iter().find(|m| m.id == id)
+}
+
 pub fn runtime(id: &str) -> Option<&'static Runtime> {
     RUNTIMES.iter().find(|r| r.id == id)
 }
@@ -170,6 +271,23 @@ impl Layout {
     }
     pub fn model_installed(&self, m: &Model) -> bool {
         fs::metadata(self.model_path(m)).map(|md| md.len() > 1_000_000).unwrap_or(false)
+    }
+    pub fn llm_runtime_dir(&self, rt: &LlmRuntime) -> PathBuf {
+        self.root.join("llm").join("runtime").join(rt.id)
+    }
+    pub fn llm_server_exe(&self, rt: &LlmRuntime) -> PathBuf {
+        self.llm_runtime_dir(rt).join(LLM_SERVER_EXE)
+    }
+    pub fn llm_model_path(&self, m: &LlmModel) -> PathBuf {
+        self.root.join("llm").join("models").join(m.file)
+    }
+    pub fn llm_runtime_installed(&self, rt: &LlmRuntime) -> bool {
+        let dir = self.llm_runtime_dir(rt);
+        fs::read_to_string(dir.join(".installed")).map(|v| v.trim() == rt.marker()).unwrap_or(false)
+            && rt.required.iter().all(|f| dir.join(f).is_file())
+    }
+    pub fn llm_model_installed(&self, m: &LlmModel) -> bool {
+        fs::metadata(self.llm_model_path(m)).map(|md| md.len() > 1_000_000).unwrap_or(false)
     }
 }
 
@@ -251,32 +369,45 @@ pub fn download_verified(
 }
 
 /// Unpacks what the app needs from a whisper.cpp release zip - the server and every DLL,
-/// none of the test programs - flat into [dest]. Extracts into a sibling folder first and
-/// swaps it in, so a failed unpack never leaves half a runtime behind.
+/// none of the test programs - flat into [dest].
 pub fn install_runtime(zip_path: &Path, dest: &Path, rt: &Runtime) -> Result<(), DownloadError> {
+    install_archives(&[zip_path], dest, SERVER_EXE, rt.required, rt.sha256)
+}
+
+/// The same for llama.cpp, whose CUDA build comes in two archives.
+pub fn install_llm_runtime(zips: &[&Path], dest: &Path, rt: &LlmRuntime) -> Result<(), DownloadError> {
+    install_archives(zips, dest, LLM_SERVER_EXE, rt.required, &rt.marker())
+}
+
+/// Extracts [server_exe] and every DLL from [zips] flat into a sibling folder of [dest],
+/// checks that every [required] file is there, writes [marker] last and only then swaps the
+/// folder in - a failed unpack never leaves half a runtime behind.
+fn install_archives(zips: &[&Path], dest: &Path, server_exe: &str, required: &[&str], marker: &str) -> Result<(), DownloadError> {
     let staging = dest.with_extension("new");
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging)?;
     let result = (|| {
-        let mut archive = zip::ZipArchive::new(File::open(zip_path)?).map_err(|e| DownloadError::Package(e.to_string()))?;
         let mut found: Vec<String> = Vec::new();
-        for i in 0..archive.len() {
-            let mut entry = archive.by_index(i).map_err(|e| DownloadError::Package(e.to_string()))?;
-            // enclosed_name refuses "..", absolute paths and the like.
-            let Some(path) = entry.enclosed_name() else { continue };
-            let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue };
-            if !entry.is_file() || !wanted(&name) {
-                continue;
+        for zip_path in zips {
+            let mut archive = zip::ZipArchive::new(File::open(zip_path)?).map_err(|e| DownloadError::Package(e.to_string()))?;
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i).map_err(|e| DownloadError::Package(e.to_string()))?;
+                // enclosed_name refuses "..", absolute paths and the like.
+                let Some(path) = entry.enclosed_name() else { continue };
+                let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue };
+                if !entry.is_file() || !wanted(&name, server_exe) {
+                    continue;
+                }
+                found.push(name.to_ascii_lowercase());
+                let mut out = File::create(staging.join(&name))?;
+                std::io::copy(&mut entry, &mut out)?;
             }
-            found.push(name.to_ascii_lowercase());
-            let mut out = File::create(staging.join(&name))?;
-            std::io::copy(&mut entry, &mut out)?;
         }
-        let missing: Vec<&str> = rt.required.iter().copied().filter(|f| !found.contains(&f.to_ascii_lowercase())).collect();
+        let missing: Vec<&str> = required.iter().copied().filter(|f| !found.contains(&f.to_ascii_lowercase())).collect();
         if !missing.is_empty() {
             return Err(DownloadError::Package(format!("missing {}", missing.join(", "))));
         }
-        fs::write(staging.join(".installed"), rt.sha256)?;
+        fs::write(staging.join(".installed"), marker)?;
         let _ = fs::remove_dir_all(dest);
         fs::rename(&staging, dest)?;
         Ok(())
@@ -303,9 +434,9 @@ pub fn gpu_in_use<'a>(output: impl IntoIterator<Item = &'a str>) -> Option<bool>
     None
 }
 
-fn wanted(name: &str) -> bool {
+fn wanted(name: &str, server_exe: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower == SERVER_EXE || lower.ends_with(".dll")
+    lower == server_exe || lower.ends_with(".dll")
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -341,6 +472,45 @@ mod tests {
         assert!(runtime(rt).is_some() && model(m).is_some());
         let (rt, m) = recommend(false);
         assert!(runtime(rt).is_some() && !model(m).unwrap().wants_gpu);
+    }
+
+    #[test]
+    fn llm_catalog_is_consistent() {
+        for r in &LLM_RUNTIMES {
+            assert!(!r.archives.is_empty());
+            for a in r.archives {
+                assert_eq!(a.sha256.len(), 64);
+                assert!(a.url.starts_with("https://github.com/ggml-org/llama.cpp/releases/download/b11981/"));
+            }
+            assert!(r.required.contains(&LLM_SERVER_EXE));
+            assert_eq!(llm_runtime(r.id).map(|x| x.id), Some(r.id));
+        }
+        let cuda = llm_runtime("cuda").unwrap();
+        assert!(cuda.required.contains(&"cublas64_12.dll"));
+        assert_eq!(cuda.size_mb(), 641);
+        for m in &LLM_MODELS {
+            assert_eq!(m.sha256.len(), 64);
+            assert!(m.url.ends_with(m.file) && m.url.contains("/resolve/a06e946b"));
+        }
+    }
+
+    #[test]
+    fn llm_runtime_from_two_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let cuda = llm_runtime("cuda").unwrap();
+        let main_zip = dir.path().join("llama.zip");
+        let cudart_zip = dir.path().join("cudart.zip");
+        let main: Vec<(&str, &[u8])> =
+            cuda.required.iter().filter(|f| !f.starts_with("cu")).map(|f| (*f, b"x" as &[u8])).chain([("llama-cli.exe", b"no" as &[u8])]).collect();
+        make_zip(&main_zip, &main);
+        let layout = Layout { root: dir.path().join("data") };
+        let dest = layout.llm_runtime_dir(cuda);
+        // The main archive alone lacks cuBLAS.
+        assert!(install_llm_runtime(&[main_zip.as_path()], &dest, cuda).unwrap_err().to_string().contains("cublas"));
+        make_zip(&cudart_zip, &[("cublas64_12.dll", b"x"), ("cublasLt64_12.dll", b"x"), ("cudart64_12.dll", b"x")]);
+        install_llm_runtime(&[main_zip.as_path(), cudart_zip.as_path()], &dest, cuda).unwrap();
+        assert!(layout.llm_runtime_installed(cuda));
+        assert!(!dest.join("llama-cli.exe").exists());
     }
 
     #[test]

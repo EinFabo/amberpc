@@ -43,6 +43,52 @@ pub fn clean(raw: &str) -> String {
     }
 }
 
+/// Hesitation sounds, German and English - only unambiguous ones. Not "um" and "eh": in
+/// German they are words ("um vier Uhr", "das ist eh egal").
+const FILLERS: [&str; 12] = ["äh", "ähm", "ähh", "öh", "öhm", "hm", "hmm", "mhm", "mh", "uh", "uhm", "erm"];
+
+/// Drops hesitation sounds with the commas around them, and gives the sentence its capital
+/// back when it started with one. Cannot invent anything, costs nothing, always on.
+pub fn strip_fillers(text: &str) -> String {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let mut kept: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut dropped_first = false;
+    for (i, token) in tokens.iter().enumerate() {
+        let core = token.trim_matches(|c: char| ",.;:!?-\"'…".contains(c)).to_lowercase();
+        if !FILLERS.contains(&core.as_str()) {
+            kept.push(token.to_string());
+            continue;
+        }
+        if i == 0 {
+            dropped_first = true;
+        }
+        // "ist, ähm, gut" -> "ist gut": the comma before a filler belonged to it.
+        if token.ends_with(',') {
+            if let Some(last) = kept.last_mut() {
+                if last.ends_with(',') {
+                    last.pop();
+                }
+            }
+        }
+        // A filler that ended the sentence hands its full stop to the word before it.
+        if let Some(end) = token.chars().last().filter(|c| ".!?".contains(*c)) {
+            if let Some(last) = kept.last_mut() {
+                let last_trimmed = last.trim_end_matches(',').to_string();
+                *last = format!("{last_trimmed}{end}");
+            }
+        }
+    }
+    let mut out = kept.join(" ");
+    if dropped_first {
+        out = out.trim_start_matches(|c: char| c == ',' || c.is_whitespace()).to_string();
+        let mut chars = out.chars();
+        if let Some(first) = chars.next().filter(|c| c.is_lowercase()) {
+            out = first.to_uppercase().chain(chars).collect();
+        }
+    }
+    out
+}
+
 /// The text exactly as it is inserted.
 pub fn compose(cleaned: &str, trailing_space: bool) -> String {
     if trailing_space && !cleaned.is_empty() {
@@ -77,6 +123,22 @@ mod tests {
         assert_eq!(clean("Thanks for watching."), "");
         // A real sentence that merely contains the words stays.
         assert_eq!(clean("Ich sage danke fürs Zuschauen, Leute, und jetzt zum Thema."), "Ich sage danke fürs Zuschauen, Leute, und jetzt zum Thema.");
+    }
+
+    #[test]
+    fn fillers_go_words_stay() {
+        assert_eq!(strip_fillers("Ähm, lass uns um drei treffen."), "Lass uns um drei treffen.");
+        assert_eq!(strip_fillers("Das ist, ähm, gut."), "Das ist gut.");
+        assert_eq!(strip_fillers("Das ist äh gut"), "Das ist gut");
+        assert_eq!(strip_fillers("Wir sehen uns morgen, hm."), "Wir sehen uns morgen.");
+        assert_eq!(strip_fillers("Hmm."), "");
+        // The comma before a filler counts as the filler's; for "So, uh," that costs a real
+        // one. The smart cleanup puts punctuation right afterwards.
+        assert_eq!(strip_fillers("So, uh, I think we can, erm, go."), "So I think we can go.");
+        // German words that look like English fillers stay.
+        assert_eq!(strip_fillers("Um vier Uhr ist das eh egal."), "Um vier Uhr ist das eh egal.");
+        // Only whole words.
+        assert_eq!(strip_fillers("Das Ähm-Problem und die Hummel."), "Das Ähm-Problem und die Hummel.");
     }
 
     #[test]
