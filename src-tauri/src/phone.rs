@@ -41,11 +41,21 @@ pub fn sync(app: &AppHandle) {
     }
     key(&core);
 
-    let (k, e) = (app.clone(), app.clone());
+    let (k, e, t) = (app.clone(), app.clone(), app.clone());
     let hooks = Hooks {
         // Read per request, so a new key takes effect at once.
         key: Arc::new(move || k.state::<Core>().key(KEY_ID).unwrap_or_default()),
         engine: Arc::new(move || crate::dictation::transcriber(&e, &e.state::<Core>().settings())),
+        // Like the PC's own dictations: fillers out, the model's tidy-up if it is on and
+        // ready - never a wait for a model that is still loading.
+        tidy: Arc::new(move |text| {
+            let settings = t.state::<Core>().settings();
+            if settings.phone.cleanup {
+                crate::llm::tidy(&t, &settings, &text).0
+            } else {
+                text
+            }
+        }),
         log: Arc::new(|m: String| crate::diag::info(m)),
     };
     match api::start(SocketAddr::from(([0, 0, 0, 0], settings.port)), hooks) {

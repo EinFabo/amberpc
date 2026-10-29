@@ -191,11 +191,13 @@ pub struct PhoneSettings {
     /// Off until the user turns it on: it opens a port to the home network.
     pub enabled: bool,
     pub port: u16,
+    /// The PC's cleanup (fillers, smart cleanup) also for what the phone dictates.
+    pub cleanup: bool,
 }
 
 impl Default for PhoneSettings {
     fn default() -> Self {
-        PhoneSettings { enabled: false, port: crate::api::DEFAULT_PORT }
+        PhoneSettings { enabled: false, port: crate::api::DEFAULT_PORT, cleanup: true }
     }
 }
 

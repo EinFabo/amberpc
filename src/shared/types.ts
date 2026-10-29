@@ -33,7 +33,7 @@ export interface Settings {
   autoUpdate: boolean;
   logText: boolean;
   onboarded: boolean;
-  phone: { enabled: boolean; port: number };
+  phone: { enabled: boolean; port: number; cleanup: boolean };
   cleanup: {
     fillers: boolean;
     smart: boolean;
