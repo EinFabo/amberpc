@@ -120,6 +120,12 @@ impl Whisper {
         match self.spawn(layout, rt, model, &key) {
             Ok(r) => {
                 let served = r.served();
+                if model.short_context {
+                    // Leaves the server at a short context for its first language detection
+                    // (whisper.cpp detects with the previous request's context), and warms the
+                    // GPU up.
+                    amber_core::engine::WhisperServerTranscriber::new(&served.url, Some(model.context_slack)).reset_context();
+                }
                 crate::diag::info(format!("local engine ready: {} on {} in {} ms", model.label, rt.label, started.elapsed().as_millis()));
                 *running = Some(r);
                 let gpu = if rt.id == "cuda" { self.gpu_in_use() } else { None };

@@ -95,8 +95,8 @@ function LocalEngine({ s, save, toast }: PageProps) {
       </Section>
       <Section title="Model">
         {info.models
-          // A replaced model shows only while it is still on disk.
-          .filter((m) => !m.replaced || m.installed)
+          // A replaced model shows only while it is still on disk - or still selected.
+          .filter((m) => !m.replaced || m.installed || m.id === s.local.model)
           .map((m) => (
             <DownloadItem
               key={m.id}
