@@ -1,6 +1,6 @@
 // Small building blocks for the settings pages.
 
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 export function Section({ title, children }: { title?: string; children: ReactNode }) {
   return (
@@ -62,4 +62,27 @@ export function mb(bytes: number) {
 
 export function size(mbs: number) {
   return mbs >= 1000 ? `${(mbs / 1024).toFixed(1)} GB` : `${mbs} MB`;
+}
+
+/** A range input that follows the hand at once but saves only once it rests. */
+export function Slider({ value, min, max, step = 1, onCommit }: { value: number; min: number; max: number; step?: number; onCommit: (v: number) => void }) {
+  const [local, setLocal] = useState(value);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => setLocal(value), [value]);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  return (
+    <input
+      type="range"
+      min={min}
+      max={max}
+      step={step}
+      value={local}
+      onChange={(e) => {
+        const v = Number(e.target.value);
+        setLocal(v);
+        window.clearTimeout(timer.current);
+        timer.current = window.setTimeout(() => onCommit(v), 200);
+      }}
+    />
+  );
 }

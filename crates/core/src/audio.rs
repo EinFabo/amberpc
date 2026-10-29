@@ -22,36 +22,83 @@ pub fn downmix(interleaved: &[f32], channels: u16) -> Vec<f32> {
 
 /// Windowed-sinc resampling. Downsampling filters below the new Nyquist frequency first, so
 /// a 48 kHz microphone does not fold its high end into the speech band.
+///
+/// Polyphase: for a rational ratio L/M (48 kHz -> 16 kHz is 1/3, 44.1 kHz is 160/441) every
+/// output sample falls on one of L fractional positions, so the filter taps are computed once
+/// per position instead of once per sample.
 pub fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == to || input.is_empty() || from == 0 || to == 0 {
         return input.to_vec();
     }
+    let g = gcd(from as u64, to as u64);
+    let (l, m) = (to as u64 / g, from as u64 / g);
     let ratio = to as f64 / from as f64;
     // Cutoff relative to the input's Nyquist frequency, a little below the band edge.
     let cutoff = ratio.min(1.0) * 0.94;
-    let half = (16.0 / cutoff).ceil() as isize;
+    let half = (16.0 / cutoff).ceil() as i64;
+    let taps = (2 * half) as usize;
     let out_len = (input.len() as f64 * ratio).floor() as usize;
-    let last = input.len() as isize - 1;
+    let last = input.len() as i64 - 1;
+
+    let weight = |x: f64| cutoff * sinc(cutoff * x) * blackman(x / half as f64);
+    // Odd device rates would need an enormous table; those few compute the taps directly.
+    let table: Option<Vec<f32>> = (l <= 4096).then(|| {
+        let mut t = Vec::with_capacity(l as usize * taps);
+        for phase in 0..l {
+            let frac = phase as f64 / l as f64;
+            for j in 0..taps as i64 {
+                t.push(weight(frac + (half - 1 - j) as f64) as f32);
+            }
+        }
+        t
+    });
 
     let mut out = Vec::with_capacity(out_len);
-    for n in 0..out_len {
-        let t = n as f64 / ratio;
-        let center = t.floor() as isize;
+    for n in 0..out_len as u64 {
+        let pos = n * m;
+        let center = (pos / l) as i64;
+        let phase = pos % l;
+        let first = center - half + 1;
         let mut acc = 0.0f64;
         let mut weights = 0.0f64;
-        for k in (center - half + 1)..=(center + half) {
-            if k < 0 || k > last {
-                continue;
+        match &table {
+            Some(t) => {
+                let row = &t[phase as usize * taps..(phase as usize + 1) * taps];
+                if first >= 0 && first + taps as i64 - 1 <= last {
+                    let window = &input[first as usize..first as usize + taps];
+                    for (x, w) in window.iter().zip(row) {
+                        acc += (*x * *w) as f64;
+                        weights += *w as f64;
+                    }
+                } else {
+                    for (j, w) in row.iter().enumerate() {
+                        let k = first + j as i64;
+                        if (0..=last).contains(&k) {
+                            acc += (input[k as usize] * *w) as f64;
+                            weights += *w as f64;
+                        }
+                    }
+                }
             }
-            let x = t - k as f64;
-            let w = cutoff * sinc(cutoff * x) * blackman(x / half as f64);
-            acc += input[k as usize] as f64 * w;
-            weights += w;
+            None => {
+                let t = pos as f64 / l as f64;
+                for k in first..=(center + half) {
+                    if (0..=last).contains(&k) {
+                        let w = weight(t - k as f64);
+                        acc += input[k as usize] as f64 * w;
+                        weights += w;
+                    }
+                }
+            }
         }
         // Normalizing by the weights keeps DC gain at 1, also at the edges.
         out.push(if weights.abs() > 1e-12 { (acc / weights) as f32 } else { 0.0 });
     }
     out
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
 }
 
 fn sinc(x: f64) -> f64 {
@@ -206,6 +253,26 @@ mod tests {
         // 12 kHz cannot exist at 16 kHz; it must not fold down to 4 kHz.
         let out = resample(&sine(12_000.0, 48_000, 500, 0.5), 48_000, 16_000);
         assert!(rms(&out[1_000..7_000]) < 0.01, "alias leaked: {}", rms(&out[1_000..7_000]));
+    }
+
+    #[test]
+    fn resample_odd_rates() {
+        // 44.1 kHz goes through a 160-phase table, 44 056 Hz through the direct path.
+        for from in [44_100, 44_056, 22_050] {
+            let out = resample(&sine(1_000.0, from, 500, 0.5), from, 16_000);
+            assert!(out.len().abs_diff(8_000) <= 1, "{from}: {}", out.len());
+            assert!((rms(&out[1_000..7_000]) - 0.354).abs() < 0.01, "{from}: {}", rms(&out[1_000..7_000]));
+        }
+    }
+
+    #[test]
+    fn resample_is_fast_enough() {
+        // Two minutes at 48 kHz must not keep the user waiting (debug build: generous bound).
+        let input = sine(300.0, 48_000, 120_000, 0.3);
+        let t0 = std::time::Instant::now();
+        let out = resample(&input, 48_000, 16_000);
+        assert_eq!(out.len(), 1_920_000);
+        assert!(t0.elapsed().as_secs_f64() < 8.0, "{:?}", t0.elapsed());
     }
 
     #[test]

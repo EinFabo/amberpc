@@ -56,7 +56,16 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     if let Ok(hwnd) = window.hwnd() {
         win::make_unfocusable(hwnd.0 as isize);
     }
-    let _ = window;
+    // Moved onto a monitor with another scale, the window is resized after the move; placing
+    // it again keeps it from hanging over the right edge.
+    let handle = app.clone();
+    window.on_window_event(move |e| {
+        if let tauri::WindowEvent::ScaleFactorChanged { .. } = e {
+            if !DRAGGING.load(Ordering::SeqCst) {
+                place(&handle);
+            }
+        }
+    });
     place(app);
     sync_visibility(app, false);
     Ok(())
@@ -125,20 +134,25 @@ pub fn start_drag(app: &AppHandle) {
             win::follow_mouse(hwnd);
             let (monitor, edge, y) = win::snap(hwnd);
             let core = app.state::<Core>();
-            core.update_settings(|s| {
+            let after = core.update_settings(|s| {
                 s.bubble.monitor = monitor;
                 s.bubble.edge = edge;
                 s.bubble.y = y;
             });
-            place(&app);
             DRAGGING.store(false, Ordering::SeqCst);
+            place(&app);
+            // The settings window holds a copy; without this its next save would put the
+            // bubble back where it was.
+            let _ = app.emit("settings-changed", after);
         });
     }
     #[cfg(not(windows))]
     let _ = app;
 }
 
-/// Opens (or brings forward) the settings window, optionally on a page.
+/// Opens (or brings forward) the settings window, optionally on a page. A new window is
+/// built on its own thread: building it inside a command or an event handler (tray menu,
+/// second start) deadlocks WebView2 on Windows.
 pub fn open_settings(app: &AppHandle, page: Option<&str>) {
     if let Some(w) = app.get_webview_window(SETTINGS) {
         let _ = w.unminimize();
@@ -153,6 +167,20 @@ pub fn open_settings(app: &AppHandle, page: Option<&str>) {
         Some(p) => format!("settings.html?page={p}"),
         None => "settings.html".into(),
     };
+    let app = app.clone();
+    std::thread::spawn(move || build_settings(&app, url));
+}
+
+fn build_settings(app: &AppHandle, url: String) {
+    static BUILDING: AtomicBool = AtomicBool::new(false);
+    // Two quick clicks would otherwise race to create the same window.
+    if BUILDING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if app.get_webview_window(SETTINGS).is_some() {
+        BUILDING.store(false, Ordering::SeqCst);
+        return;
+    }
     let built = WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App(url.into()))
         .title("Amber")
         .inner_size(900.0, 660.0)
@@ -173,6 +201,7 @@ pub fn open_settings(app: &AppHandle, page: Option<&str>) {
         }
         Err(e) => crate::diag::error(format!("settings window failed: {e}")),
     }
+    BUILDING.store(false, Ordering::SeqCst);
 }
 
 #[cfg(windows)]
@@ -185,9 +214,9 @@ mod win {
         MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
     };
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+        GetCursorPos, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, SM_SWAPBUTTON, SetWindowPos, ShowWindow, GWL_EXSTYLE,
         HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WS_EX_APPWINDOW,
         WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
@@ -290,10 +319,13 @@ mod win {
         let start = cursor();
         let r = rect(h);
         let (dx, dy) = (start.x - r.left, start.y - r.top);
+        // GetAsyncKeyState reads physical buttons; for left-handed mice the primary one is the
+        // physical right button.
+        let primary = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
         // The button was already down when the drag began; a missed release ends it anyway
         // after a minute.
         for _ in 0..6_000 {
-            if (unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16 & 0x8000) == 0 {
+            if (unsafe { GetAsyncKeyState(primary.0 as i32) } as u16 & 0x8000) == 0 {
                 break;
             }
             let p = cursor();

@@ -66,8 +66,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     if settings.engine == EngineKind::Local && settings.local.keep_loaded {
         let app = app.clone();
         std::thread::spawn(move || {
-            let core = app.state::<Core>();
-            let _ = core.whisper.ensure(&app, &core.paths.layout, &core.settings().local);
+            let _ = app.state::<Core>().whisper.ensure(&app);
         });
     }
 

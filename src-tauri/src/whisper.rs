@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use amber_core::local::{self, Layout};
-use amber_core::settings::LocalSettings;
 use serde::Serialize;
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -66,12 +65,32 @@ impl Whisper {
 
     /// Returns the address of a server running the configured model, starting (or
     /// restarting) it first if needed. Blocks while the model loads.
-    pub fn ensure(&self, app: &tauri::AppHandle, layout: &Layout, settings: &LocalSettings) -> Result<String, String> {
-        let key = Key { runtime: settings.runtime.clone(), model: settings.model.clone(), threads: settings.threads };
+    ///
+    /// Reads the settings only once it holds the lock, so two quick changes in a row end with
+    /// the newer one loaded. A running server is only replaced once its successor is fully
+    /// downloaded - choosing a model that is still on its way keeps the old one working.
+    pub fn ensure(&self, app: &tauri::AppHandle) -> Result<String, String> {
+        use tauri::Manager;
         let mut running = self.running.lock().unwrap();
+        let core = app.state::<crate::state::Core>();
+        let layout = &core.paths.layout;
+        let settings = core.settings().local;
+        let key = Key { runtime: settings.runtime.clone(), model: settings.model.clone(), threads: settings.threads };
+
+        let rt = local::runtime(&key.runtime).ok_or("Unknown runtime.")?;
+        let model = local::model(&key.model).ok_or("Unknown model.")?;
+        let missing = if !layout.runtime_installed(rt) {
+            Some(format!("The local engine ({}) is not installed yet - download it in the settings.", rt.label))
+        } else if !layout.model_installed(model) {
+            Some(format!("The model {} is not downloaded yet - get it in the settings.", model.label))
+        } else {
+            None
+        };
+
         if let Some(r) = running.as_mut() {
             let alive = matches!(r.child.try_wait(), Ok(None));
-            if alive && r.key == key {
+            if alive && (r.key == key || missing.is_some()) {
+                // The configured one, or the previous one while the new one is not there yet.
                 return Ok(format!("http://127.0.0.1:{}", r.port));
             }
             if !alive {
@@ -80,16 +99,7 @@ impl Whisper {
             stop_child(r);
             *running = None;
         }
-
-        let rt = local::runtime(&key.runtime).ok_or("Unknown runtime.")?;
-        let model = local::model(&key.model).ok_or("Unknown model.")?;
-        if !layout.runtime_installed(rt) {
-            let msg = format!("The local engine ({}) is not installed yet - download it in the settings.", rt.label);
-            self.set_status(app, Status::of("failed", Some(msg.clone())));
-            return Err(msg);
-        }
-        if !layout.model_installed(model) {
-            let msg = format!("The model {} is not downloaded yet - get it in the settings.", model.label);
+        if let Some(msg) = missing {
             self.set_status(app, Status::of("failed", Some(msg.clone())));
             return Err(msg);
         }
@@ -101,7 +111,16 @@ impl Whisper {
                 let url = format!("http://127.0.0.1:{}", r.port);
                 crate::diag::info(format!("local engine ready: {} on {} in {} ms", model.label, rt.label, started.elapsed().as_millis()));
                 *running = Some(r);
-                self.set_status(app, Status::of("ready", Some(format!("{} on {}", model.label, rt.label))));
+                let message = match (rt.id, self.gpu_in_use()) {
+                    ("cuda", Some(true)) | ("cpu", _) => format!("{} on {}", model.label, rt.label),
+                    ("cuda", _) => {
+                        // whisper.cpp falls back to the CPU without complaint; say it out loud.
+                        crate::diag::warn(format!("GPU not used, running on the CPU: {}", self.last_output()));
+                        format!("{} - running on the CPU: the GPU could not be used (update the NVIDIA driver?)", model.label)
+                    }
+                    _ => format!("{} on {}", model.label, rt.label),
+                };
+                self.set_status(app, Status::of("ready", Some(message)));
                 Ok(url)
             }
             Err(e) => {
@@ -116,9 +135,12 @@ impl Whisper {
         let port = free_port().map_err(|e| format!("No free port: {e}"))?;
         let threads = if key.threads == 0 { default_threads() } else { key.threads };
         let mut cmd = Command::new(layout.server_exe(rt));
-        cmd.current_dir(layout.runtime_dir(rt))
-            .arg("--model")
-            .arg(layout.model_path(model))
+        // whisper-server reads its arguments in the system code page; a user folder with other
+        // characters would arrive mangled. So it runs in the models folder and gets only the
+        // file name - its DLLs still load from the exe's own folder.
+        let model_path = layout.model_path(model);
+        cmd.current_dir(model_path.parent().unwrap_or(&layout.root))
+            .args(["--model", model.file])
             .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--threads", &threads.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -143,7 +165,7 @@ impl Whisper {
             std::thread::spawn(move || {
                 for line in BufReader::new(pipe).lines().map_while(Result::ok) {
                     let mut out = out.lock().unwrap();
-                    if out.len() >= 40 {
+                    if out.len() >= 200 {
                         out.pop_front();
                     }
                     out.push_back(line);
@@ -170,6 +192,23 @@ impl Whisper {
         }
     }
 
+    /// The server prints its backend while loading, before it opens the port; the reader
+    /// threads may lag a moment behind.
+    fn gpu_in_use(&self) -> Option<bool> {
+        for _ in 0..20 {
+            let out = self.output.lock().unwrap();
+            if let Some(answer) = local::gpu_in_use(out.iter().map(String::as_str)) {
+                if let Some(line) = out.iter().find(|l| l.contains("whisper_backend_init_gpu")) {
+                    crate::diag::info(format!("local engine: {}", line.trim()));
+                }
+                return Some(answer);
+            }
+            drop(out);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
+    }
+
     fn last_output(&self) -> String {
         self.output.lock().unwrap().iter().rev().take(6).rev().cloned().collect::<Vec<_>>().join(" | ")
     }
@@ -193,6 +232,23 @@ impl Whisper {
             crate::diag::info("local engine stopped");
         }
         self.set_status(app, Status::of("stopped", None));
+    }
+
+    /// Stops the server only if it runs from [runtime] - before that runtime's files are
+    /// replaced or deleted.
+    pub fn stop_runtime(&self, app: &tauri::AppHandle, runtime: &str) {
+        let uses = self.running.lock().unwrap().as_ref().is_some_and(|r| r.key.runtime == runtime);
+        if uses {
+            self.stop(app);
+        }
+    }
+
+    /// Stops the server only if it has [model] loaded - before the file is deleted.
+    pub fn stop_model(&self, app: &tauri::AppHandle, model: &str) {
+        let uses = self.running.lock().unwrap().as_ref().is_some_and(|r| r.key.model == model);
+        if uses {
+            self.stop(app);
+        }
     }
 
     /// The server died and the next dictation will restart it - or it is running fine.
