@@ -93,7 +93,8 @@ fn fail(app: &AppHandle, session: u64, message: String, notify: bool) {
     let core = app.state::<Core>();
     {
         let mut inner = core.dictation.inner.lock().unwrap();
-        if inner.session != session {
+        // A dictation cancelled or replaced meanwhile fails silently.
+        if inner.session != session || !matches!(inner.phase, Phase::Recording | Phase::Transcribing | Phase::Inserting) {
             return;
         }
         inner.phase = Phase::Error;
@@ -155,9 +156,13 @@ pub fn start(app: &AppHandle) {
             return;
         }
 
-        // The local model loads while the user speaks, not after.
+        // The local model loads while the user speaks, not after - on its own thread, so the
+        // time limit below counts from the start of the recording.
         if settings.engine == EngineKind::Local && !core.whisper.is_ready() {
-            let _ = core.whisper.ensure(&app, &core.paths.layout, &core.settings().local);
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let _ = app.state::<Core>().whisper.ensure(&app);
+            });
         }
 
         // Hard limit: a forgotten toggle does not record forever.
@@ -306,7 +311,7 @@ pub fn transcriber(app: &AppHandle, settings: &Settings) -> Result<Box<dyn Trans
     let core = app.state::<Core>();
     match settings.engine {
         EngineKind::Local => {
-            let url = core.whisper.ensure(app, &core.paths.layout, &settings.local)?;
+            let url = core.whisper.ensure(app)?;
             Ok(Box::new(WhisperServerTranscriber::new(&url)))
         }
         EngineKind::Server => {

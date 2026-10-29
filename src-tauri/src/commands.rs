@@ -104,7 +104,7 @@ pub fn save_settings(app: AppHandle, core: State<Core>, settings: Settings) -> R
             if after2.engine == EngineKind::Server {
                 core.whisper.stop(&app2);
             } else if after2.local.keep_loaded {
-                let _ = core.whisper.ensure(&app2, &core.paths.layout, &after2.local);
+                let _ = core.whisper.ensure(&app2);
             }
         });
     }
@@ -268,7 +268,7 @@ pub fn download(app: AppHandle, core: State<Core>, kind: Kind, id: String) -> Re
         Kind::Runtime => {
             let rt = local::runtime(&id).ok_or("Unknown runtime.")?;
             let zip = core.paths.layout.root.join("downloads").join(format!("whisper-{}-{}.zip", rt.id, local::WHISPER_CPP_BUILD));
-            (rt.url.to_string(), rt.sha256, core.paths.layout.runtime_dir(rt), Some(zip))
+            (rt.url.to_string(), rt.sha256, core.paths.layout.runtime_dir(rt), Some((zip, rt)))
         }
         Kind::Model => {
             let m = local::model(&id).ok_or("Unknown model.")?;
@@ -288,13 +288,13 @@ pub fn download(app: AppHandle, core: State<Core>, kind: Kind, id: String) -> Re
             let _ = app.emit("download", DownloadEvent { key: key.clone(), done, total, state, message });
         };
         crate::diag::info(format!("download {key} started"));
-        let file = staging.clone().unwrap_or_else(|| dest.clone());
+        let file = staging.as_ref().map(|(zip, _)| zip.clone()).unwrap_or_else(|| dest.clone());
         let mut result = local::download_verified(&url, sha, &file, &cancel, &mut |d, t| emit(d, t, "running", None));
         if result.is_ok() {
-            if let Some(zip) = &staging {
+            if let Some((zip, rt)) = &staging {
                 // A runtime in use cannot be replaced while its server runs.
-                app.state::<Core>().whisper.stop(&app);
-                result = local::install_runtime(zip, &dest, sha);
+                app.state::<Core>().whisper.stop_runtime(&app, &id);
+                result = local::install_runtime(zip, &dest, rt);
                 let _ = std::fs::remove_file(zip);
             }
         }
@@ -307,7 +307,7 @@ pub fn download(app: AppHandle, core: State<Core>, kind: Kind, id: String) -> Re
                 let core = app.state::<Core>();
                 let s = core.settings();
                 if s.engine == EngineKind::Local && s.local.keep_loaded {
-                    let _ = core.whisper.ensure(&app, &core.paths.layout, &s.local);
+                    let _ = core.whisper.ensure(&app);
                 }
             }
             Err(DownloadError::Cancelled) => emit(0, None, "cancelled", None),
@@ -332,13 +332,9 @@ pub async fn remove_download(app: AppHandle, kind: Kind, id: String) -> Result<(
     tauri::async_runtime::spawn_blocking(move || {
         let core = app.state::<Core>();
         let layout = &core.paths.layout;
-        let s = core.settings();
-        let in_use = match kind {
-            Kind::Runtime => s.local.runtime == id,
-            Kind::Model => s.local.model == id,
-        };
-        if in_use {
-            core.whisper.stop(&app);
+        match kind {
+            Kind::Runtime => core.whisper.stop_runtime(&app, &id),
+            Kind::Model => core.whisper.stop_model(&app, &id),
         }
         match kind {
             Kind::Runtime => std::fs::remove_dir_all(layout.runtime_dir(local::runtime(&id).ok_or("Unknown runtime.")?)),
@@ -355,7 +351,7 @@ pub async fn remove_download(app: AppHandle, kind: Kind, id: String) -> Result<(
 pub fn start_local(app: AppHandle) {
     std::thread::spawn(move || {
         let core = app.state::<Core>();
-        let _ = core.whisper.ensure(&app, &core.paths.layout, &core.settings().local);
+        let _ = core.whisper.ensure(&app);
     });
 }
 
@@ -384,8 +380,9 @@ pub fn bubble_config(core: State<Core>) -> BubbleConfig {
     bubble::config(&core)
 }
 
+/// Async: creating a window inside a synchronous command deadlocks WebView2 on Windows.
 #[tauri::command]
-pub fn open_settings(app: AppHandle, page: Option<String>) {
+pub async fn open_settings(app: AppHandle, page: Option<String>) {
     bubble::open_settings(&app, page.as_deref());
 }
 

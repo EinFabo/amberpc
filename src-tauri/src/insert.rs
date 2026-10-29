@@ -147,8 +147,13 @@ mod win {
     }
 
     /// Windows drops synthetic input aimed at a process running with more rights (UIPI) and
-    /// reports success anyway. Checked up front instead.
+    /// reports success anyway. Checked up front instead. An elevated process does not let a
+    /// normal one read its token, so "cannot tell" counts as blocked as long as Amber itself
+    /// is not elevated.
     fn blocked_by_uipi(target: Option<Target>) -> bool {
+        if elevated(unsafe { GetCurrentProcess() }) == Some(true) {
+            return false;
+        }
         let hwnd = match target {
             Some(t) => HWND(t.hwnd as *mut _),
             None => unsafe { GetForegroundWindow() },
@@ -163,8 +168,7 @@ mod win {
         unsafe {
             let _ = CloseHandle(process);
         }
-        let ours = elevated(unsafe { GetCurrentProcess() });
-        theirs == Some(true) && ours == Some(false)
+        theirs != Some(false)
     }
 
     fn set_clipboard(cb: &mut arboard::Clipboard, text: &str) -> Result<(), String> {
@@ -203,7 +207,7 @@ mod win {
             let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
             set_clipboard(&mut cb, text)?;
             return Ok(Outcome::OnClipboard(
-                "This window runs as administrator, so Windows blocks typing into it. The text is on the clipboard - press Ctrl+V.".into(),
+                "Windows blocks typing into this window (it probably runs as administrator). The text is on the clipboard - press Ctrl+V.".into(),
             ));
         }
         if let Some(t) = target {

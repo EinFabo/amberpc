@@ -19,6 +19,9 @@ pub struct Runtime {
     pub url: &'static str,
     pub sha256: &'static str,
     pub size_mb: u32,
+    /// Files the runtime cannot work without. An archive missing one is refused - whisper.cpp
+    /// would otherwise start anyway and quietly fall back to the CPU.
+    pub required: &'static [&'static str],
 }
 
 pub const RUNTIMES: [Runtime; 2] = [
@@ -29,14 +32,27 @@ pub const RUNTIMES: [Runtime; 2] = [
         url: "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip",
         sha256: "6ba69e3482d7826214f90a6a9c84ca07782aec1e1d0c6a7c30c994fd5d816ccb",
         size_mb: 8,
+        required: &["whisper-server.exe", "whisper.dll", "ggml.dll", "ggml-base.dll"],
     },
     Runtime {
         id: "cuda",
         label: "NVIDIA GPU (CUDA)",
-        note: "many times faster - GTX 900 or newer with a current driver",
-        url: "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-win-cuda-11.8.0-x64.zip",
-        sha256: "e81c86c542be6e3d7b7245392d4e1c52ab6e5c61dbe38721754bc0ab59d4d027",
-        size_mb: 272,
+        note: "many times faster - GTX 900 or newer, driver 551 or newer",
+        // The CUDA 12.4 package, not 11.8: only this one ships cuBLAS, which ggml-cuda.dll
+        // needs to load at all.
+        url: "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-win-cuda-12.4.0-x64.zip",
+        sha256: "afef0b881c500958921c3f5523b50e59ee2ec9b6f5cbd25b324c51ed308a957a",
+        size_mb: 653,
+        required: &[
+            "whisper-server.exe",
+            "whisper.dll",
+            "ggml.dll",
+            "ggml-base.dll",
+            "ggml-cuda.dll",
+            "cublas64_12.dll",
+            "cublasLt64_12.dll",
+            "cudart64_12.dll",
+        ],
     },
 ];
 
@@ -51,9 +67,12 @@ pub struct Model {
     pub wants_gpu: bool,
 }
 
+/// The models repository at a fixed commit, so a file can never change under its checksum.
+pub const MODELS_COMMIT: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
+
 impl Model {
     pub fn url(&self) -> String {
-        format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}", self.file)
+        format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/{MODELS_COMMIT}/{}", self.file)
     }
 }
 
@@ -145,8 +164,9 @@ impl Layout {
     /// A runtime counts as installed once its marker is there - written last, after every
     /// file was extracted.
     pub fn runtime_installed(&self, rt: &Runtime) -> bool {
-        fs::read_to_string(self.runtime_dir(rt).join(".installed")).map(|v| v.trim() == rt.sha256).unwrap_or(false)
-            && self.server_exe(rt).is_file()
+        let dir = self.runtime_dir(rt);
+        fs::read_to_string(dir.join(".installed")).map(|v| v.trim() == rt.sha256).unwrap_or(false)
+            && rt.required.iter().all(|f| dir.join(f).is_file())
     }
     pub fn model_installed(&self, m: &Model) -> bool {
         fs::metadata(self.model_path(m)).map(|md| md.len() > 1_000_000).unwrap_or(false)
@@ -181,9 +201,11 @@ pub fn download_verified(
     }
     let part = dest.with_extension("part");
     let result = (|| {
+        // In the blocking client the timeout applies to every single read: a connection that
+        // stalls ends the download (and lets a cancel through) instead of hanging forever.
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(15))
-            .timeout(None)
+            .timeout(Duration::from_secs(45))
             .user_agent(concat!("AmberPC/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| DownloadError::Network(e.to_string()))?;
@@ -231,13 +253,13 @@ pub fn download_verified(
 /// Unpacks what the app needs from a whisper.cpp release zip - the server and every DLL,
 /// none of the test programs - flat into [dest]. Extracts into a sibling folder first and
 /// swaps it in, so a failed unpack never leaves half a runtime behind.
-pub fn install_runtime(zip_path: &Path, dest: &Path, sha256: &str) -> Result<(), DownloadError> {
+pub fn install_runtime(zip_path: &Path, dest: &Path, rt: &Runtime) -> Result<(), DownloadError> {
     let staging = dest.with_extension("new");
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging)?;
     let result = (|| {
         let mut archive = zip::ZipArchive::new(File::open(zip_path)?).map_err(|e| DownloadError::Package(e.to_string()))?;
-        let mut found_server = false;
+        let mut found: Vec<String> = Vec::new();
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).map_err(|e| DownloadError::Package(e.to_string()))?;
             // enclosed_name refuses "..", absolute paths and the like.
@@ -246,14 +268,15 @@ pub fn install_runtime(zip_path: &Path, dest: &Path, sha256: &str) -> Result<(),
             if !entry.is_file() || !wanted(&name) {
                 continue;
             }
-            found_server |= name.eq_ignore_ascii_case(SERVER_EXE);
+            found.push(name.to_ascii_lowercase());
             let mut out = File::create(staging.join(&name))?;
             std::io::copy(&mut entry, &mut out)?;
         }
-        if !found_server {
-            return Err(DownloadError::Package(format!("{SERVER_EXE} missing")));
+        let missing: Vec<&str> = rt.required.iter().copied().filter(|f| !found.contains(&f.to_ascii_lowercase())).collect();
+        if !missing.is_empty() {
+            return Err(DownloadError::Package(format!("missing {}", missing.join(", "))));
         }
-        fs::write(staging.join(".installed"), sha256)?;
+        fs::write(staging.join(".installed"), rt.sha256)?;
         let _ = fs::remove_dir_all(dest);
         fs::rename(&staging, dest)?;
         Ok(())
@@ -262,6 +285,21 @@ pub fn install_runtime(zip_path: &Path, dest: &Path, sha256: &str) -> Result<(),
         let _ = fs::remove_dir_all(&staging);
     }
     result
+}
+
+/// What whisper-server's start-up output says about the GPU: `Some(true)` when it picked a
+/// GPU backend, `Some(false)` when it found none, `None` when it has not said yet.
+pub fn gpu_in_use<'a>(output: impl IntoIterator<Item = &'a str>) -> Option<bool> {
+    for line in output {
+        let l = line.to_ascii_lowercase();
+        if l.contains("no gpu found") {
+            return Some(false);
+        }
+        if l.contains("whisper_backend_init_gpu: using") && !l.contains("using cpu") {
+            return Some(true);
+        }
+    }
+    None
 }
 
 fn wanted(name: &str) -> bool {
@@ -302,6 +340,15 @@ mod tests {
         assert!(runtime(rt).is_some() && model(m).is_some());
         let (rt, m) = recommend(false);
         assert!(runtime(rt).is_some() && !model(m).unwrap().wants_gpu);
+    }
+
+    #[test]
+    fn reads_the_backend_from_the_server_output() {
+        let gpu = ["whisper_init_with_params_no_state: use gpu    = 1", "whisper_backend_init_gpu: using CUDA0 backend"];
+        assert_eq!(gpu_in_use(gpu), Some(true));
+        let fallback = ["whisper_init_with_params_no_state: use gpu    = 1", "whisper_backend_init_gpu: no GPU found"];
+        assert_eq!(gpu_in_use(fallback), Some(false));
+        assert_eq!(gpu_in_use(["whisper_model_load: loading model"]), None);
     }
 
     #[test]
@@ -352,6 +399,8 @@ mod tests {
         make_zip(&zip_path, &[
             ("Release/whisper-server.exe", b"exe"),
             ("Release/whisper.dll", b"dll"),
+            ("Release/ggml.dll", b"dll"),
+            ("Release/ggml-base.dll", b"dll"),
             ("Release/ggml-cpu-alderlake.dll", b"dll"),
             ("Release/test-vad.exe", b"no"),
             ("../evil.dll", b"no"),
@@ -359,12 +408,38 @@ mod tests {
         let layout = Layout { root: dir.path().join("data") };
         let rt = &RUNTIMES[0];
         assert!(!layout.runtime_installed(rt));
-        install_runtime(&zip_path, &layout.runtime_dir(rt), rt.sha256).unwrap();
+        install_runtime(&zip_path, &layout.runtime_dir(rt), rt).unwrap();
         assert!(layout.runtime_installed(rt));
         let mut names: Vec<_> = fs::read_dir(layout.runtime_dir(rt)).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
         names.sort();
-        assert_eq!(names, [".installed", "ggml-cpu-alderlake.dll", "whisper-server.exe", "whisper.dll"]);
+        assert_eq!(names, [".installed", "ggml-base.dll", "ggml-cpu-alderlake.dll", "ggml.dll", "whisper-server.exe", "whisper.dll"]);
+        // A required file gone afterwards (antivirus, manual cleanup) means not installed.
+        fs::remove_file(layout.runtime_dir(rt).join("ggml.dll")).unwrap();
+        assert!(!layout.runtime_installed(rt));
         assert!(!dir.path().join("evil.dll").exists() && !dir.path().join("data/runtime/evil.dll").exists());
+    }
+
+    #[test]
+    fn cuda_runtime_without_cublas_is_refused() {
+        // whisper.cpp's CUDA 11.8 package shipped ggml-cuda.dll without the cuBLAS it links to:
+        // Windows then fails to load the GPU backend and whisper.cpp silently runs on the CPU.
+        let cuda = runtime("cuda").unwrap();
+        assert!(cuda.required.iter().any(|f| f.starts_with("cublas64_")));
+        assert!(cuda.required.iter().any(|f| f.starts_with("cublasLt64_")));
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("rt.zip");
+        let present: Vec<(String, &[u8])> = cuda
+            .required
+            .iter()
+            .filter(|f| !f.starts_with("cublas"))
+            .map(|f| (format!("Release/{f}"), b"x" as &[u8]))
+            .collect();
+        let entries: Vec<(&str, &[u8])> = present.iter().map(|(n, d)| (n.as_str(), *d)).collect();
+        make_zip(&zip_path, &entries);
+        let dest = dir.path().join("runtime/cuda");
+        let err = install_runtime(&zip_path, &dest, cuda).unwrap_err();
+        assert!(err.to_string().contains("cublas"), "{err}");
+        assert!(!dest.exists());
     }
 
     #[test]
@@ -373,7 +448,7 @@ mod tests {
         let zip_path = dir.path().join("rt.zip");
         make_zip(&zip_path, &[("Release/whisper.dll", b"dll")]);
         let dest = dir.path().join("runtime/cpu");
-        assert!(matches!(install_runtime(&zip_path, &dest, "x"), Err(DownloadError::Package(_))));
+        assert!(matches!(install_runtime(&zip_path, &dest, &RUNTIMES[0]), Err(DownloadError::Package(_))));
         assert!(!dest.exists() && !dest.with_extension("new").exists());
     }
 }
