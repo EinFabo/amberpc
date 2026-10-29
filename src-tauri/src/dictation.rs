@@ -458,16 +458,25 @@ impl ChunkJob {
                     };
                     let language = parts.language.clone().unwrap_or_else(|| settings.language.clone());
                     let options = TranscribeOptions::new(&language, &chunking::prompt(&settings.vocabulary, &parts.texts));
+                    // Asked for its language only until it is known.
+                    let detect = settings.language == "auto" && parts.language.is_none();
                     let result = transcriber(&app, &settings).and_then(|p| {
                         parts.engine = p.label.clone();
-                        p.transcriber.transcribe_detecting(&part.wav, &options).map_err(|e| e.message)
+                        let r = if detect {
+                            p.transcriber.transcribe_detecting(&part.wav, &options)
+                        } else {
+                            p.transcriber.transcribe(&part.wav, &options).map(|t| (t, None))
+                        };
+                        r.map_err(|e| e.message)
                     });
                     match result {
                         Ok((text, detected)) => {
-                            if settings.language == "auto" && parts.language.is_none() {
+                            if detect {
                                 parts.language = detected.as_deref().and_then(chunking::language_code).map(str::to_string);
                             }
-                            parts.texts.push(text);
+                            // Cleaned right away: the next part's prompt must not carry
+                            // Whisper's "[Musik]" or invented credits.
+                            parts.texts.push(text::clean(&text));
                             parts.cut_at = cut.end;
                         }
                         Err(e) => {

@@ -175,6 +175,11 @@ impl WhisperServerTranscriber {
             // As Amber for Android decodes (and measured its speed): no timestamp tokens.
             .text("no_timestamps", "true")
             .text("language", options.language.clone().unwrap_or_else(|| "auto".into()));
+        if format == "verbose_json" {
+            // Only the detected language is wanted; the probabilities for every language cost
+            // another encoder pass.
+            form = form.text("no_language_probabilities", "true");
+        }
         if let Some(prompt) = &options.prompt {
             form = form.text("prompt", prompt.clone());
         }
@@ -460,7 +465,8 @@ mod tests {
         let (url, rx) = serve(vec![json(200, r#"{"task":"transcribe","language":"german","text":" Hallo.","segments":[]}"#)]);
         let (text, lang) = WhisperServerTranscriber::new(&url, None).transcribe_detecting(b"wav", &TranscribeOptions::default()).unwrap();
         assert_eq!((text.as_str(), lang.as_deref()), (" Hallo.", Some("german")));
-        assert!(String::from_utf8_lossy(&rx.recv().unwrap().body).contains("verbose_json"));
+        let body = String::from_utf8_lossy(&rx.recv().unwrap().body).to_string();
+        assert!(body.contains("verbose_json") && body.contains("name=\"no_language_probabilities\"\r\n\r\ntrue"));
     }
 
     #[test]

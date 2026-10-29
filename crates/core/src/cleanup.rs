@@ -184,7 +184,10 @@ impl ChatCleaner {
             return Err(fail("The cleanup was cut off; kept the original.", &format!("finish_reason={finish:?}")));
         }
         let content = choice.pointer("/message/content").and_then(Value::as_str).unwrap_or("");
-        let cleaned = unwrap(content);
+        // The answer comes trimmed; a spoken line break at either end goes back on.
+        let lead: String = text.chars().take_while(|c| *c == '\n').collect();
+        let trail: String = text.chars().rev().take_while(|c| *c == '\n').collect();
+        let cleaned = format!("{lead}{}{trail}", unwrap(content));
         if !plausible(text, &cleaned, ask.style) {
             return Err(fail(
                 "The cleanup changed too much; kept the original.",
@@ -229,6 +232,13 @@ mod tests {
         assert!(system.contains("chat message"), "the program's style");
         assert!(system.contains("duze alle") && system.contains("Fabi, Tauri"), "instruction and vocabulary");
         assert_eq!(body["messages"][1]["content"], "<dictation>\nlass uns um drei uhr treffen nee stopp um vier uhr\n</dictation>");
+    }
+
+    #[test]
+    fn line_breaks_at_the_ends_survive() {
+        let (url, _rx) = serve(vec![reply("Liebe Grüße", "stop")]);
+        let c = ChatCleaner::new(&url, "", "m", None);
+        assert_eq!(c.clean("\nliebe grüße\n", &Ask::default()).unwrap(), "\nLiebe Grüße\n");
     }
 
     #[test]

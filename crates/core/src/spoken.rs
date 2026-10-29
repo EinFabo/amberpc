@@ -51,7 +51,9 @@ const NOUN_BEFORE: &[&str] = &[
     "um", "von", "nach", "zum", "bis", "im", "am", "vom", "zu", "guter", "guten", "wichtiger", "wichtigen", "wichtigste", "wichtigsten",
     "letzter", "letzten", "nächster", "nächsten", "erster", "ersten", "zweiter", "zweiten", "dritter", "dritten", "springende",
     "springenden", "kritischer", "kritischen", "schwacher", "schwachen", "starker", "starken", "entscheidende", "entscheidenden",
-    "toter", "toten", "neuer", "neuen", "a", "an", "the", "this", "that",
+    "toter", "toten", "neuer", "neuen", "meinem", "deinem", "seinem", "ihrem", "unserem", "eurem", "dieser", "dieses", "jeder",
+    "jedem", "anderer", "anderen", "weiterer", "weiteren", "interessanter", "interessanten", "zentraler", "zentralen",
+    "wesentlicher", "wesentlichen", "einzelnen", "gemeinsamen", "a", "an", "the", "this", "that", "your", "my",
 ];
 
 /// Number words, for "drei Komma fünf".
@@ -61,6 +63,8 @@ const NUMBER_WORDS: &[&str] = &[
 ];
 
 const GUESSED: &[char] = &[',', ';', ':'];
+const OPENING_QUOTES: &[char] = &['"', '„', '“', '«', '‚'];
+const CLOSING_QUOTES: &[char] = &['"', '“', '”', '»', '‘'];
 const SENTENCE_END: &[char] = &['.', '!', '?'];
 const TRIM: &[char] = &[',', '.', ';', ':', '!', '?', '…', '"', '„', '“', '”', '«', '»'];
 
@@ -81,12 +85,16 @@ pub fn apply(text: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     // After a sentence end or a break, the next word gets a capital.
     let mut capitalize_next = false;
+    // Opening quotes that stood on a command word belong to the next word.
+    let mut carry = String::new();
     let mut changed = false;
     let mut i = 0;
     while i < tokens.len() {
         if let Some((len, mark)) = match_command(&cores, i) {
             if fires(&tokens, &cores, i, len, mark) {
                 changed = true;
+                carry.extend(tokens[i].chars().take_while(|c| OPENING_QUOTES.contains(c)));
+                let closing: String = tokens[i + len - 1].chars().rev().take_while(|c| CLOSING_QUOTES.contains(c)).collect();
                 match (mark, out.last_mut()) {
                     (Mark::Break(paragraph), None) => {
                         // A line break as the first thing said: the dictation starts a line.
@@ -111,15 +119,23 @@ pub fn apply(text: &str) -> String {
                     }
                     (Mark::Attach(_), None) => unreachable!("fires() refuses marks with nothing before them"),
                 }
+                // Closing quotes on a command word close what came before it.
+                if let Some(last) = out.last_mut() {
+                    let breaks = last.len() - last.trim_end_matches('\n').len();
+                    let at = last.len() - breaks;
+                    last.insert_str(at, &closing.chars().rev().collect::<String>());
+                }
                 i += len;
                 continue;
             }
         }
-        let mut word = tokens[i].to_string();
+        let mut word = format!("{}{}", std::mem::take(&mut carry), tokens[i]);
         if capitalize_next {
-            let mut chars = word.chars();
+            // Past any opening quote, the first letter gets the capital.
+            let lead: String = word.chars().take_while(|c| OPENING_QUOTES.contains(c)).collect();
+            let mut chars = word[lead.len()..].chars();
             if let Some(first) = chars.next() {
-                word = first.to_uppercase().chain(chars).collect();
+                word = format!("{lead}{}{}", first.to_uppercase(), chars.as_str());
             }
             capitalize_next = false;
         }
@@ -139,30 +155,34 @@ pub fn apply(text: &str) -> String {
     joined.trim_end_matches(' ').to_string()
 }
 
-/// Whether the command at [i] is meant as one.
+/// Whether the command at [i] is meant as one. After an article, a possessive, a preposition
+/// or a typical adjective the word is the noun ("ein Fragezeichen", "einen neuen Absatz").
 fn fires(tokens: &[&str], cores: &[String], i: usize, len: usize, mark: Mark) -> bool {
     let before = i.checked_sub(1).map(|b| cores[b].as_str());
     let after = cores.get(i + len).map(String::as_str);
-    match mark {
-        Mark::Break(_) => true,
-        Mark::Attach(_) if before.is_none() => false,
-        Mark::Attach(c) => {
-            let before = before.expect("checked");
-            match cores[i].as_str() {
-                "punkt" => {
-                    if NOUN_BEFORE.contains(&before) {
-                        return false;
-                    }
-                    let at_end = after.is_none();
-                    let before_break = match_command(cores, i + len).is_some_and(|(_, m)| matches!(m, Mark::Break(_)));
-                    // Mid-text only where Whisper itself ended a sentence around it.
-                    let whisper_ended = tokens[i - 1].ends_with(SENTENCE_END) || tokens[i + len - 1].ends_with(SENTENCE_END);
-                    at_end || before_break || whisper_ended
+    if before.is_some_and(|b| NOUN_BEFORE.contains(&b)) {
+        return false;
+    }
+    match (mark, before) {
+        // A line break as the first thing said starts a line.
+        (Mark::Break(_), _) => true,
+        (Mark::Attach(_), None) => false,
+        (Mark::Attach(_), Some(before)) => match cores[i].as_str() {
+            "punkt" => {
+                // "Der 1. Punkt", "Punkt 3": a numbered point.
+                if is_number(before.trim_end_matches('.')) || after.is_some_and(is_number) {
+                    return false;
                 }
-                "komma" | "comma" => !NOUN_BEFORE.contains(&before) && !(is_number(before) && after.is_some_and(is_number)),
-                _ => c != ',' || !NOUN_BEFORE.contains(&before),
+                let at_end = after.is_none();
+                let before_break = match_command(cores, i + len).is_some_and(|(_, m)| matches!(m, Mark::Break(_)));
+                // Mid-text only where Whisper put a sentence end on the spoken word itself
+                // ("weiter Punkt. Morgen") - not merely before it ("morgen. Punkt neun Uhr").
+                let whisper_ended = tokens[i + len - 1].ends_with(SENTENCE_END);
+                at_end || before_break || whisper_ended
             }
-        }
+            "komma" | "comma" => !(is_number(before) && after.is_some_and(is_number)),
+            _ => true,
+        },
     }
 }
 
@@ -228,6 +248,28 @@ mod tests {
         assert_eq!(apply("Das ist toll Punkt"), "Das ist toll.");
         // Whisper ended the sentence itself around the spoken word.
         assert_eq!(apply("Das war's. Punkt. Morgen geht es weiter."), "Das war's. Morgen geht es weiter.");
+    }
+
+    #[test]
+    fn nouns_after_articles_stay_and_numbered_points_too() {
+        for text in [
+            "Wir starten morgen. Punkt neun Uhr geht es los.",
+            "Der 1. Punkt ist das Geld.",
+            "Das ist ein interessanter Punkt.",
+            "Noch ein weiteren Punkt.",
+            "Setz da ein Fragezeichen hin.",
+            "Was bedeutet das Fragezeichen?",
+            "Ich habe einen neuen Absatz eingefügt.",
+            "Die neue Zeile ist leer.",
+        ] {
+            assert_eq!(apply(text), text);
+        }
+    }
+
+    #[test]
+    fn quotes_on_a_command_stay_with_the_text() {
+        assert_eq!(apply("„Neue Zeile hallo“"), "\n„Hallo“");
+        assert_eq!(apply("Er sagte „hallo neue Zeile“ und ging"), "Er sagte „hallo“\nUnd ging");
     }
 
     #[test]
