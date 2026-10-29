@@ -48,7 +48,7 @@ pub fn sync(app: &AppHandle) {
         engine: Arc::new(move || crate::dictation::transcriber(&e, &e.state::<Core>().settings())),
         log: Arc::new(|m: String| crate::diag::info(m)),
     };
-    match Server::start(SocketAddr::from(([0, 0, 0, 0], settings.port)), hooks) {
+    match api::start(SocketAddr::from(([0, 0, 0, 0], settings.port)), hooks) {
         Ok(server) => {
             crate::diag::info(format!("phone API listening on port {}", settings.port));
             *running = Some((server, settings.port));

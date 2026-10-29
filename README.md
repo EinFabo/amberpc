@@ -53,6 +53,32 @@ object, so it never outlives Amber.
 API keys are encrypted with Windows DPAPI for your account (`secrets.bin`), never written
 to the settings file or the log.
 
+## Cleanup
+
+Between recognition and inserting (*Settings → Cleanup*):
+
+- **Filler words** (äh, ähm, öhm, hm, uh, erm …) are dropped by fixed rules - always on,
+  local, instant. German words that look like English fillers ("um", "eh") stay.
+- **Smart cleanup** (optional): a language model resolves self-corrections ("um drei, nee
+  stopp, um vier" → "um vier"), false starts and punctuation. Locally with llama.cpp
+  `b11981` and Qwen3 4B Instruct 2507 (Apache 2.0; CUDA 641 MB + model 2.4 GB, ~3 GB of
+  graphics memory), or through Groq, OpenAI or an own server with the Engine page's key.
+  The prompt and the guards come from Amber for Android: the dictation is data, never
+  instructions; a reply that is cut off, empty or of implausible length is thrown away and
+  the text goes in as recognized.
+
+## Stream Deck
+
+`com.einfabo.amber.streamDeckPlugin` (attached to every release; double-click installs it)
+adds a *Dictate* key: hold it while you speak, let go to insert - or tap to start and stop.
+The key shows the state (flame, listening, working, failed; grey while Amber is not
+running). It talks to Amber through a control port on 127.0.0.1 only, with a fresh token
+every start, handed over in `%APPDATA%\app.amber.pc\streamdeck.json`.
+
+```bash
+cd streamdeck && npm run setup && npm test && npm run pack   # -> dist/
+```
+
 ## Phone API (optional)
 
 Amber on the Android phone can use this PC as its server - same network, the PC's GPU,
@@ -84,8 +110,9 @@ up front and leaves the text on the clipboard with a note, instead of pretending
 ## Layout
 
 ```
-crates/core/   pure Rust: audio maths, engines (HTTP), settings, downloads, gestures,
-               the phone API server                                                → tests
+crates/core/   pure Rust: audio maths, engines, cleanup, settings, downloads, gestures,
+               the hardened HTTP server behind the phone API and the control port  → tests
+streamdeck/    the Stream Deck plugin (TypeScript, Elgato SDK v2)
 src-tauri/     the Windows app: capture, dictation, insertion, whisper process, bubble
 src/           web UI: settings window (React), bubble (canvas)
 tools/win.sh   mirrors the tree to C:\Users\fabia\build\amberpc and builds there
@@ -133,5 +160,5 @@ engine an NVIDIA card from the GTX 900 series on with a current driver.
 
 ## Not in yet
 
-Cleanup and writing style per app, statistics, history, Parakeet, Tinfoil enclave,
-recognition while speaking - all exist in Amber for Android.
+Writing style per app, statistics, history, Parakeet (the better choice for PCs without an
+NVIDIA GPU), Tinfoil enclave, recognition while speaking - all exist in Amber for Android.

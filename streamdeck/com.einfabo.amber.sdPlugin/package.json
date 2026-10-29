@@ -1,0 +1,10 @@
+{
+  "name": "com.einfabo.amber",
+  "private": true,
+  "version": "0.3.0",
+  "description": "Runtime dependencies of the Amber Stream Deck plugin - this folder is what gets packed.",
+  "type": "module",
+  "dependencies": {
+    "@elgato/streamdeck": "^2.1.2"
+  }
+}

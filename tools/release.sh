@@ -35,6 +35,12 @@ rm -f "$LOG"
 OUT="$(mktemp -d)"
 cp "$BUNDLE/$SETUP" "$BUNDLE/$SETUP.sig" "$OUT/"
 
+echo "== Stream Deck plugin"
+PLUGIN="com.einfabo.amber.streamDeckPlugin"
+( cd streamdeck && npm ci --silent && npm ci --silent --prefix com.einfabo.amber.sdPlugin && npm test --silent && npm run --silent pack ) > "$OUT/plugin.log" 2>&1 \
+  || { tail -30 "$OUT/plugin.log"; echo "plugin build failed"; exit 1; }
+cp "streamdeck/dist/$PLUGIN" "$OUT/"
+
 # What the Tauri updater reads: version, notes, and per platform the installer URL with
 # its minisign signature.
 python3 -I - "$VERSION" "$NOTES" "$OUT/$SETUP.sig" "https://github.com/$REPO/releases/download/$TAG/$SETUP" > "$OUT/latest.json" <<'PY'
@@ -53,7 +59,8 @@ echo "== publish $TAG"
 gh release create "$TAG" -R "$REPO" --target main --title "Amber $TAG" \
   --notes "$NOTES
 
-Download \`$SETUP\` below and run it. Installed copies update themselves." \
-  "$OUT/$SETUP" "$OUT/$SETUP.sig" "$OUT/latest.json"
+Download \`$SETUP\` below and run it. Installed copies update themselves.
+\`$PLUGIN\` is the Stream Deck plugin - double-click installs it." \
+  "$OUT/$SETUP" "$OUT/$SETUP.sig" "$OUT/latest.json" "$OUT/$PLUGIN"
 rm -rf "$OUT"
 echo "done: https://github.com/$REPO/releases/tag/$TAG"

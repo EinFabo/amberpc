@@ -4,6 +4,7 @@ mod autostart;
 mod bubble;
 mod capture;
 mod commands;
+mod control;
 mod diag;
 mod dictation;
 mod hotkeys;
@@ -65,6 +66,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     } else if !autostarted {
         bubble::open_settings(app, None);
     }
+    control::start(app);
     if llm::wants_local(&settings) {
         let app = app.clone();
         std::thread::spawn(move || {
