@@ -2,7 +2,11 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { PageProps } from "../App";
-import { Row, Section } from "../ui";
+import { Row, Section, Switch } from "../ui";
+
+const DISCORD_KEYS = Array.from({ length: 12 }, (_, i) => `F${13 + i}`);
+/// Time to switch to Discord and start recording the keybind.
+const PRESS_DELAY_S = 8;
 
 interface Microphones {
   devices: string[];
@@ -13,6 +17,7 @@ export function MicrophonePage({ s, save, toast, phase }: PageProps) {
   const [mics, setMics] = useState<Microphones | null>(null);
   const [level, setLevel] = useState(0);
   const [testing, setTesting] = useState(false);
+  const [countdown, setCountdown] = useState(0);
 
   const load = async () => setMics(await invoke<Microphones>("list_microphones"));
 
@@ -46,6 +51,17 @@ export function MicrophonePage({ s, save, toast, phase }: PageProps) {
   const choose = async (device: string) => {
     await save((x) => (x.microphone = device));
     if (testing) await startTest(device);
+  };
+
+  useEffect(() => {
+    if (countdown <= 0) return;
+    const t = setTimeout(() => setCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [countdown]);
+
+  const pressSoon = async () => {
+    await invoke("discord_press_key", { key: s.discord.key, delayMs: PRESS_DELAY_S * 1000 });
+    setCountdown(PRESS_DELAY_S);
   };
 
   const missing = s.microphone && mics && !mics.devices.includes(s.microphone);
@@ -91,6 +107,43 @@ export function MicrophonePage({ s, save, toast, phase }: PageProps) {
             )}
           </div>
         </div>
+      </Section>
+      <Section title="Discord">
+        <Row
+          label="Mute me in Discord while dictating"
+          hint="While Amber listens it holds a key no keyboard has; Discord's “Push to Mute” mutes you exactly that long. Works with the hotkey, the bubble and the Stream Deck."
+        >
+          <Switch on={s.discord.muteWhileDictating} onChange={(v) => save((x) => (x.discord.muteWhileDictating = v))} />
+        </Row>
+        {s.discord.muteWhileDictating && (
+          <>
+            <Row label="Push to Mute key" hint="The key Discord listens for. F20 unless another program uses it.">
+              <select value={s.discord.key} onChange={(e) => save((x) => (x.discord.key = e.target.value))}>
+                {DISCORD_KEYS.map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+              </select>
+            </Row>
+            <div className="row" style={{ alignItems: "flex-start", gap: 24 }}>
+              <ol className="steps">
+                <li>
+                  In Discord: <b>User Settings → Keybinds → Add a Keybind</b>, action <b>Push to Mute</b>.
+                </li>
+                <li>
+                  Click the button on the right, switch to Discord and click <b>Record Keybind</b>.
+                </li>
+                <li>
+                  Amber presses {s.discord.key} when the countdown ends - then click <b>Stop Recording</b>.
+                </li>
+              </ol>
+              <button className="btn" style={{ flexShrink: 0 }} disabled={countdown > 0} onClick={pressSoon}>
+                {countdown > 0 ? `Pressing in ${countdown} s…` : `Press ${s.discord.key} in ${PRESS_DELAY_S} s`}
+              </button>
+            </div>
+          </>
+        )}
       </Section>
       <p className="note">
         If no microphone shows up or the meter stays flat: Windows Settings → Privacy &amp; security → Microphone → "Let desktop apps access your microphone".

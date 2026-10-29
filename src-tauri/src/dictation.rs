@@ -81,6 +81,12 @@ impl Dictation {
 }
 
 fn announce(app: &AppHandle, phase: Phase, message: Option<String>) {
+    // Muted in Discord exactly while Amber listens - stop, cancel and a failed microphone alike.
+    if phase == Phase::Recording {
+        crate::mute::hold(&app.state::<Core>().settings().discord);
+    } else {
+        crate::mute::release();
+    }
     let _ = app.emit("dictation-state", StateEvent { state: phase, message, expected_ms: None });
     crate::bubble::sync_visibility(app, !matches!(phase, Phase::Idle));
 }

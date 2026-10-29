@@ -11,6 +11,7 @@ mod hotkeys;
 mod insert;
 mod llm;
 mod memory;
+mod mute;
 mod phone;
 mod process;
 mod secrets;
@@ -42,6 +43,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     diag::init(&paths.logs);
     diag::info(format!("Amber {} starting", env!("CARGO_PKG_VERSION")));
     app.manage(Core::new(paths));
+    mute::reset(&app.state::<state::Core>().settings().discord);
 
     let core = app.state::<Core>();
     let settings = core.settings();
@@ -129,13 +131,15 @@ pub fn run() {
             commands::recognize_again,
             commands::stats_summary,
             commands::stats_clear,
+            commands::discord_press_key,
         ])
         .build(tauri::generate_context!())
         .expect("Amber failed to start")
-        .run(|_app, event| {
+        .run(|_app, event| match event {
             // Closing the settings window keeps Amber running in the tray; only "Quit" ends it.
-            if let tauri::RunEvent::ExitRequested { api, code: None, .. } = event {
-                api.prevent_exit();
-            }
+            tauri::RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
+            // Never leave the user muted in Discord.
+            tauri::RunEvent::Exit => mute::release(),
+            _ => {}
         });
 }
