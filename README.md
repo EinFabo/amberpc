@@ -94,6 +94,9 @@ enter in the phone's *Engine → Own server* (as text and as a QR code), e.g.
   loopback) are answered. Off by default; Windows asks once to let Amber through its
   firewall.
 - Silence answers `{"text": ""}`, which the phone's *Test connection* counts as success.
+- The PC's cleanup applies to the phone's dictations too (switch on the Phone page): fillers
+  out, and the smart cleanup if it is on - no update of the phone app needed. Leave the
+  phone app's own "Chat model" empty, or the text is cleaned twice.
 
 ## Inserting
 

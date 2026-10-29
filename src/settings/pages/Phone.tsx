@@ -97,6 +97,18 @@ export function PhonePage({ s, save, toast }: PageProps) {
               </Row>
             ))}
           </Section>
+          <Section title="Text">
+            <Row
+              label="Apply the PC's cleanup"
+              hint={
+                s.cleanup.smart
+                  ? "Fillers out and the smart cleanup, as set under Cleanup. Leave “Chat model” empty in the phone app, or the text is cleaned twice."
+                  : "Fillers out, as set under Cleanup. Switch on the smart cleanup there and the phone gets it too."
+              }
+            >
+              <Switch on={s.phone.cleanup} onChange={(v) => save((x) => (x.phone.cleanup = v))} />
+            </Row>
+          </Section>
           <Section title="Access">
             <Row label="Access key" hint="It is part of the address. A new key locks out every phone that has the old address.">
               <button

@@ -181,6 +181,9 @@ fn is_cgnat(ip: Ipv4Addr) -> bool {
 pub struct Hooks {
     pub key: Arc<dyn Fn() -> String + Send + Sync>,
     pub engine: Arc<dyn Fn() -> Result<Box<dyn Transcriber>, String> + Send + Sync>,
+    /// What the PC does to its own dictations before inserting them (fillers, the smart
+    /// cleanup) - so the phone gets the same without an update of its app.
+    pub tidy: Arc<dyn Fn(String) -> String + Send + Sync>,
     pub log: Arc<dyn Fn(String) + Send + Sync>,
 }
 
@@ -261,7 +264,7 @@ fn transcribe(content_type: &str, body: &[u8], peer: IpAddr, hooks: &Hooks) -> (
     };
     match engine.transcribe(&wav, &options) {
         Ok(raw) => {
-            let cleaned = text::clean(&raw);
+            let cleaned = (hooks.tidy)(text::clean(&raw));
             (hooks.log)(format!(
                 "phone API: {peer}, {} words from {} ms of audio in {} ms",
                 text::words(&cleaned),
@@ -373,6 +376,8 @@ mod tests {
         let hooks = Hooks {
             key: Arc::new(|| "testkey".to_string()),
             engine: Arc::new(move || Ok(Box::new(f.clone()) as Box<dyn Transcriber>)),
+            // Stands in for the PC's cleanup: drops the fillers the fake engine heard.
+            tidy: Arc::new(|t| text::strip_fillers(&t)),
             log: Arc::new(move |m| l.lock().unwrap().push(m)),
         };
         (start_with("127.0.0.1:0".parse().unwrap(), hooks, limits).unwrap(), fake, log)
@@ -387,10 +392,11 @@ mod tests {
     /// address with the key in the path, no Authorization header.
     #[test]
     fn answers_the_phone_like_an_openai_server() {
-        let (srv, fake, log) = server(Ok(" [Musik] Hallo vom Handy. ".into()));
+        let (srv, fake, log) = server(Ok(" [Musik] Ähm, hallo vom Handy. ".into()));
         let base = format!("http://{}/testkey/v1", srv.addr);
         let client = OpenAiTranscriber::new(&base, "", "whisper-1");
         let text = client.transcribe(&speech(), &TranscribeOptions::new("de", "Amber")).unwrap();
+        // Annotation gone, and the PC's cleanup applied before the phone sees the text.
         assert_eq!(text, "Hallo vom Handy.");
         let calls = fake.0.lock().unwrap();
         assert_eq!(calls.len(), 1);
