@@ -60,7 +60,7 @@ function visualOf(s: DictationEvent["state"]): Visual {
 
 function applyConfig(c: BubbleConfig) {
   config = c;
-  canvas.style.opacity = String(c.opacity);
+  canvas.style.opacity = String(state === "idle" ? c.opacity : 1);
 }
 
 listen<DictationEvent>("dictation-state", (e) => {
@@ -73,6 +73,9 @@ listen<DictationEvent>("dictation-state", (e) => {
   }
   canvas.title = state === "error" ? e.payload.message ?? "" : "";
   fire.set(visualOf(state));
+  if (e.payload.expectedMs) fire.expect(e.payload.expectedMs);
+  // The opacity setting is for the bubble at rest; while it works, it is fully there.
+  canvas.style.opacity = String(state === "idle" ? config.opacity : 1);
   if (state !== "recording") fire.level = 0;
   frame();
 });

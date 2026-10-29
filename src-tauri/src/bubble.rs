@@ -20,6 +20,8 @@ pub const SETTINGS: &str = "settings";
 const PAD: u32 = 14;
 
 static SETTINGS_HWND: AtomicIsize = AtomicIsize::new(0);
+/// Out of the way for the program in front (full screen, or on the "hidden in" list).
+static SUPPRESSED: AtomicBool = AtomicBool::new(false);
 static DRAGGING: AtomicBool = AtomicBool::new(false);
 
 pub fn settings_hwnd() -> Option<isize> {
@@ -68,7 +70,33 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     });
     place(app);
     sync_visibility(app, false);
+    watch_foreground(app);
     Ok(())
+}
+
+/// Keeps the bubble away from full-screen programs and from the programs it is hidden in -
+/// the hotkey and the Stream Deck keep working there.
+fn watch_foreground(app: &AppHandle) {
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let core = app.state::<Core>();
+            let b = core.settings().bubble;
+            let fg = win::foreground();
+            let suppress = fg.is_some_and(|fg| {
+                (b.hide_fullscreen && win::is_fullscreen(fg))
+                    || (!b.hidden_in.is_empty()
+                        && crate::insert::program_of_window(fg).is_some_and(|exe| b.hidden_in.contains(&exe)))
+            });
+            if SUPPRESSED.swap(suppress, Ordering::Relaxed) != suppress {
+                sync_visibility(&app, core.dictation.is_active());
+            }
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = app;
 }
 
 /// Applies size, look and position after a settings change.
@@ -90,7 +118,7 @@ pub fn sync_visibility(app: &AppHandle, dictating: bool) {
         BubbleVisibility::Always => true,
         BubbleVisibility::WhileDictating => dictating,
         BubbleVisibility::Hidden => false,
-    };
+    } && !SUPPRESSED.load(Ordering::Relaxed);
     #[cfg(windows)]
     if let Ok(hwnd) = w.hwnd() {
         win::show(hwnd.0 as isize, show);
@@ -223,6 +251,40 @@ mod win {
 
     fn hwnd(h: isize) -> HWND {
         HWND(h as *mut _)
+    }
+
+    /// The window in front, unless it is the desktop or Amber's own.
+    pub fn foreground() -> Option<isize> {
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetShellWindow, GetWindowThreadProcessId};
+        let fg = unsafe { GetForegroundWindow() };
+        if fg.is_invalid() || fg == unsafe { GetShellWindow() } {
+            return None;
+        }
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)) };
+        (pid != std::process::id()).then_some(fg.0 as isize)
+    }
+
+    /// A window covering its whole monitor - a game, a video. The desktop's own windows
+    /// (Progman, WorkerW) cover it too and do not count.
+    pub fn is_fullscreen(h: isize) -> bool {
+        use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+        use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+        let mut class = [0u16; 64];
+        let n = unsafe { GetClassNameW(hwnd(h), &mut class) };
+        let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
+        if class == "Progman" || class == "WorkerW" {
+            return false;
+        }
+        let r = rect(h);
+        let Some(m) = (unsafe { info_full(MonitorFromWindow(hwnd(h), MONITOR_DEFAULTTONEAREST)) }) else { return false };
+        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    }
+
+    /// The whole monitor, taskbar included (rcMonitor, not the work area).
+    unsafe fn info_full(m: HMONITOR) -> Option<RECT> {
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        GetMonitorInfoW(m, &mut info).as_bool().then_some(info.rcMonitor)
     }
 
     pub fn make_unfocusable(h: isize) {

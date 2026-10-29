@@ -70,13 +70,13 @@ took 18.6 s with large-v3-turbo on the CPU). Android 0.16 solved it with ACFT mo
 
 ## Phase 4 - Bubble and keys
 
-- [ ] **Hide the bubble in chosen programs**, and automatically over full-screen apps
+- [x] **Hide the bubble in chosen programs**, and automatically over full-screen apps
       (games, videos); the hotkey and the Stream Deck keep working.
-- [ ] **Opacity at rest**: the opacity setting applies at rest only; dictating, the bubble
+- [x] **Opacity at rest**: the opacity setting applies at rest only; dictating, the bubble
       is fully visible (as on Android).
-- [ ] **Progress ring**: while recognizing, the fuse fills the rim against the learned
+- [x] **Progress ring**: while recognizing, the fuse fills the rim against the learned
       estimate instead of only circling.
-- [ ] **Reset the bubble's place** (settings button).
+- [x] **Reset the bubble's place** (settings button).
 
 ## Phase 5 - Long dictations
 
