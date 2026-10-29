@@ -65,6 +65,11 @@ export function AppPage({ s, save, ov, toast }: PageProps) {
             </button>
           )}
         </Row>
+        <Row label="Project page" hint="Release notes, the installer, and where to report problems.">
+          <button className="btn" onClick={() => invoke("open_url", { url: "https://github.com/EinFabo/amberpc/releases" })}>
+            Open
+          </button>
+        </Row>
       </Section>
       <Section title="Diagnostics">
         <Row label="Keep the recognized text in the log" hint="Off: only lengths and timings are logged, never what you said.">

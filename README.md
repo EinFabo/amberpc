@@ -7,6 +7,20 @@ Local-first: your voice is recognized on this PC by whisper.cpp (CPU or NVIDIA G
 your choice - by a server with your own API key (Groq, OpenAI, or your own
 OpenAI-compatible server).
 
+## Installing
+
+Download `Amber_<version>_x64-setup.exe` from the
+[latest release](https://github.com/EinFabo/amberpc/releases/latest) and run it. It installs
+for your Windows account only - no administrator rights - into
+`%LOCALAPPDATA%\Amber`, with a Start menu entry. Windows SmartScreen may warn on first run
+because the installer is not code-signed: *More info → Run anyway*.
+
+On first start a short setup guide picks the engine and downloads what it needs. Amber
+then starts with Windows (in the tray, without a window - switch it off under
+*Settings → App*) and updates itself from the releases. Uninstall it under *Windows
+Settings → Apps*; that also removes the autostart entry, and optionally the downloaded
+models.
+
 ## Using it
 
 - **Hotkey** (default `Ctrl+Alt+Space`), in three modes: *tap or hold* (a tap starts, the
@@ -64,6 +78,9 @@ Same rule as Amber on Android: **whatever can go wrong without a platform API be
 `core`**, where it is tested without Windows.
 
 ## Building
+
+Release builds started from the build folder (`target\release`) never register themselves for
+autostart - only the installed app does.
 
 ```bash
 cargo test -p amber-core        # anywhere, also in WSL
