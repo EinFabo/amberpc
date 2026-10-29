@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 public class AmberClick {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
@@ -34,6 +35,9 @@ if (-not $proc) { Write-Output "Amber is not running"; exit 1 }
 $hwnd = [AmberClick]::Largest([uint32]$proc.Id)
 [void][AmberClick]::SetForegroundWindow($hwnd)
 Start-Sleep -Milliseconds 300
+# Windows refuses the switch while someone works at the PC - the click would then land in
+# whatever window covers Amber's.
+if ([AmberClick]::GetForegroundWindow() -ne $hwnd) { Write-Output "Amber is not in front - not clicking"; exit 2 }
 $r = New-Object AmberClick+RECT
 [void][AmberClick]::GetWindowRect($hwnd, [ref]$r)
 [void][AmberClick]::SetCursorPos(($r.Left + $X), ($r.Top + $Y))
