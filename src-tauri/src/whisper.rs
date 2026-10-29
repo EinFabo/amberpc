@@ -38,6 +38,20 @@ struct Running {
     key: Key,
 }
 
+impl Running {
+    fn served(&self) -> Served {
+        Served { url: format!("http://127.0.0.1:{}", self.port), runtime: self.key.runtime.clone(), model: self.key.model.clone() }
+    }
+}
+
+/// The server a request goes to, and what it runs - which may still be the previous model
+/// while the chosen one downloads, so the request has to fit the running one.
+pub struct Served {
+    pub url: String,
+    pub runtime: String,
+    pub model: String,
+}
+
 #[derive(Default)]
 pub struct Whisper {
     running: Mutex<Option<Running>>,
@@ -66,7 +80,7 @@ impl Whisper {
     /// Reads the settings only once it holds the lock, so two quick changes in a row end with
     /// the newer one loaded. A running server is only replaced once its successor is fully
     /// downloaded - choosing a model that is still on its way keeps the old one working.
-    pub fn ensure(&self, app: &tauri::AppHandle) -> Result<String, String> {
+    pub fn ensure(&self, app: &tauri::AppHandle) -> Result<Served, String> {
         use tauri::Manager;
         let mut running = self.running.lock().unwrap();
         let core = app.state::<crate::state::Core>();
@@ -88,7 +102,7 @@ impl Whisper {
             let alive = matches!(r.child.try_wait(), Ok(None));
             if alive && (r.key == key || missing.is_some()) {
                 // The configured one, or the previous one while the new one is not there yet.
-                return Ok(format!("http://127.0.0.1:{}", r.port));
+                return Ok(r.served());
             }
             if !alive {
                 crate::diag::warn(format!("local engine had exited: {}", self.last_output()));
@@ -105,7 +119,7 @@ impl Whisper {
         let started = Instant::now();
         match self.spawn(layout, rt, model, &key) {
             Ok(r) => {
-                let url = format!("http://127.0.0.1:{}", r.port);
+                let served = r.served();
                 crate::diag::info(format!("local engine ready: {} on {} in {} ms", model.label, rt.label, started.elapsed().as_millis()));
                 *running = Some(r);
                 let gpu = if rt.id == "cuda" { self.gpu_in_use() } else { None };
@@ -120,7 +134,7 @@ impl Whisper {
                     format!("{} on {}", model.label, rt.label)
                 };
                 self.set_status(app, Status::of("ready", Some(message)));
-                Ok(url)
+                Ok(served)
             }
             Err(e) => {
                 crate::diag::error(format!("local engine failed to start: {e}"));

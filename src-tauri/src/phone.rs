@@ -45,7 +45,7 @@ pub fn sync(app: &AppHandle) {
     let hooks = Hooks {
         // Read per request, so a new key takes effect at once.
         key: Arc::new(move || k.state::<Core>().key(KEY_ID).unwrap_or_default()),
-        engine: Arc::new(move || crate::dictation::transcriber(&e, &e.state::<Core>().settings())),
+        engine: Arc::new(move || crate::dictation::transcriber(&e, &e.state::<Core>().settings()).map(|p| p.transcriber)),
         // Like the PC's own dictations: fillers out, the model's tidy-up if it is on and
         // ready - never a wait for a model that is still loading.
         tidy: Arc::new(move |text| {

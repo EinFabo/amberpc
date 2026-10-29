@@ -61,68 +61,166 @@ pub struct Model {
     pub file: &'static str,
     pub label: &'static str,
     pub note: &'static str,
+    pub url: &'static str,
     pub sha256: &'static str,
     pub size_mb: u32,
     /// A GPU makes this one comfortable; on a CPU it is slow.
     pub wants_gpu: bool,
+    /// Fine-tuned (ACFT) so the encoder may stop where the speech stops instead of always
+    /// working through a 30 s window - the biggest speed-up on a CPU. A stock model loses
+    /// words when its context is cut, so only these get a short one.
+    pub short_context: bool,
+    /// Context positions beyond the audio for a [short_context] model (see `audio_ctx_for`).
+    pub context_slack: u32,
+    /// Kept for existing downloads; offered only while installed.
+    pub replaced: bool,
 }
-
-/// The models repository at a fixed commit, so a file can never change under its checksum.
-pub const MODELS_COMMIT: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
 
 impl Model {
     pub fn url(&self) -> String {
-        format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/{MODELS_COMMIT}/{}", self.file)
+        self.url.to_string()
     }
 }
 
-pub const MODELS: [Model; 5] = [
+/// The ggerganov/whisper.cpp model repository at a fixed commit, so a file can never change
+/// under its checksum.
+pub const MODELS_COMMIT: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
+
+macro_rules! ggerganov {
+    ($file:literal) => {
+        concat!("https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/", $file)
+    };
+}
+
+/// The same models as Amber for Android 0.16, pinned by URL and SHA-256 there and here.
+pub const MODELS: [Model; 8] = [
+    Model {
+        id: "futo-multilingual-74",
+        file: "voice-input-multilingual-74.bin",
+        label: "Base (FUTO)",
+        note: "Whisper base, tuned for short dictations - fast on any PC, makes more mistakes",
+        url: "https://keyboard.futo.org/voice-input-multilingual-74.bin",
+        sha256: "e44f352c9aa2c3609dece20c733c4ad4a75c28cd9ab07d005383df55fa96efc4",
+        size_mb: 78,
+        wants_gpu: false,
+        short_context: true,
+        context_slack: 64,
+        replaced: false,
+    },
+    Model {
+        id: "futo-multilingual-244",
+        file: "voice-input-multilingual-244.bin",
+        label: "Small (FUTO)",
+        note: "Whisper small, tuned for short dictations - good on a CPU",
+        url: "https://keyboard.futo.org/voice-input-multilingual-244.bin",
+        sha256: "15ef255465a6dc582ecf1ec651a4618c7ee2c18c05570bbe46493d248d465ac4",
+        size_mb: 253,
+        wants_gpu: false,
+        short_context: true,
+        context_slack: 64,
+        replaced: false,
+    },
+    Model {
+        id: "acft-large-v3-turbo-q8_0",
+        file: "acft-whisper-large-v3-turbo-q8_0.bin",
+        label: "Large v3 Turbo",
+        note: "the large model, tuned to stop where your speech stops - most accurate, fast on a GPU",
+        // MahmoudAshraf/acft-whisper-large-v3-turbo (Apache 2.0), converted by DeadBranches;
+        // Amber for Android checked it tensor by tensor against its own conversion.
+        url: "https://huggingface.co/DeadBranches/acft-whisper-large-v3-turbo_q8_0/resolve/609781a1dc54e208ccc91d6ab6c0c53b08ee879b/acft-whisper-large-v3-turbo-q8_0.bin",
+        sha256: "6d862034d882b83f76366fefc1bd750cef2057d2c644378c46e41e90b0331a72",
+        size_mb: 834,
+        wants_gpu: true,
+        short_context: true,
+        // As its model card recommends; on Android 4.53 % WER with 128, 4.64 % with 64.
+        context_slack: 128,
+        replaced: false,
+    },
     Model {
         id: "base-q5_1",
         file: "ggml-base-q5_1.bin",
         label: "Base",
-        note: "tiny and quick, makes more mistakes",
+        note: "replaced by Base (FUTO)",
+        url: ggerganov!("ggml-base-q5_1.bin"),
         sha256: "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898",
         size_mb: 57,
         wants_gpu: false,
+        short_context: false,
+        context_slack: 0,
+        replaced: true,
     },
     Model {
         id: "small-q5_1",
         file: "ggml-small-q5_1.bin",
         label: "Small",
-        note: "good on a CPU",
+        note: "replaced by Small (FUTO)",
+        url: ggerganov!("ggml-small-q5_1.bin"),
         sha256: "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
         size_mb: 182,
         wants_gpu: false,
+        short_context: false,
+        context_slack: 0,
+        replaced: true,
     },
     Model {
         id: "large-v3-turbo-q5_0",
         file: "ggml-large-v3-turbo-q5_0.bin",
-        label: "Large v3 Turbo",
-        note: "near the best, fast on a GPU",
+        label: "Large v3 Turbo (old)",
+        note: "always works through 30 s - the tuned Large v3 Turbo is as accurate and faster",
+        url: ggerganov!("ggml-large-v3-turbo-q5_0.bin"),
         sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
         size_mb: 548,
         wants_gpu: true,
+        short_context: false,
+        context_slack: 0,
+        replaced: true,
     },
     Model {
         id: "large-v3-turbo-q8_0",
         file: "ggml-large-v3-turbo-q8_0.bin",
-        label: "Large v3 Turbo (q8)",
-        note: "a touch more accurate, more memory",
+        label: "Large v3 Turbo q8 (old)",
+        note: "replaced by the tuned Large v3 Turbo",
+        url: ggerganov!("ggml-large-v3-turbo-q8_0.bin"),
         sha256: "317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1",
         size_mb: 834,
         wants_gpu: true,
+        short_context: false,
+        context_slack: 0,
+        replaced: true,
     },
     Model {
         id: "large-v3-q5_0",
         file: "ggml-large-v3-q5_0.bin",
-        label: "Large v3",
-        note: "most accurate, slowest",
+        label: "Large v3 (old)",
+        note: "slowest; the tuned Large v3 Turbo is about as accurate",
+        url: ggerganov!("ggml-large-v3-q5_0.bin"),
         sha256: "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1",
         size_mb: 1_031,
         wants_gpu: true,
+        short_context: false,
+        context_slack: 0,
+        replaced: true,
     },
 ];
+
+/// Whisper's encoder sees 30 s at most, as 1500 positions: one per 320 samples at 16 kHz.
+const FULL_AUDIO_CTX: u32 = 1500;
+const SAMPLES_PER_CTX: usize = 320;
+/// Below this, a shortened context starts to hurt more than it saves.
+const MIN_AUDIO_CTX: u32 = 256;
+
+/// How much of the encoder context a short-context model needs for [samples] at 16 kHz:
+/// the audio plus [slack], at least 256 - or 0 (the full window) from 30 s on, where
+/// whisper.cpp slides over the audio window by window anyway. Port of Android's
+/// `WhisperInput.audioCtxFor`.
+pub fn audio_ctx_for(samples: usize, slack: u32) -> u32 {
+    let needed = samples.div_ceil(SAMPLES_PER_CTX) as u32 + slack;
+    if needed >= FULL_AUDIO_CTX {
+        0
+    } else {
+        needed.max(MIN_AUDIO_CTX)
+    }
+}
 
 /// One download of a package.
 pub struct Archive {
@@ -233,13 +331,16 @@ pub fn model(id: &str) -> Option<&'static Model> {
     MODELS.iter().find(|m| m.id == id)
 }
 
-/// What to suggest on first start: the GPU build with Turbo where there is an NVIDIA card,
-/// otherwise the CPU with Small.
-pub fn recommend(has_nvidia: bool) -> (&'static str, &'static str) {
+/// What to suggest: the GPU build with the tuned large model where there is an NVIDIA card;
+/// else the tuned small model on a CPU with room (8+ threads, 8+ GB), the tuned base model on
+/// anything weaker (an old 4-core office PC with 4 GB). Only ever a suggestion.
+pub fn recommend(has_nvidia: bool, threads: u32, ram_mb: u64) -> (&'static str, &'static str) {
     if has_nvidia {
-        ("cuda", "large-v3-turbo-q5_0")
+        ("cuda", "acft-large-v3-turbo-q8_0")
+    } else if threads >= 8 && ram_mb >= 7_500 {
+        ("cpu", "futo-multilingual-244")
     } else {
-        ("cpu", "small-q5_1")
+        ("cpu", "futo-multilingual-74")
     }
 }
 
@@ -465,13 +566,33 @@ mod tests {
         }
         for m in &MODELS {
             assert_eq!(m.sha256.len(), 64);
-            assert!(m.url().ends_with(m.file));
+            assert!(m.url.starts_with("https://") && m.url.ends_with(m.file), "{}", m.id);
             assert_eq!(model(m.id).map(|x| x.file), Some(m.file));
+            assert_eq!(m.short_context, m.context_slack > 0, "{}", m.id);
+            assert!(!(m.replaced && m.short_context), "the tuned models are the current ones");
+            if m.url.contains("huggingface.co") {
+                assert!(m.url.contains("/resolve/") && !m.url.contains("/resolve/main/"), "pinned: {}", m.id);
+            }
         }
-        let (rt, m) = recommend(true);
-        assert!(runtime(rt).is_some() && model(m).is_some());
-        let (rt, m) = recommend(false);
-        assert!(runtime(rt).is_some() && !model(m).unwrap().wants_gpu);
+        for (gpu, threads, ram) in [(true, 20, 32_000), (false, 20, 32_000), (false, 8, 4_000), (false, 4, 16_000)] {
+            let (rt, m) = recommend(gpu, threads, ram);
+            let m = model(m).unwrap();
+            assert!(runtime(rt).is_some() && m.short_context && !m.replaced);
+            assert_eq!(m.wants_gpu, gpu);
+        }
+        assert_eq!(recommend(false, 20, 32_000).1, "futo-multilingual-244");
+        // Fabi's OptiPlex 790: 4 cores / 8 threads, 4 GB.
+        assert_eq!(recommend(false, 8, 3_977).1, "futo-multilingual-74");
+    }
+
+    #[test]
+    fn audio_context_follows_the_speech() {
+        assert_eq!(audio_ctx_for(19_200, 64), 256, "1.2 s padded: the floor");
+        assert_eq!(audio_ctx_for(80_000, 64), 314, "5 s");
+        assert_eq!(audio_ctx_for(128_000, 128), 528, "8 s with the large model's slack");
+        assert_eq!(audio_ctx_for(80_001, 64), 315, "a started position counts");
+        assert_eq!(audio_ctx_for(16_000 * 29, 128), 0, "near 30 s: the full window");
+        assert_eq!(audio_ctx_for(16_000 * 60, 64), 0, "longer: whisper.cpp slides anyway");
     }
 
     #[test]

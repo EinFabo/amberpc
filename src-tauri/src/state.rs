@@ -39,6 +39,8 @@ pub struct Core {
     pub phone: crate::phone::PhoneApi,
     /// The smart cleanup's local model.
     pub llm: crate::llm::Llm,
+    /// How long recognition takes per engine and model on this PC.
+    pub estimates: amber_core::estimate::Estimates,
     epoch: Instant,
 }
 
@@ -50,6 +52,7 @@ impl Core {
         }
         let keys = crate::secrets::load(&paths.secrets);
         let mode = settings.hotkey.mode;
+        let paths_root = paths.layout.root.clone();
         Core {
             paths,
             settings: RwLock::new(settings),
@@ -65,6 +68,7 @@ impl Core {
             mic_test: Mutex::new(None),
             phone: crate::phone::PhoneApi::default(),
             llm: crate::llm::Llm::default(),
+            estimates: amber_core::estimate::Estimates::load(&paths_root.join("estimates.json")),
             epoch: Instant::now(),
         }
     }

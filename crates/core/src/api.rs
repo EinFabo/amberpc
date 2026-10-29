@@ -427,7 +427,8 @@ mod tests {
 
         let bearer = OpenAiTranscriber::new(&format!("http://{}/v1", srv.addr), "testkey", "m");
         let e = bearer.transcribe(&speech(), &TranscribeOptions::default()).unwrap_err();
-        assert_eq!(e.kind, ErrorKind::Server);
+        // A 5xx: the phone takes it as "server unavailable" and may fall back to its own model.
+        assert_eq!(e.kind, ErrorKind::Unavailable);
         assert!(e.detail.contains("502") && e.detail.contains("engine down"), "{}", e.detail);
         srv.stop();
     }

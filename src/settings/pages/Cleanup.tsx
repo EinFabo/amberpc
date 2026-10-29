@@ -8,7 +8,7 @@ import type { PageProps } from "../App";
 import { DownloadItem, StatusLabel, useLocal } from "../downloads";
 import { Row, Section, Segmented, Switch } from "../ui";
 
-const EXAMPLE = "Ähm, lass uns morgen um drei Uhr treffen, nee stopp, um vier Uhr, äh, im Café.";
+const EXAMPLE = "Ähm, lass uns morgen um drei Uhr treffen, nee stopp, um vier Uhr, äh, im Café weil es da ruhig ist.";
 
 export function CleanupPage(p: PageProps) {
   const { s, save } = p;
@@ -20,6 +20,9 @@ export function CleanupPage(p: PageProps) {
       <Section>
         <Row label="Remove filler words" hint="äh, ähm, öhm, hm … - by fixed rules, on this PC, instantly. Real words like “um” stay.">
           <Switch on={c.fillers} onChange={(v) => save((x) => (x.cleanup.fillers = v))} />
+        </Row>
+        <Row label="German commas" hint="Before “dass”, “weil”, “wenn”, “um … zu”, “sondern” - only where the comma is nearly certain, only in German text.">
+          <Switch on={c.germanCommas} onChange={(v) => save((x) => (x.cleanup.germanCommas = v))} />
         </Row>
         <Row
           label="Smart cleanup"
@@ -174,7 +177,7 @@ function TryIt({ s }: PageProps) {
         </div>
         {result && (
           <div className="preview">
-            <div className="note">Without fillers</div>
+            <div className="note">By rule (fillers, commas)</div>
             <div>{result.fillers || <i>(nothing left)</i>}</div>
             {s.cleanup.smart && (
               <>

@@ -34,8 +34,18 @@ pub enum ErrorKind {
     TooLarge,
     Unreachable,
     Timeout,
+    /// The server answered 5xx: down or overloaded - like no connection, worth a fallback.
+    Unavailable,
     Server,
     BadResponse,
+}
+
+impl ErrorKind {
+    /// Failures another engine could fix: no connection, a timeout, a server that is down. A
+    /// refused key or a bad request needs the user, not a detour.
+    pub fn service_unavailable(self) -> bool {
+        matches!(self, ErrorKind::Unreachable | ErrorKind::Timeout | ErrorKind::Unavailable)
+    }
 }
 
 /// [message] is for the user, [detail] for the log.
@@ -122,13 +132,21 @@ impl Transcriber for OpenAiTranscriber {
 /// whisper.cpp's `whisper-server`: `POST {base}/inference`.
 pub struct WhisperServerTranscriber {
     base_url: String,
+    /// For models tuned to a short encoder context: the slack beyond the audio.
+    context_slack: Option<u32>,
     http: Client,
 }
 
 impl WhisperServerTranscriber {
-    pub fn new(base_url: &str) -> Self {
+    /// [context_slack]: `Some` for a short-context (ACFT) model - the encoder then stops
+    /// where the speech stops instead of working through 30 s.
+    pub fn new(base_url: &str, context_slack: Option<u32>) -> Self {
         // Generous: a long dictation on a CPU takes a while, and nothing is billed per second.
-        WhisperServerTranscriber { base_url: base_url.trim_end_matches('/').to_string(), http: client(Duration::from_secs(300)) }
+        WhisperServerTranscriber {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            context_slack,
+            http: client(Duration::from_secs(300)),
+        }
     }
 }
 
@@ -141,6 +159,13 @@ impl Transcriber for WhisperServerTranscriber {
             .text("language", options.language.clone().unwrap_or_else(|| "auto".into()));
         if let Some(prompt) = &options.prompt {
             form = form.text("prompt", prompt.clone());
+        }
+        if let Some(slack) = self.context_slack {
+            // 16-bit mono after the 44-byte header Amber writes.
+            let ctx = crate::local::audio_ctx_for(wav.len().saturating_sub(44) / 2, slack);
+            if ctx > 0 {
+                form = form.text("audio_ctx", ctx.to_string());
+            }
         }
         read_text(self.http.post(format!("{}/inference", self.base_url)).multipart(form).send().map_err(network_error)?)
     }
@@ -199,6 +224,7 @@ pub fn status_error(status: u16, body: &str) -> SttError {
         404 => SttError::new(ErrorKind::Server, "The server does not know this address or model.", detail),
         413 => SttError::new(ErrorKind::TooLarge, "The recording is too long for this server.", detail),
         429 => SttError::new(ErrorKind::RateLimited, "Rate limit reached - try again in a moment.", detail),
+        500..=599 => SttError::new(ErrorKind::Unavailable, format!("The server had a problem (HTTP {status})."), detail),
         _ => SttError::new(ErrorKind::Server, format!("The server had a problem (HTTP {status})."), detail),
     }
 }
@@ -308,11 +334,23 @@ mod tests {
     #[test]
     fn whisper_server_request() {
         let (url, rx) = serve(vec![json(200, r#"{"text":" Test.\n"}"#)]);
-        let text = WhisperServerTranscriber::new(&url).transcribe(b"wav", &TranscribeOptions::new("auto", "")).unwrap();
+        let text = WhisperServerTranscriber::new(&url, None).transcribe(b"wav", &TranscribeOptions::new("auto", "")).unwrap();
         assert_eq!(text, " Test.\n");
         let req = rx.recv().unwrap();
         assert!(req.head.starts_with("POST /inference "));
-        assert!(String::from_utf8_lossy(&req.body).contains("name=\"language\"\r\n\r\nauto"));
+        let body = String::from_utf8_lossy(&req.body).to_string();
+        assert!(body.contains("name=\"language\"\r\n\r\nauto"));
+        assert!(!body.contains("audio_ctx"), "a stock model gets the full window");
+    }
+
+    #[test]
+    fn a_tuned_model_gets_a_short_encoder_context() {
+        let (url, rx) = serve(vec![json(200, r#"{"text":"x"}"#)]);
+        // 5 s of 16 kHz audio.
+        let wav = crate::audio::encode_wav(&vec![0.1; 80_000], 16_000);
+        WhisperServerTranscriber::new(&url, Some(64)).transcribe(&wav, &TranscribeOptions::default()).unwrap();
+        let body = String::from_utf8_lossy(&rx.recv().unwrap().body).to_string();
+        assert!(body.contains("name=\"audio_ctx\"\r\n\r\n314"), "250 positions of speech + 64");
     }
 
     #[test]
@@ -330,7 +368,9 @@ mod tests {
         assert_eq!(e.kind, ErrorKind::Unauthorized);
         assert!(e.detail.contains("Invalid API Key"));
         assert_eq!(t.transcribe(b"", &o).unwrap_err().kind, ErrorKind::RateLimited);
-        assert_eq!(t.transcribe(b"", &o).unwrap_err().kind, ErrorKind::Server);
+        let down = t.transcribe(b"", &o).unwrap_err().kind;
+        assert_eq!(down, ErrorKind::Unavailable);
+        assert!(down.service_unavailable() && !ErrorKind::Unauthorized.service_unavailable());
         assert_eq!(t.transcribe(b"", &o).unwrap_err().kind, ErrorKind::BadResponse);
         assert_eq!(t.transcribe(b"", &o).unwrap_err().kind, ErrorKind::Server);
     }
@@ -339,7 +379,7 @@ mod tests {
     fn unreachable_server() {
         // Bind and drop: the port is closed.
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let e = WhisperServerTranscriber::new(&format!("http://127.0.0.1:{port}")).transcribe(b"", &TranscribeOptions::default()).unwrap_err();
+        let e = WhisperServerTranscriber::new(&format!("http://127.0.0.1:{port}"), None).transcribe(b"", &TranscribeOptions::default()).unwrap_err();
         assert_eq!(e.kind, ErrorKind::Unreachable);
     }
 

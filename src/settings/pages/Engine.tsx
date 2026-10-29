@@ -94,18 +94,29 @@ function LocalEngine({ s, save, toast }: PageProps) {
         ))}
       </Section>
       <Section title="Model">
-        {info.models.map((m) => (
-          <DownloadItem
-            key={m.id}
-            local={local}
-            kind="model"
-            item={m}
-            selected={s.local.model === m.id}
-            onSelect={() => save((x) => (x.local.model = m.id))}
-            recommended={info.recommended[1] === m.id}
-            toast={toast}
-          />
-        ))}
+        {info.models
+          // A replaced model shows only while it is still on disk.
+          .filter((m) => !m.replaced || m.installed)
+          .map((m) => (
+            <DownloadItem
+              key={m.id}
+              local={local}
+              kind="model"
+              item={m}
+              selected={s.local.model === m.id}
+              onSelect={() => save((x) => (x.local.model = m.id))}
+              recommended={info.recommended[1] === m.id}
+              measured={info.measured[m.id]}
+              toast={toast}
+            />
+          ))}
+        {info.models.find((m) => m.id === s.local.model)?.replaced && (
+          <div className="row">
+            <div className="note">
+              Your model is an older one that always works through 30 seconds. The tuned models above stop where your speech stops - as accurate and several times faster.
+            </div>
+          </div>
+        )}
         {s.local.runtime === "cpu" && info.models.find((m) => m.id === s.local.model)?.wantsGpu && (
           <div className="row">
             <div className="note">This model is slow on a CPU - expect several seconds per sentence.</div>
@@ -238,6 +249,12 @@ function ServerEngine({ s, save, ov, refresh, toast }: PageProps) {
             Remove
           </button>
         )}
+      </Row>
+      <Row
+        label="Fall back to this PC"
+        hint="When the server cannot be reached (offline, down), the recording is recognized by the model set under “On this PC” instead of being lost - if it is downloaded. Never the other way round."
+      >
+        <Switch on={s.server.localFallback} onChange={(v) => save((x) => (x.server.localFallback = v))} />
       </Row>
       <Row label="Connection" hint={test ? <span className={`note ${test.ok ? "ok" : "error"}`}>{test.text}</span> : "Checks the address and the key without sending audio."}>
         <button className="btn" disabled={testing} onClick={runTest}>
