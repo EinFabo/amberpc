@@ -17,6 +17,16 @@ export type HotkeyMode = "toggle" | "hold" | "both";
 export type BubbleVisibility = "always" | "whileDictating" | "hidden";
 export type Edge = "left" | "right";
 export type InsertMethod = "paste" | "type";
+export type WritingStyle = "asSpoken" | "casual" | "formal" | "concise";
+export type CleanupChoice = "default" | "always" | "never";
+
+export interface Profile {
+  exe: string;
+  label: string;
+  style: WritingStyle;
+  instruction: string;
+  cleanup: CleanupChoice;
+}
 
 export interface Settings {
   engine: EngineKind;
@@ -34,8 +44,10 @@ export interface Settings {
   logText: boolean;
   onboarded: boolean;
   phone: { enabled: boolean; port: number; cleanup: boolean };
+  profiles: Profile[];
   cleanup: {
     fillers: boolean;
+    spokenPunctuation: boolean;
     germanCommas: boolean;
     smart: boolean;
     engine: EngineKind;
@@ -132,4 +144,9 @@ export interface ChatProvider {
   name: string;
   models: { id: string; label: string; note: string }[];
   hasKey: boolean;
+}
+
+export interface Program {
+  exe: string;
+  title: string;
 }

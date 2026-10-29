@@ -11,6 +11,8 @@ pub mod estimate;
 pub mod gesture;
 pub mod http;
 pub mod local;
+pub mod profiles;
 pub mod providers;
 pub mod settings;
+pub mod spoken;
 pub mod text;

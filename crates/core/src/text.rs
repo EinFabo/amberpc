@@ -97,7 +97,8 @@ pub fn strip_fillers(text: &str) -> String {
 
 /// The text exactly as it is inserted.
 pub fn compose(cleaned: &str, trailing_space: bool) -> String {
-    if trailing_space && !cleaned.is_empty() {
+    // After a spoken line break the next dictation starts on the new line, not after a space.
+    if trailing_space && !cleaned.is_empty() && !cleaned.ends_with('\n') {
         format!("{cleaned} ")
     } else {
         cleaned.to_string()
@@ -158,6 +159,7 @@ mod tests {
         assert_eq!(compose("Hallo.", true), "Hallo. ");
         assert_eq!(compose("Hallo.", false), "Hallo.");
         assert_eq!(compose("", true), "");
+        assert_eq!(compose("Gruß\n", true), "Gruß\n");
         assert_eq!(words("Das ist  ein Test."), 4);
     }
 }

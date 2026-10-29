@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use amber_core::cleanup::ChatCleaner;
+use amber_core::cleanup::{Ask, ChatCleaner};
+use amber_core::profiles::{self, CleanupChoice, Profile};
 use amber_core::local;
 use amber_core::providers;
 use amber_core::settings::{EngineKind, Settings};
@@ -236,9 +237,11 @@ impl Llm {
 
 }
 
-/// Whether the smart cleanup wants the local model loaded.
+/// Whether the smart cleanup wants the local model loaded: switched on, or always on for
+/// some program.
 pub fn wants_local(s: &Settings) -> bool {
-    s.cleanup.smart && s.cleanup.engine == EngineKind::Local
+    let anywhere = s.cleanup.smart || s.profiles.iter().any(|p| p.cleanup == CleanupChoice::Always);
+    anywhere && s.cleanup.engine == EngineKind::Local
 }
 
 /// The client for the smart cleanup the settings ask for - or why not. [wait]: for the local
@@ -275,20 +278,23 @@ pub fn cleaner(app: &AppHandle, s: &Settings, wait: bool) -> Result<ChatCleaner,
     }
 }
 
-/// What the dictation gets: the recognized text with fillers stripped, German commas added,
-/// and, if switched on, tidied by the model. A failing model leaves the text as it was - never lost, never stuck.
-pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str) -> (String, Option<String>) {
-    let mut text = if s.cleanup.fillers { amber_core::text::strip_fillers(recognized) } else { recognized.to_string() };
-    let language = (s.language != "auto").then_some(s.language.as_str());
-    if s.cleanup.german_commas && amber_core::commas::is_german(language, &text) {
-        text = amber_core::commas::apply(&text);
-    }
-    if !s.cleanup.smart || text.is_empty() {
+/// What the dictation gets, in this order: spoken punctuation ("neue Zeile", "Komma"),
+/// fillers out, German commas, and - when the smart cleanup runs for [profile]'s program - the
+/// model's tidy-up in that program's style. A failing model leaves the text as it was: never
+/// lost, never stuck. Returns why the model was skipped, if it was.
+pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str, profile: Option<&Profile>) -> (String, Option<String>) {
+    let text = by_rule(s, recognized);
+    if !profiles::smart_cleanup(s.cleanup.smart, profile) || text.is_empty() {
         return (text, None);
     }
     let started = Instant::now();
+    let ask = Ask {
+        style: profile.map(|p| p.style).unwrap_or_default(),
+        instruction: profile.map(|p| p.instruction.as_str()).unwrap_or(""),
+        vocabulary: &s.vocabulary,
+    };
     // Never waits for a model that is still loading: the text goes in as recognized.
-    match cleaner(app, s, false).and_then(|c| c.clean(&text).map_err(|e| format!("{} ({})", e.message, e.detail))) {
+    match cleaner(app, s, false).and_then(|c| c.clean(&text, &ask).map_err(|e| format!("{} ({})", e.message, e.detail))) {
         Ok(cleaned) => {
             crate::diag::info(format!("cleanup: {} -> {} chars in {} ms", text.chars().count(), cleaned.chars().count(), started.elapsed().as_millis()));
             (cleaned, None)
@@ -298,4 +304,17 @@ pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str) -> (String, Option<
             (text, Some(e))
         }
     }
+}
+
+/// The steps that are rules: instant, local, nothing invented.
+pub fn by_rule(s: &Settings, recognized: &str) -> String {
+    let mut text = if s.cleanup.spoken_punctuation { amber_core::spoken::apply(recognized) } else { recognized.to_string() };
+    if s.cleanup.fillers {
+        text = amber_core::text::strip_fillers(&text);
+    }
+    let language = (s.language != "auto").then_some(s.language.as_str());
+    if s.cleanup.german_commas && amber_core::commas::is_german(language, &text) {
+        text = amber_core::commas::apply(&text);
+    }
+    text
 }

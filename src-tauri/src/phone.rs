@@ -51,7 +51,8 @@ pub fn sync(app: &AppHandle) {
         tidy: Arc::new(move |text| {
             let settings = t.state::<Core>().settings();
             if settings.phone.cleanup {
-                crate::llm::tidy(&t, &settings, &text).0
+                // The phone app has its own styles per app; here only the PC's general cleanup.
+                crate::llm::tidy(&t, &settings, &text, None).0
             } else {
                 text
             }
