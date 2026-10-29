@@ -374,6 +374,21 @@ mod tests {
     }
 
     fn server_with(answer: Result<String, ErrorKind>, limits: Limits) -> (Server, Arc<Fake>, Arc<Mutex<Vec<String>>>) {
+        server_at("127.0.0.1:0", answer, limits).unwrap()
+    }
+
+    /// For checking that a port is free again: one outside the range the system hands out,
+    /// which every other test's servers and connections share (in WSL only 4096 ports) - one
+    /// of them may take the freed port before it is checked. Each such test gets its own
+    /// [from], or they take each other's freed port.
+    fn server_on_quiet_port(from: u16) -> Server {
+        (from..from + 500)
+            .find_map(|port| server_at(&format!("127.0.0.1:{port}"), Ok(String::new()), Limits::default()).ok())
+            .expect("a free port")
+            .0
+    }
+
+    fn server_at(addr: &str, answer: Result<String, ErrorKind>, limits: Limits) -> std::io::Result<(Server, Arc<Fake>, Arc<Mutex<Vec<String>>>)> {
         let fake = Arc::new(Fake(Mutex::new(Vec::new()), answer));
         let log = Arc::new(Mutex::new(Vec::new()));
         let (f, l) = (fake.clone(), log.clone());
@@ -385,7 +400,7 @@ mod tests {
             record: Arc::new(|_, _, _| {}),
             log: Arc::new(move |m| l.lock().unwrap().push(m)),
         };
-        (start_with("127.0.0.1:0".parse().unwrap(), hooks, limits).unwrap(), fake, log)
+        Ok((start_with(addr.parse().unwrap(), hooks, limits)?, fake, log))
     }
 
     fn speech() -> Vec<u8> {
@@ -546,7 +561,7 @@ mod tests {
     #[test]
     fn stopping_frees_the_port_even_with_a_hanging_client() {
         // Review finding: on Windows the old server kept the port after "off".
-        let (srv, _, _) = server(Ok(String::new()));
+        let srv = server_on_quiet_port(23_000);
         let addr = srv.addr;
         let mut hanging = TcpStream::connect(addr).unwrap();
         hanging.write_all(b"POST /testkey/v1/audio/transcriptions HTTP/1.1\r\nContent-Length: 99\r\n\r\n").unwrap();
@@ -565,7 +580,7 @@ mod tests {
 
     #[test]
     fn stopping_frees_the_port() {
-        let (srv, _, _) = server(Ok(String::new()));
+        let srv = server_on_quiet_port(23_500);
         let addr = srv.addr;
         srv.stop();
         assert!(TcpListener::bind(addr).is_ok());
