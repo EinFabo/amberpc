@@ -41,7 +41,7 @@ pub fn config(core: &Core) -> BubbleConfig {
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let size = app.state::<Core>().settings().bubble.size + PAD * 2;
     let window = WebviewWindowBuilder::new(app, BUBBLE, WebviewUrl::App("bubble.html".into()))
-        .title("Amber")
+        .title("Amber bubble")
         .inner_size(size as f64, size as f64)
         .resizable(false)
         .decorations(false)

@@ -25,6 +25,8 @@ tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Tauri's own runtime; only its timer is used directly.
+tokio = { version = "1", features = ["time"] }
 cpal = "0.15"
 arboard = { version = "3", default-features = false }
 
