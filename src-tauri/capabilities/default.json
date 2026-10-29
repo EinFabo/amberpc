@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The settings window and the bubble talk to Amber only through its own commands",
+  "windows": ["settings", "bubble"],
+  "permissions": ["core:event:default", "core:app:default"]
+}
