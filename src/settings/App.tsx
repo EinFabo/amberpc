@@ -16,6 +16,7 @@ import { PhonePage } from "./pages/Phone";
 import { CleanupPage } from "./pages/Cleanup";
 import { ProgramsPage } from "./pages/Programs";
 import { HistoryPage } from "./pages/History";
+import { SnippetsPage } from "./pages/Snippets";
 import { StatisticsPage } from "./pages/Statistics";
 
 export interface PageProps {
@@ -28,7 +29,7 @@ export interface PageProps {
   phase: Phase;
 }
 
-export type PageId = "welcome" | "engine" | "cleanup" | "programs" | "microphone" | "hotkeys" | "bubble" | "insert" | "phone" | "history" | "statistics" | "app";
+export type PageId = "welcome" | "engine" | "cleanup" | "programs" | "snippets" | "microphone" | "hotkeys" | "bubble" | "insert" | "phone" | "history" | "statistics" | "app";
 
 const PAGES: { id: PageId; label: string; value: (o: Overview) => string }[] = [
   { id: "engine", label: "Engine", value: (o) => (o.settings.engine === "local" ? "Local" : providerName(o)) },
@@ -38,6 +39,7 @@ const PAGES: { id: PageId; label: string; value: (o: Overview) => string }[] = [
     value: (o) => (o.settings.cleanup.smart ? (o.settings.cleanup.engine === "local" ? "Local" : "Server") : o.settings.cleanup.fillers ? "Fillers" : "Off"),
   },
   { id: "programs", label: "Programs", value: (o) => String(o.settings.profiles.length) },
+  { id: "snippets", label: "Snippets", value: (o) => String(o.settings.snippets.length) },
   { id: "microphone", label: "Microphone", value: (o) => o.settings.microphone || "Default" },
   { id: "hotkeys", label: "Hotkeys", value: (o) => o.settings.hotkey.dictate || "None" },
   { id: "bubble", label: "Bubble", value: (o) => ({ always: "Shown", whileDictating: "When used", hidden: "Hidden" })[o.settings.bubble.visibility] },
@@ -54,7 +56,7 @@ function providerName(o: Overview) {
 
 function initialPage(): PageId {
   const p = new URLSearchParams(location.search).get("page");
-  return (["welcome", "engine", "cleanup", "programs", "microphone", "hotkeys", "bubble", "insert", "phone", "history", "statistics", "app"] as PageId[]).includes(p as PageId)
+  return (["welcome", "engine", "cleanup", "programs", "snippets", "microphone", "hotkeys", "bubble", "insert", "phone", "history", "statistics", "app"] as PageId[]).includes(p as PageId)
     ? (p as PageId)
     : "engine";
 }
@@ -134,6 +136,7 @@ export function App() {
         {page === "engine" && <EnginePage {...props} />}
         {page === "cleanup" && <CleanupPage {...props} />}
         {page === "programs" && <ProgramsPage {...props} />}
+        {page === "snippets" && <SnippetsPage {...props} />}
         {page === "microphone" && <MicrophonePage {...props} />}
         {page === "hotkeys" && <HotkeysPage {...props} />}
         {page === "bubble" && <BubblePage {...props} />}

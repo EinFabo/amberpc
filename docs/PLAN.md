@@ -88,7 +88,7 @@ took 18.6 s with large-v3-turbo on the CPU). Android 0.16 solved it with ACFT mo
 
 ## Phase 6 - Snippets
 
-- [ ] **Snippets**: a spoken shortcut ("Snippet Adresse", "meine Signatur") inserts a saved
+- [x] **Snippets**: a spoken shortcut ("Snippet Adresse", "meine Signatur") inserts a saved
       text instead of the dictation. Matched after recognition, before the cleanup; a page to
       manage them.
 
