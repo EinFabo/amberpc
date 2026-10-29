@@ -256,7 +256,8 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
         }
     };
     let recognize_ms = t0.elapsed().as_millis();
-    let cleaned = text::clean(&raw);
+    // Fillers out, and - if switched on - the model's tidy-up; a failing cleanup keeps the text.
+    let (cleaned, _skipped) = crate::llm::tidy(app, &settings, &text::clean(&raw));
     if cleaned.is_empty() {
         crate::diag::info(format!("{} ms of audio, nothing recognized", prepared.spoken_ms));
         return fail(app, session, "Nothing recognized.".into(), false);

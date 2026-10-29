@@ -8,7 +8,9 @@ mod diag;
 mod dictation;
 mod hotkeys;
 mod insert;
+mod llm;
 mod phone;
+mod process;
 mod secrets;
 mod state;
 mod tray;
@@ -63,6 +65,12 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     } else if !autostarted {
         bubble::open_settings(app, None);
     }
+    if llm::wants_local(&settings) {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let _ = app.state::<Core>().llm.ensure(&app);
+        });
+    }
     if settings.phone.enabled {
         let app = app.clone();
         std::thread::spawn(move || phone::sync(&app));
@@ -103,6 +111,9 @@ pub fn run() {
             commands::open_url,
             commands::phone_info,
             commands::phone_new_key,
+            commands::start_llm,
+            commands::cleanup_preview,
+            commands::chat_providers,
         ])
         .build(tauri::generate_context!())
         .expect("Amber failed to start")

@@ -1,13 +1,13 @@
 //! The local engine: whisper.cpp's `whisper-server.exe`, started with the chosen model on a
-//! free port on 127.0.0.1. It keeps the model in memory between dictations. A Windows job
-//! object ties it to the app, so it never outlives Amber - not even after a crash.
+//! free port on 127.0.0.1. It keeps the model in memory between dictations; see `process`
+//! for how it is tied to the app.
 
-use std::collections::VecDeque;
-use std::io::{BufRead, BufReader};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::net::{SocketAddr, TcpStream};
+use std::process::{Child, Command};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use crate::process::{self, Output};
 
 use amber_core::local::{self, Layout};
 use serde::Serialize;
@@ -21,7 +21,7 @@ pub struct Status {
 }
 
 impl Status {
-    fn of(state: &'static str, message: Option<String>) -> Self {
+    pub fn of(state: &'static str, message: Option<String>) -> Self {
         Status { state, message }
     }
 }
@@ -43,10 +43,8 @@ struct Running {
 pub struct Whisper {
     running: Mutex<Option<Running>>,
     /// The last lines the server printed - the reason when it dies.
-    output: Arc<Mutex<VecDeque<String>>>,
+    output: Output,
     status: Mutex<Option<Status>>,
-    #[cfg(windows)]
-    job: Mutex<Option<JobHandle>>,
 }
 
 /// How long a model may take to load - large-v3 on a slow CPU from a slow disk.
@@ -96,7 +94,7 @@ impl Whisper {
             if !alive {
                 crate::diag::warn(format!("local engine had exited: {}", self.last_output()));
             }
-            stop_child(r);
+            process::stop(&mut r.child);
             *running = None;
         }
         if let Some(msg) = missing {
@@ -134,8 +132,8 @@ impl Whisper {
     }
 
     fn spawn(&self, layout: &Layout, rt: &local::Runtime, model: &local::Model, key: &Key) -> Result<Running, String> {
-        let port = free_port().map_err(|e| format!("No free port: {e}"))?;
-        let threads = if key.threads == 0 { default_threads() } else { key.threads };
+        let port = process::free_port().map_err(|e| format!("No free port: {e}"))?;
+        let threads = if key.threads == 0 { process::default_threads() } else { key.threads };
         let mut cmd = Command::new(layout.server_exe(rt));
         // whisper-server reads its arguments in the system code page; a user folder with other
         // characters would arrive mangled. So it runs in the models folder and gets only the
@@ -143,37 +141,8 @@ impl Whisper {
         let model_path = layout.model_path(model);
         cmd.current_dir(model_path.parent().unwrap_or(&layout.root))
             .args(["--model", model.file])
-            .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--threads", &threads.to_string()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let mut child = cmd.spawn().map_err(|e| format!("The local engine could not be started: {e}"))?;
-        #[cfg(windows)]
-        self.attach_to_job(&child);
-
-        self.output.lock().unwrap().clear();
-        for pipe in [child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
-                     child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>)]
-            .into_iter()
-            .flatten()
-        {
-            let out = self.output.clone();
-            std::thread::spawn(move || {
-                for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-                    let mut out = out.lock().unwrap();
-                    if out.len() >= 200 {
-                        out.pop_front();
-                    }
-                    out.push_back(line);
-                }
-            });
-        }
+            .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--threads", &threads.to_string()]);
+        let child = process::spawn(cmd, &self.output).map_err(|e| format!("The local engine could not be started: {e}"))?;
 
         // whisper-server opens its port only after the model has loaded.
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -187,7 +156,7 @@ impl Whisper {
                 return Ok(running);
             }
             if Instant::now() > deadline {
-                stop_child(&mut running);
+                process::stop(&mut running.child);
                 return Err("The local engine took too long to load the model.".into());
             }
             std::thread::sleep(Duration::from_millis(150));
@@ -212,7 +181,7 @@ impl Whisper {
     }
 
     fn last_output(&self) -> String {
-        self.output.lock().unwrap().iter().rev().take(6).rev().cloned().collect::<Vec<_>>().join(" | ")
+        process::last_lines(&self.output, 6)
     }
 
     /// The server's last words, turned into advice where they are recognizable.
@@ -230,7 +199,7 @@ impl Whisper {
 
     pub fn stop(&self, app: &tauri::AppHandle) {
         if let Some(mut r) = self.running.lock().unwrap().take() {
-            stop_child(&mut r);
+            process::stop(&mut r.child);
             crate::diag::info("local engine stopped");
         }
         self.set_status(app, Status::of("stopped", None));
@@ -260,69 +229,6 @@ impl Whisper {
         match self.running.try_lock() {
             Ok(mut running) => running.as_mut().map(|r| matches!(r.child.try_wait(), Ok(None))).unwrap_or(false),
             Err(_) => false,
-        }
-    }
-
-    #[cfg(windows)]
-    fn attach_to_job(&self, child: &Child) {
-        use std::os::windows::io::AsRawHandle;
-        let mut job = self.job.lock().unwrap();
-        if job.is_none() {
-            *job = JobHandle::new();
-        }
-        if let Some(job) = job.as_ref() {
-            job.assign(child.as_raw_handle());
-        }
-    }
-}
-
-fn stop_child(r: &mut Running) {
-    let _ = r.child.kill();
-    let _ = r.child.wait();
-}
-
-fn free_port() -> std::io::Result<u16> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
-}
-
-/// Physical cores are what whisper.cpp scales with; hyper-threads mostly get in the way.
-/// Half the logical processors, capped at 8.
-fn default_threads() -> u32 {
-    let logical = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
-    (logical / 2).clamp(2, 8)
-}
-
-#[cfg(windows)]
-struct JobHandle(windows::Win32::Foundation::HANDLE);
-
-// The handle is only used behind the Whisper mutex.
-#[cfg(windows)]
-unsafe impl Send for JobHandle {}
-
-#[cfg(windows)]
-impl JobHandle {
-    fn new() -> Option<Self> {
-        use windows::Win32::System::JobObjects::*;
-        unsafe {
-            let job = CreateJobObjectW(None, None).ok()?;
-            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const _,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-            .ok()?;
-            Some(JobHandle(job))
-        }
-    }
-
-    fn assign(&self, process: std::os::windows::io::RawHandle) {
-        use windows::Win32::System::JobObjects::AssignProcessToJobObject;
-        let process = windows::Win32::Foundation::HANDLE(process);
-        if let Err(e) = unsafe { AssignProcessToJobObject(self.0, process) } {
-            crate::diag::warn(format!("local engine not tied to the app: {e}"));
         }
     }
 }

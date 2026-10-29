@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import type { DownloadEvent, LocalInfo, LocalItem, LocalStatus } from "../../shared/types";
 import type { PageProps } from "../App";
-import { Progress, Row, Section, Segmented, Switch, size } from "../ui";
+import { Row, Section, Segmented, Switch } from "../ui";
+import { DownloadItem, StatusLabel, useLocal } from "../downloads";
 
 const LANGUAGES: [string, string][] = [
   ["auto", "Detect automatically"],
@@ -69,115 +68,44 @@ function Vocabulary({ value, onSave }: { value: string; onSave: (v: string) => v
   );
 }
 
-/** Local engine state and downloads. */
-export function useLocal() {
-  const [info, setInfo] = useState<LocalInfo | null>(null);
-  const [progress, setProgress] = useState<Record<string, DownloadEvent>>({});
-  const [errors, setErrors] = useState<Record<string, string>>({});
-
-  const reload = useCallback(async () => setInfo(await invoke<LocalInfo>("local_info")), []);
-
-  useEffect(() => {
-    void reload();
-    const subs = [
-      listen<DownloadEvent>("download", (e) => {
-        const d = e.payload;
-        setProgress((p) => ({ ...p, [d.key]: d }));
-        if (d.state === "failed") setErrors((x) => ({ ...x, [d.key]: d.message ?? "failed" }));
-        if (d.state !== "running") {
-          setProgress((p) => {
-            const { [d.key]: _, ...rest } = p;
-            return rest;
-          });
-          void reload();
-        }
-      }),
-      listen<LocalStatus>("local-status", (e) => setInfo((i) => (i ? { ...i, status: e.payload } : i))),
-    ];
-    return () => subs.forEach((s) => s.then((un) => un()));
-  }, [reload]);
-
-  const download = async (kind: "runtime" | "model", id: string, select: boolean) => {
-    const key = `${kind}:${id}`;
-    setErrors(({ [key]: _, ...rest }) => rest);
-    setProgress((p) => ({ ...p, [key]: { key, done: 0, total: null, state: "running" } }));
-    await invoke("download", { kind, id, select });
-  };
-
-  return { info, progress, errors, reload, download };
-}
-
 function LocalEngine({ s, save, toast }: PageProps) {
   // A download is selected by Amber once it is complete, so the engine that works now keeps
   // working until then.
-  const { info, progress, errors, reload, download } = useLocal();
+  const local = useLocal();
+  const info = local.info;
   if (!info) return null;
-
-  const item = (kind: "runtime" | "model", it: LocalItem, selected: boolean, select: () => void) => {
-    const key = `${kind}:${it.id}`;
-    const running = progress[key] ?? (info.downloads.includes(key) ? { key, done: 0, total: null, state: "running" as const } : null);
-    const recommended = (kind === "runtime" ? info.recommended[0] : info.recommended[1]) === it.id;
-    const gpuMissing = kind === "runtime" && it.wantsGpu && !info.hasNvidia;
-    return (
-      <div className="item" key={key}>
-        <div
-          className={`radio ${selected ? "on" : ""} ${!it.installed ? "disabled" : ""}`}
-          onClick={() => it.installed && select()}
-          title={it.installed ? "" : "Download it first"}
-        />
-        <div className="name">
-          <div>
-            {it.label}
-            {recommended && <span className="tag amber">recommended</span>}
-            {it.installed && <span className="tag ok">installed</span>}
-          </div>
-          <div className="hint">
-            {it.note} · {size(it.sizeMb)}
-            {gpuMissing && " · no NVIDIA driver found on this PC"}
-          </div>
-          {errors[key] && <div className="note error">{errors[key]}</div>}
-        </div>
-        {running ? (
-          <>
-            <Progress done={running.done} total={running.total} />
-            <button className="btn" onClick={() => invoke("cancel_download", { kind, id: it.id })}>
-              Cancel
-            </button>
-          </>
-        ) : it.installed ? (
-          <button
-            className="btn danger"
-            onClick={async () => {
-              try {
-                await invoke("remove_download", { kind, id: it.id });
-              } catch (e) {
-                toast(String(e));
-              }
-              void reload();
-            }}
-          >
-            Delete
-          </button>
-        ) : (
-          <button
-            className="btn"
-            onClick={() => download(kind, it.id, true)}
-          >
-            Download
-          </button>
-        )}
-      </div>
-    );
-  };
 
   const st = info.status;
   return (
     <>
       <Section title="Runs on">
-        {info.runtimes.map((r) => item("runtime", r, s.local.runtime === r.id, () => save((x) => (x.local.runtime = r.id))))}
+        {info.runtimes.map((r) => (
+          <DownloadItem
+            key={r.id}
+            local={local}
+            kind="runtime"
+            item={r}
+            selected={s.local.runtime === r.id}
+            onSelect={() => save((x) => (x.local.runtime = r.id))}
+            recommended={info.recommended[0] === r.id}
+            warning={r.wantsGpu && !info.hasNvidia ? "no NVIDIA driver found on this PC" : undefined}
+            toast={toast}
+          />
+        ))}
       </Section>
       <Section title="Model">
-        {info.models.map((m) => item("model", m, s.local.model === m.id, () => save((x) => (x.local.model = m.id))))}
+        {info.models.map((m) => (
+          <DownloadItem
+            key={m.id}
+            local={local}
+            kind="model"
+            item={m}
+            selected={s.local.model === m.id}
+            onSelect={() => save((x) => (x.local.model = m.id))}
+            recommended={info.recommended[1] === m.id}
+            toast={toast}
+          />
+        ))}
         {s.local.runtime === "cpu" && info.models.find((m) => m.id === s.local.model)?.wantsGpu && (
           <div className="row">
             <div className="note">This model is slow on a CPU - expect several seconds per sentence.</div>
@@ -185,18 +113,12 @@ function LocalEngine({ s, save, toast }: PageProps) {
         )}
       </Section>
       <Section title="Local engine">
-        <Row
-          label={
-            <>
-              <span className={`dot ${st.state}`} />
-              {{ stopped: "Not loaded", starting: "Loading…", ready: "Ready", failed: "Not available" }[st.state]}
-            </>
-          }
-          hint={st.message ?? undefined}
-        >
-          <button className="btn" disabled={st.state === "starting"} onClick={() => invoke("start_local")}>
-            {st.state === "ready" ? "Reload" : "Load now"}
-          </button>
+        <Row label={<StatusLabel status={st} />} hint={st.message ?? undefined}>
+          {st.state !== "ready" && (
+            <button className="btn" disabled={st.state === "starting"} onClick={() => invoke("start_local")}>
+              Load now
+            </button>
+          )}
         </Row>
         <Row label="Load when Amber starts" hint="The first dictation then does not wait for the model to load. Uses memory while Amber runs.">
           <Switch on={s.local.keepLoaded} onChange={(v) => save((x) => (x.local.keepLoaded = v))} />

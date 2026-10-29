@@ -33,6 +33,7 @@ pub struct Settings {
     pub onboarded: bool,
     /// Amber on the phone may use this PC as its server.
     pub phone: PhoneSettings,
+    pub cleanup: CleanupSettings,
 }
 
 impl Default for Settings {
@@ -53,6 +54,7 @@ impl Default for Settings {
             log_text: false,
             onboarded: false,
             phone: PhoneSettings::default(),
+            cleanup: CleanupSettings::default(),
         }
     }
 }
@@ -197,6 +199,41 @@ impl Default for PhoneSettings {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CleanupSettings {
+    /// Drop "äh", "ähm" and the like - rules, local, instant.
+    pub fillers: bool,
+    /// Let a chat model tidy up: self-corrections, false starts, punctuation.
+    pub smart: bool,
+    /// Where that model runs.
+    pub engine: EngineKind,
+    /// "cpu" or "cuda", see `local::LLM_RUNTIMES`.
+    pub local_runtime: String,
+    /// See `local::LLM_MODELS`.
+    pub local_model: String,
+    /// "groq", "openai" or "custom"; the key is the one the speech engine uses.
+    pub provider: String,
+    /// Only for "custom".
+    pub base_url: String,
+    pub model: String,
+}
+
+impl Default for CleanupSettings {
+    fn default() -> Self {
+        CleanupSettings {
+            fillers: true,
+            smart: false,
+            engine: EngineKind::Local,
+            local_runtime: "cuda".into(),
+            local_model: crate::local::LLM_MODELS[0].id.into(),
+            provider: "groq".into(),
+            base_url: String::new(),
+            model: "openai/gpt-oss-20b".into(),
+        }
+    }
+}
+
 pub const BUBBLE_SIZES: std::ops::RangeInclusive<u32> = 40..=96;
 
 impl Settings {
@@ -226,6 +263,21 @@ impl Settings {
         self.vocabulary = self.vocabulary.chars().take(800).collect();
         if self.phone.port < 1024 {
             self.phone.port = d.phone.port;
+        }
+        let c = &mut self.cleanup;
+        if crate::local::llm_runtime(&c.local_runtime).is_none() {
+            c.local_runtime = d.cleanup.local_runtime.clone();
+        }
+        if crate::local::llm_model(&c.local_model).is_none() {
+            c.local_model = d.cleanup.local_model.clone();
+        }
+        match crate::providers::by_id(&c.provider) {
+            None => {
+                c.provider = d.cleanup.provider.clone();
+                c.model = d.cleanup.model.clone();
+            }
+            Some(p) if c.model.trim().is_empty() => c.model = p.chat_models.first().map(|m| m.id.to_string()).unwrap_or_default(),
+            Some(_) => {}
         }
         self
     }
@@ -320,7 +372,13 @@ mod tests {
         s.server.provider = "nope".into();
         s.server.model = " ".into();
         s.phone.port = 80;
+        s.cleanup.local_model = "gone".into();
+        s.cleanup.provider = "openai".into();
+        s.cleanup.model = "".into();
         let s = s.sanitized();
+        assert_eq!(s.cleanup.local_model, CleanupSettings::default().local_model);
+        assert_eq!(s.cleanup.model, "gpt-4.1-nano");
+        assert!(s.cleanup.fillers && !s.cleanup.smart, "fillers on, the model only when asked for");
         assert_eq!(s.phone.port, 8765);
         assert!(!s.phone.enabled, "the phone API is off unless turned on");
         assert_eq!(s.bubble.size, 96);

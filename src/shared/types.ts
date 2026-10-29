@@ -34,6 +34,16 @@ export interface Settings {
   logText: boolean;
   onboarded: boolean;
   phone: { enabled: boolean; port: number };
+  cleanup: {
+    fillers: boolean;
+    smart: boolean;
+    engine: EngineKind;
+    localRuntime: string;
+    localModel: string;
+    provider: string;
+    baseUrl: string;
+    model: string;
+  };
 }
 
 export interface ProviderInfo {
@@ -75,6 +85,9 @@ export interface LocalInfo {
   status: LocalStatus;
   downloads: string[];
   folder: string;
+  llmRuntimes: LocalItem[];
+  llmModels: LocalItem[];
+  llmStatus: LocalStatus;
 }
 
 export interface DownloadEvent {
@@ -101,4 +114,18 @@ export interface PhoneInfo {
   error?: string | null;
   addresses: { name: string; url: string }[];
   qr?: string | null;
+}
+
+export interface CleanupPreview {
+  fillers: string;
+  smart?: string | null;
+  error?: string | null;
+  ms: number;
+}
+
+export interface ChatProvider {
+  id: string;
+  name: string;
+  models: { id: string; label: string; note: string }[];
+  hasKey: boolean;
 }

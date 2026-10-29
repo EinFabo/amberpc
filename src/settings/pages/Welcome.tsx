@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import type { PageProps } from "../App";
 import { Section, Row, Progress, size } from "../ui";
-import { useLocal } from "./Engine";
+import { useLocal } from "../downloads";
 import { pretty } from "./Hotkeys";
 
 export function WelcomePage(p: PageProps) {

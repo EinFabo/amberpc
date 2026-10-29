@@ -13,6 +13,7 @@ import { InsertPage } from "./pages/Insert";
 import { AppPage } from "./pages/AppPage";
 import { WelcomePage } from "./pages/Welcome";
 import { PhonePage } from "./pages/Phone";
+import { CleanupPage } from "./pages/Cleanup";
 
 export interface PageProps {
   ov: Overview;
@@ -24,10 +25,15 @@ export interface PageProps {
   phase: Phase;
 }
 
-export type PageId = "welcome" | "engine" | "microphone" | "hotkeys" | "bubble" | "insert" | "phone" | "app";
+export type PageId = "welcome" | "engine" | "cleanup" | "microphone" | "hotkeys" | "bubble" | "insert" | "phone" | "app";
 
 const PAGES: { id: PageId; label: string; value: (o: Overview) => string }[] = [
   { id: "engine", label: "Engine", value: (o) => (o.settings.engine === "local" ? "Local" : providerName(o)) },
+  {
+    id: "cleanup",
+    label: "Cleanup",
+    value: (o) => (o.settings.cleanup.smart ? (o.settings.cleanup.engine === "local" ? "Local" : "Server") : o.settings.cleanup.fillers ? "Fillers" : "Off"),
+  },
   { id: "microphone", label: "Microphone", value: (o) => o.settings.microphone || "Default" },
   { id: "hotkeys", label: "Hotkeys", value: (o) => o.settings.hotkey.dictate || "None" },
   { id: "bubble", label: "Bubble", value: (o) => ({ always: "Shown", whileDictating: "When used", hidden: "Hidden" })[o.settings.bubble.visibility] },
@@ -42,7 +48,7 @@ function providerName(o: Overview) {
 
 function initialPage(): PageId {
   const p = new URLSearchParams(location.search).get("page");
-  return (["welcome", "engine", "microphone", "hotkeys", "bubble", "insert", "phone", "app"] as PageId[]).includes(p as PageId)
+  return (["welcome", "engine", "cleanup", "microphone", "hotkeys", "bubble", "insert", "phone", "app"] as PageId[]).includes(p as PageId)
     ? (p as PageId)
     : "engine";
 }
@@ -120,6 +126,7 @@ export function App() {
       <main>
         {page === "welcome" && <WelcomePage {...props} />}
         {page === "engine" && <EnginePage {...props} />}
+        {page === "cleanup" && <CleanupPage {...props} />}
         {page === "microphone" && <MicrophonePage {...props} />}
         {page === "hotkeys" && <HotkeysPage {...props} />}
         {page === "bubble" && <BubblePage {...props} />}
