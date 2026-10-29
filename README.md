@@ -53,6 +53,22 @@ object, so it never outlives Amber.
 API keys are encrypted with Windows DPAPI for your account (`secrets.bin`), never written
 to the settings file or the log.
 
+## Phone API (optional)
+
+Amber on the Android phone can use this PC as its server - same network, the PC's GPU,
+no change to the phone app. Turn it on under *Settings → Phone*; it shows the address to
+enter in the phone's *Engine → Own server* (as text and as a QR code), e.g.
+`http://192.168.178.30:8765/<key>/v1`.
+
+- OpenAI-compatible: `POST /v1/audio/transcriptions` (multipart, WAV) answers `{"text": …}`,
+  `GET /v1/models` lists `amber-pc`. Recognition uses the engine set on the Engine page.
+- The phone's own-server engine has no API key field, so the access key is part of the
+  path; a `Bearer` header with the key works too. A new key locks out old addresses.
+- Only devices in the private network (192.168/16, 10/8, 172.16/12, Tailscale's 100.64/10,
+  loopback) are answered. Off by default; Windows asks once to let Amber through its
+  firewall.
+- Silence answers `{"text": ""}`, which the phone's *Test connection* counts as success.
+
 ## Inserting
 
 The window that had focus when the dictation started gets focus back, Amber waits until the
@@ -68,7 +84,8 @@ up front and leaves the text on the clipboard with a note, instead of pretending
 ## Layout
 
 ```
-crates/core/   pure Rust: audio maths, engines (HTTP), settings, downloads, gestures  → tests
+crates/core/   pure Rust: audio maths, engines (HTTP), settings, downloads, gestures,
+               the phone API server                                                → tests
 src-tauri/     the Windows app: capture, dictation, insertion, whisper process, bubble
 src/           web UI: settings window (React), bubble (canvas)
 tools/win.sh   mirrors the tree to C:\Users\fabia\build\amberpc and builds there

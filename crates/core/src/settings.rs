@@ -31,6 +31,8 @@ pub struct Settings {
     pub log_text: bool,
     /// Set once the first-run setup has been seen.
     pub onboarded: bool,
+    /// Amber on the phone may use this PC as its server.
+    pub phone: PhoneSettings,
 }
 
 impl Default for Settings {
@@ -50,6 +52,7 @@ impl Default for Settings {
             auto_update: true,
             log_text: false,
             onboarded: false,
+            phone: PhoneSettings::default(),
         }
     }
 }
@@ -180,6 +183,20 @@ impl Default for InsertSettings {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PhoneSettings {
+    /// Off until the user turns it on: it opens a port to the home network.
+    pub enabled: bool,
+    pub port: u16,
+}
+
+impl Default for PhoneSettings {
+    fn default() -> Self {
+        PhoneSettings { enabled: false, port: crate::api::DEFAULT_PORT }
+    }
+}
+
 pub const BUBBLE_SIZES: std::ops::RangeInclusive<u32> = 40..=96;
 
 impl Settings {
@@ -207,6 +224,9 @@ impl Settings {
         self.bubble.opacity = if self.bubble.opacity.is_finite() { self.bubble.opacity.clamp(0.3, 1.0) } else { 1.0 };
         self.bubble.y = if self.bubble.y.is_finite() { self.bubble.y.clamp(0.0, 1.0) } else { d.bubble.y };
         self.vocabulary = self.vocabulary.chars().take(800).collect();
+        if self.phone.port < 1024 {
+            self.phone.port = d.phone.port;
+        }
         self
     }
 
@@ -299,7 +319,10 @@ mod tests {
         s.local.model = "gone".into();
         s.server.provider = "nope".into();
         s.server.model = " ".into();
+        s.phone.port = 80;
         let s = s.sanitized();
+        assert_eq!(s.phone.port, 8765);
+        assert!(!s.phone.enabled, "the phone API is off unless turned on");
         assert_eq!(s.bubble.size, 96);
         assert_eq!(s.bubble.opacity, 0.3);
         assert_eq!(s.bubble.y, BubbleSettings::default().y);

@@ -108,6 +108,11 @@ pub fn save_settings(app: AppHandle, core: State<Core>, settings: Settings) -> R
             }
         });
     }
+    if after.phone != before.phone {
+        // Stopping may wait for a phone dictation in progress.
+        let app = app.clone();
+        std::thread::spawn(move || crate::phone::sync(&app));
+    }
     let _ = app.emit("settings-changed", &after);
     match problem {
         Some(p) => Err(p),
@@ -426,4 +431,19 @@ pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
         return Err("Link not allowed.".into());
     }
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Whether the phone API runs, at which addresses (key included), and a QR code to scan.
+#[tauri::command]
+pub async fn phone_info(app: AppHandle) -> crate::phone::Info {
+    crate::phone::info(&app.state::<Core>())
+}
+
+/// A new access key: the addresses the phone has stop working.
+#[tauri::command]
+pub async fn phone_new_key(app: AppHandle) -> Result<crate::phone::Info, String> {
+    let core = app.state::<Core>();
+    crate::phone::new_key(&core)?;
+    crate::diag::info("phone API: new key");
+    Ok(crate::phone::info(&core))
 }

@@ -33,6 +33,7 @@ export interface Settings {
   autoUpdate: boolean;
   logText: boolean;
   onboarded: boolean;
+  phone: { enabled: boolean; port: number };
 }
 
 export interface ProviderInfo {
@@ -93,4 +94,11 @@ export interface LogEntry {
 export interface UpdateInfo {
   version: string;
   notes?: string | null;
+}
+
+export interface PhoneInfo {
+  running: boolean;
+  error?: string | null;
+  addresses: { name: string; url: string }[];
+  qr?: string | null;
 }

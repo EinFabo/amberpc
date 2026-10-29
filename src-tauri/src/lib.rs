@@ -8,6 +8,7 @@ mod diag;
 mod dictation;
 mod hotkeys;
 mod insert;
+mod phone;
 mod secrets;
 mod state;
 mod tray;
@@ -62,6 +63,10 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     } else if !autostarted {
         bubble::open_settings(app, None);
     }
+    if settings.phone.enabled {
+        let app = app.clone();
+        std::thread::spawn(move || phone::sync(&app));
+    }
     updates::spawn(app);
     Ok(())
 }
@@ -96,6 +101,8 @@ pub fn run() {
             commands::check_update,
             commands::install_update,
             commands::open_url,
+            commands::phone_info,
+            commands::phone_new_key,
         ])
         .build(tauri::generate_context!())
         .expect("Amber failed to start")
