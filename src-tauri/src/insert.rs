@@ -33,7 +33,7 @@ mod win {
         KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
         VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_V,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow};
 
     /// The program file of a process, lowercase: "discord.exe".
     fn exe_of_pid(pid: u32) -> Option<String> {
@@ -143,17 +143,27 @@ mod win {
     /// window of the same program (a popup, a second browser window). If the user moved on to
     /// another program while Amber was recognizing, nothing is typed there.
     fn still_in_front(target: Target) -> bool {
-        let fg = unsafe { GetForegroundWindow() };
         let hwnd = HWND(target.hwnd as *mut _);
+        let mut fg = unsafe { GetForegroundWindow() };
+        // Amber itself in front (its tray menu, used to stop the dictation): it may hand the
+        // focus back, Windows allows that to the program in front.
+        if pid_of(fg) == unsafe { GetCurrentProcessId() } && !is_settings_window(fg) {
+            unsafe {
+                let _ = SetForegroundWindow(hwnd);
+            }
+            std::thread::sleep(Duration::from_millis(60));
+            fg = unsafe { GetForegroundWindow() };
+        }
         if fg == hwnd {
             return true;
         }
-        let (mut a, mut b) = (0u32, 0u32);
-        unsafe {
-            GetWindowThreadProcessId(fg, Some(&mut a));
-            GetWindowThreadProcessId(hwnd, Some(&mut b));
+        let (a, b) = (pid_of(fg), pid_of(hwnd));
+        if a == 0 || a != b {
+            return false;
         }
-        a != 0 && a == b
+        // Store apps all live in ApplicationFrameHost's frames, and Explorer windows, the
+        // taskbar and the desktop share one process: there only the same window counts.
+        !matches!(exe_of_pid(a).as_deref(), Some("applicationframehost.exe" | "explorer.exe"))
     }
 
     const MODIFIERS: [VIRTUAL_KEY; 11] =

@@ -282,7 +282,13 @@ fn threads() -> u32 {
 /// Installed memory, for the model suggestion.
 #[cfg(windows)]
 fn total_ram_mb() -> u64 {
-    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows::Win32::System::SystemInformation::{GetPhysicallyInstalledSystemMemory, GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // What is built in (8 GB), not what Windows can use after the graphics took its share
+    // (often 7.2-7.7 GB on laptops) - the suggestion is about the machine.
+    let mut kb = 0u64;
+    if unsafe { GetPhysicallyInstalledSystemMemory(&mut kb) }.is_ok() && kb > 0 {
+        return kb / 1024;
+    }
     let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
     match unsafe { GlobalMemoryStatusEx(&mut status) } {
         Ok(()) => status.ullTotalPhys / (1 << 20),

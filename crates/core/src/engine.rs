@@ -156,19 +156,51 @@ impl Transcriber for WhisperServerTranscriber {
             .part("file", wav_part(wav))
             .text("response_format", "json")
             .text("temperature", "0.0")
+            // As Amber for Android decodes (and measured its speed): no timestamp tokens.
+            .text("no_timestamps", "true")
             .text("language", options.language.clone().unwrap_or_else(|| "auto".into()));
         if let Some(prompt) = &options.prompt {
             form = form.text("prompt", prompt.clone());
         }
+        let mut full_window = false;
         if let Some(slack) = self.context_slack {
             // 16-bit mono after the 44-byte header Amber writes.
             let ctx = crate::local::audio_ctx_for(wav.len().saturating_sub(44) / 2, slack);
             if ctx > 0 {
                 form = form.text("audio_ctx", ctx.to_string());
             }
+            full_window = ctx == 0;
         }
-        read_text(self.http.post(format!("{}/inference", self.base_url)).multipart(form).send().map_err(network_error)?)
+        let result = read_text(self.http.post(format!("{}/inference", self.base_url)).multipart(form).send().map_err(network_error)?);
+        if full_window {
+            // whisper.cpp detects the language with the previous request's context; after a
+            // full window that would cost the next short dictation a 30 s encoder pass.
+            let (http, base) = (self.http.clone(), self.base_url.clone());
+            std::thread::spawn(move || reset_context(&http, &base));
+        }
+        result
     }
+}
+
+impl WhisperServerTranscriber {
+    /// Leaves the server's state at a short context: after loading a tuned model, and after a
+    /// dictation that needed the full window.
+    pub fn reset_context(&self) {
+        reset_context(&self.http, &self.base_url);
+    }
+}
+
+/// A second of silence with a fixed language and the smallest context - whisper.cpp keeps
+/// that context for its next language detection. Also warms the GPU up.
+fn reset_context(http: &Client, base_url: &str) {
+    let silence = crate::audio::encode_wav(&vec![0.0; 19_200], crate::audio::TARGET_RATE);
+    let form = multipart::Form::new()
+        .part("file", wav_part(&silence))
+        .text("response_format", "json")
+        .text("no_timestamps", "true")
+        .text("language", "en")
+        .text("audio_ctx", "256");
+    let _ = http.post(format!("{base_url}/inference")).multipart(form).send();
 }
 
 /// Whether a local server (whisper.cpp, llama.cpp) is up and done loading. Both answer 503
@@ -381,6 +413,21 @@ mod tests {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let e = WhisperServerTranscriber::new(&format!("http://127.0.0.1:{port}"), None).transcribe(b"", &TranscribeOptions::default()).unwrap_err();
         assert_eq!(e.kind, ErrorKind::Unreachable);
+    }
+
+    #[test]
+    fn a_full_window_is_followed_by_a_short_reset() {
+        let (url, rx) = serve(vec![
+            (200, "application/json", br#"{"text":"long"}"#.to_vec()),
+            (200, "application/json", br#"{"text":""}"#.to_vec()),
+        ]);
+        // 30 s: past the short-context range.
+        let wav = crate::audio::encode_wav(&vec![0.1; 16_000 * 30], 16_000);
+        WhisperServerTranscriber::new(&url, Some(128)).transcribe(&wav, &TranscribeOptions::default()).unwrap();
+        let first = String::from_utf8_lossy(&rx.recv().unwrap().body).to_string();
+        assert!(!first.contains("audio_ctx") && first.contains("name=\"no_timestamps\"\r\n\r\ntrue"));
+        let reset = String::from_utf8_lossy(&rx.recv_timeout(Duration::from_secs(5)).unwrap().body).to_string();
+        assert!(reset.contains("name=\"audio_ctx\"\r\n\r\n256") && reset.contains("name=\"language\"\r\n\r\nen"));
     }
 
     #[test]

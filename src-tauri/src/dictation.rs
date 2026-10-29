@@ -379,10 +379,26 @@ fn recognize(app: &AppHandle, settings: &Settings, wav: &[u8], options: &Transcr
             result = picked.transcriber.transcribe(wav, options);
         } else if settings.engine == EngineKind::Server && e.kind.service_unavailable() && settings.server.local_fallback && local_ready(&core, settings) {
             crate::diag::warn(format!("server unavailable ({}), recognizing on this PC", e.detail));
-            crate::notify(app, "Amber", "The server could not be reached - recognized on this PC instead.");
-            picked = local(app)?;
-            t0 = Instant::now();
-            result = picked.transcriber.transcribe(wav, options);
+            let server_error = e.message.clone();
+            let local_result = local(app).and_then(|p| {
+                let t = Instant::now();
+                let r = p.transcriber.transcribe(wav, options).map_err(|e| e.message);
+                Ok((p, t, r))
+            });
+            match local_result {
+                Ok((p, t, Ok(raw))) => {
+                    crate::notify(app, "Amber", "The server could not be reached - recognized on this PC instead.");
+                    unload_after_fallback(app);
+                    picked = p;
+                    t0 = t;
+                    result = Ok(raw);
+                }
+                // The server's failure is the one the user needs to hear about.
+                Ok((_, _, Err(local))) | Err(local) => {
+                    crate::diag::warn(format!("local fallback failed too: {local}"));
+                    return Err(server_error);
+                }
+            }
         }
     }
     match result {
@@ -396,6 +412,22 @@ fn recognize(app: &AppHandle, settings: &Settings, wav: &[u8], options: &Transcr
             Err(e.message)
         }
     }
+}
+
+/// The model loaded for a fallback holds memory the server engine does not need: unloaded
+/// after ten minutes without another fallback.
+fn unload_after_fallback(app: &AppHandle) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let this = LAST.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(600));
+        let core = app.state::<Core>();
+        if LAST.load(Ordering::SeqCst) == this && core.settings().engine == EngineKind::Server && !core.dictation.is_active() {
+            core.whisper.stop(&app);
+        }
+    });
 }
 
 /// Whether the local engine could take over: runtime and model downloaded.
