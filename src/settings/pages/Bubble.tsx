@@ -1,4 +1,6 @@
-import type { BubbleVisibility, Edge } from "../../shared/types";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import type { BubbleVisibility, Edge, Program } from "../../shared/types";
 import type { PageProps } from "../App";
 import { Row, Section, Segmented, Slider, Switch } from "../ui";
 
@@ -33,13 +35,74 @@ export function BubblePage({ s, save }: PageProps) {
         <Row label="Size">
           <Slider min={40} max={96} step={4} value={s.bubble.size} onCommit={(v) => save((x) => (x.bubble.size = v))} />
         </Row>
-        <Row label="Opacity">
+        <Row label="Place" hint="Drag the bubble anywhere; it settles at the nearer edge.">
+          <button
+            className="btn"
+            onClick={() =>
+              save((x) => {
+                x.bubble.edge = "right";
+                x.bubble.y = 0.62;
+                x.bubble.monitor = "";
+              })
+            }
+          >
+            Back to its place
+          </button>
+        </Row>
+        <Row label="Opacity at rest" hint="While dictating, the bubble is always fully visible.">
           <Slider min={30} max={100} step={5} value={Math.round(s.bubble.opacity * 100)} onCommit={(v) => save((x) => (x.bubble.opacity = v / 100))} />
         </Row>
         <Row label="Sounds" hint="A short tone when a dictation starts and stops.">
           <Switch on={s.sounds} onChange={(v) => save((x) => (x.sounds = v))} />
         </Row>
       </Section>
+      <Section title="Out of the way">
+        <Row label="Over full-screen programs" hint="Games and videos in full screen keep the screen to themselves. The hotkey and the Stream Deck still work.">
+          <Switch on={s.bubble.hideFullscreen} onChange={(v) => save((x) => (x.bubble.hideFullscreen = v))} />
+        </Row>
+        <HiddenIn list={s.bubble.hiddenIn} onChange={(list) => save((x) => (x.bubble.hiddenIn = list))} />
+      </Section>
+    </>
+  );
+}
+
+function HiddenIn({ list, onChange }: { list: string[]; onChange: (list: string[]) => void }) {
+  const [running, setRunning] = useState<Program[]>([]);
+  const [pick, setPick] = useState("");
+  useEffect(() => {
+    void invoke<Program[]>("running_programs").then(setRunning);
+  }, []);
+  return (
+    <>
+      <Row label="In these programs" hint="Apps with their own voice input, or where the bubble is in the way.">
+        <select value={pick} onChange={(e) => setPick(e.target.value)}>
+          <option value="">Pick an open program…</option>
+          {running
+            .filter((r) => !list.includes(r.exe))
+            .map((r) => (
+              <option key={r.exe} value={r.exe}>
+                {r.exe}
+              </option>
+            ))}
+        </select>
+        <button
+          className="btn"
+          disabled={!pick}
+          onClick={() => {
+            onChange([...list, pick]);
+            setPick("");
+          }}
+        >
+          Add
+        </button>
+      </Row>
+      {list.map((exe) => (
+        <Row key={exe} label={exe}>
+          <button className="btn danger" onClick={() => onChange(list.filter((e) => e !== exe))}>
+            Remove
+          </button>
+        </Row>
+      ))}
     </>
   );
 }

@@ -29,9 +29,13 @@ pub enum Phase {
 }
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct StateEvent {
     pub state: Phase,
     pub message: Option<String>,
+    /// While recognizing: how long it is expected to take, for the bubble's progress ring.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_ms: Option<u64>,
 }
 
 struct Inner {
@@ -73,7 +77,7 @@ impl Dictation {
 }
 
 fn announce(app: &AppHandle, phase: Phase, message: Option<String>) {
-    let _ = app.emit("dictation-state", StateEvent { state: phase, message });
+    let _ = app.emit("dictation-state", StateEvent { state: phase, message, expected_ms: None });
     crate::bubble::sync_visibility(app, !matches!(phase, Phase::Idle));
 }
 
@@ -247,6 +251,14 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
             return fail(app, session, "Nothing heard - is the right microphone selected?".into(), false);
         }
     };
+
+    // The bubble's ring fills against what recognition is expected to take here.
+    let (estimate_key, typical) = match settings.engine {
+        EngineKind::Local => (estimate::key("local", &settings.local.runtime, &settings.local.model), 0.1),
+        EngineKind::Server => (estimate::key(&settings.server.provider, "", &settings.server.model), 0.05),
+    };
+    let expected = core.estimates.expected_ms(&estimate_key, prepared.spoken_ms, typical, OVERHEAD_MS);
+    let _ = app.emit("dictation-state", StateEvent { state: Phase::Transcribing, message: None, expected_ms: Some(expected) });
 
     let options = TranscribeOptions::new(&settings.language, &settings.vocabulary);
     let (raw, engine, recognize_ms) = match recognize(app, &settings, &prepared.wav, &options, prepared.spoken_ms) {

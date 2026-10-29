@@ -62,10 +62,18 @@ export class Fire {
   private bars = [0, 0, 0];
   private visual: Visual = "idle";
   private since = performance.now();
+  /** While working: the expected duration; the rim fills against it. */
+  private expectedMs: number | null = null;
   level = 0;
+
+  expect(ms: number | null) {
+    this.expectedMs = ms;
+    this.since = performance.now();
+  }
 
   set(visual: Visual) {
     if (visual === this.visual) return;
+    if (visual !== "working") this.expectedMs = null;
     this.visual = visual;
     this.since = performance.now();
     if (visual === "error") this.sparks = [];
@@ -104,7 +112,8 @@ export class Fire {
         break;
       case "working":
         this.drawFlame(ctx, cx, cy, r, elapsed);
-        this.drawFuse(ctx, cx, cy, r, elapsed);
+        if (this.expectedMs) this.drawRing(ctx, cx, cy, r, progress(elapsed, this.expectedMs));
+        else this.drawFuse(ctx, cx, cy, r, elapsed);
         break;
       case "done":
         this.drawTick(ctx, cx, cy, r, Math.min(1, elapsed / 220));
@@ -150,6 +159,29 @@ export class Fire {
       ctx.stroke();
     });
     ctx.globalAlpha = 1;
+  }
+
+  /** The rim filling from the top, a spark at its head - against the learned estimate. */
+  private drawRing(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, p: number) {
+    const rr = r * FUSE_RADIUS;
+    const start = -Math.PI / 2;
+    const end = start + p * Math.PI * 2;
+    ctx.lineCap = "round";
+    ctx.lineWidth = Math.max(2, r * 0.1);
+    ctx.strokeStyle = AMBER;
+    ctx.globalAlpha = 0.2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath();
+    ctx.arc(cx, cy, rr, start, end);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = SPARK;
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(end) * rr, cy + Math.sin(end) * rr, ctx.lineWidth * 0.75, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   private drawTick(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: number) {
@@ -251,4 +283,16 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
 
 function easeOut(t: number) {
   return 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 3);
+}
+
+/**
+ * Where the ring stands after [elapsed] of an [expected] duration: linear up to 90 %, then
+ * creeping towards - never reaching - full, so an underestimate does not leave a finished-
+ * looking ring waiting. Same curve as Amber for Android and estimate.rs.
+ */
+export function progress(elapsed: number, expected: number): number {
+  if (expected <= 0) return 0;
+  const t = elapsed / expected;
+  if (t <= 0.9) return Math.max(0, t);
+  return 0.9 + (0.98 - 0.9) * (1 - Math.exp(-(t - 0.9) * 2));
 }

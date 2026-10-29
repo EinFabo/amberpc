@@ -158,8 +158,12 @@ pub struct BubbleSettings {
     pub monitor: String,
     /// Diameter in logical pixels.
     pub size: u32,
-    /// 0.3..1
+    /// 0.3..1, at rest; dictating, the bubble is fully visible.
     pub opacity: f64,
+    /// Programs the bubble stays away from (games, apps with their own voice input), by exe.
+    pub hidden_in: Vec<String>,
+    /// Out of the way while a program fills the whole screen (games, videos).
+    pub hide_fullscreen: bool,
 }
 
 impl Default for BubbleSettings {
@@ -171,6 +175,8 @@ impl Default for BubbleSettings {
             monitor: String::new(),
             size: 56,
             opacity: 1.0,
+            hidden_in: Vec::new(),
+            hide_fullscreen: true,
         }
     }
 }
@@ -283,6 +289,12 @@ impl Settings {
         self.bubble.size = self.bubble.size.clamp(*BUBBLE_SIZES.start(), *BUBBLE_SIZES.end());
         self.bubble.opacity = if self.bubble.opacity.is_finite() { self.bubble.opacity.clamp(0.3, 1.0) } else { 1.0 };
         self.bubble.y = if self.bubble.y.is_finite() { self.bubble.y.clamp(0.0, 1.0) } else { d.bubble.y };
+        let mut seen = std::collections::HashSet::new();
+        self.bubble.hidden_in = std::mem::take(&mut self.bubble.hidden_in)
+            .into_iter()
+            .map(|e| crate::profiles::exe_name(&e))
+            .filter(|e| !e.is_empty() && seen.insert(e.clone()))
+            .collect();
         self.vocabulary = self.vocabulary.chars().take(800).collect();
         if self.phone.port < 1024 {
             self.phone.port = d.phone.port;

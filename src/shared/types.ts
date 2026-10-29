@@ -5,6 +5,8 @@ export type Phase = "idle" | "recording" | "transcribing" | "inserting" | "done"
 export interface DictationEvent {
   state: Phase;
   message?: string | null;
+  /** While recognizing: the expected duration, for the progress ring. */
+  expectedMs?: number;
 }
 
 export interface BubbleConfig {
@@ -36,7 +38,16 @@ export interface Settings {
   vocabulary: string;
   microphone: string;
   hotkey: { dictate: string; mode: HotkeyMode; toggleBubble: string };
-  bubble: { visibility: BubbleVisibility; edge: Edge; y: number; monitor: string; size: number; opacity: number };
+  bubble: {
+    visibility: BubbleVisibility;
+    edge: Edge;
+    y: number;
+    monitor: string;
+    size: number;
+    opacity: number;
+    hiddenIn: string[];
+    hideFullscreen: boolean;
+  };
   insert: { method: InsertMethod; restoreClipboard: boolean; trailingSpace: boolean };
   sounds: boolean;
   autostart: boolean;
