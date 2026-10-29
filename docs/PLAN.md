@@ -80,7 +80,7 @@ took 18.6 s with large-v3-turbo on the CPU). Android 0.16 solved it with ACFT mo
 
 ## Phase 5 - Long dictations
 
-- [ ] **Recognize while speaking** (port `VadPolicy`, `ChunkPlanner`,
+- [x] **Recognize while speaking** (port `VadPolicy`, `ChunkPlanner`,
       `ChunkedTranscription`): long dictations are cut at real pauses, finished parts are
       recognized in the background with the text so far as prompt, the language of the first
       part is kept; after the stop only the last part is left. Local engines only (servers are

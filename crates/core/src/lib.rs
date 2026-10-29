@@ -3,6 +3,7 @@
 pub mod api;
 pub mod audio;
 pub mod autostart;
+pub mod chunking;
 pub mod cleanup;
 pub mod commas;
 pub mod control;

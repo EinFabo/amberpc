@@ -32,7 +32,7 @@ export interface Profile {
 
 export interface Settings {
   engine: EngineKind;
-  local: { runtime: string; model: string; threads: number; keepLoaded: boolean };
+  local: { runtime: string; model: string; threads: number; keepLoaded: boolean; chunking: boolean };
   server: { provider: string; baseUrl: string; model: string; localFallback: boolean };
   language: string;
   vocabulary: string;
