@@ -257,8 +257,9 @@ mod tests {
 
     #[test]
     fn resample_odd_rates() {
-        // 44.1 kHz goes through a 160-phase table, 44 056 Hz through the direct path.
-        for from in [44_100, 44_056, 22_050] {
+        // 44.1 kHz goes through a 160-phase table; 44 057 Hz (coprime with 16 kHz, 16 000
+        // phases) through the direct path.
+        for from in [44_100, 44_057, 22_050] {
             let out = resample(&sine(1_000.0, from, 500, 0.5), from, 16_000);
             assert!(out.len().abs_diff(8_000) <= 1, "{from}: {}", out.len());
             assert!((rms(&out[1_000..7_000]) - 0.354).abs() < 0.01, "{from}: {}", rms(&out[1_000..7_000]));

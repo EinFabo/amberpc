@@ -254,8 +254,13 @@ impl Whisper {
     }
 
     /// The server died and the next dictation will restart it - or it is running fine.
+    /// Never waits: while another thread loads a model (and holds the lock), the answer is
+    /// simply "not ready".
     pub fn is_ready(&self) -> bool {
-        self.running.lock().unwrap().as_mut().map(|r| matches!(r.child.try_wait(), Ok(None))).unwrap_or(false)
+        match self.running.try_lock() {
+            Ok(mut running) => running.as_mut().map(|r| matches!(r.child.try_wait(), Ok(None))).unwrap_or(false),
+            Err(_) => false,
+        }
     }
 
     #[cfg(windows)]

@@ -30,8 +30,8 @@ export function WelcomePage(p: PageProps) {
       x.local.runtime = rtId;
       x.local.model = modelId;
     });
-    if (!rt.installed) await download("runtime", rtId);
-    if (!model.installed) await download("model", modelId);
+    if (!rt.installed) await download("runtime", rtId, true);
+    if (!model.installed) await download("model", modelId, true);
   };
 
   return (

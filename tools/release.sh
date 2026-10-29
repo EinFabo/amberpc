@@ -22,12 +22,15 @@ if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then echo "$TAG already re
 
 echo "== tests"
 cargo test -p amber-core --quiet
-tools/win.sh test | tail -3
-echo "== build $TAG"
-tools/win.sh build | grep -E "Finished|error" || true
-
+tools/win.sh test > /dev/null || { echo "Windows tests failed - run tools/win.sh test"; exit 1; }
 BUNDLE="/mnt/c/Users/fabia/build/amberpc/target/release/bundle/nsis"
 SETUP="Amber_${VERSION}_x64-setup.exe"
+echo "== build $TAG"
+# An installer left over from an earlier build must never go out under this tag.
+rm -f "$BUNDLE/$SETUP" "$BUNDLE/$SETUP.sig"
+LOG="$(mktemp)"
+tools/win.sh build > "$LOG" 2>&1 || { tail -40 "$LOG"; echo "build failed"; exit 1; }
+rm -f "$LOG"
 [ -f "$BUNDLE/$SETUP" ] && [ -f "$BUNDLE/$SETUP.sig" ] || { echo "installer or signature missing in $BUNDLE"; exit 1; }
 OUT="$(mktemp -d)"
 cp "$BUNDLE/$SETUP" "$BUNDLE/$SETUP.sig" "$OUT/"
