@@ -2,7 +2,6 @@
 //! free port on 127.0.0.1. It keeps the model in memory between dictations; see `process`
 //! for how it is tied to the app.
 
-use std::net::{SocketAddr, TcpStream};
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -144,15 +143,16 @@ impl Whisper {
             .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--threads", &threads.to_string()]);
         let child = process::spawn(cmd, &self.output).map_err(|e| format!("The local engine could not be started: {e}"))?;
 
-        // whisper-server opens its port only after the model has loaded.
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        // Not the open port: this whisper-server opens it before the model has loaded and
+        // answers 503 until then.
+        let base = format!("http://127.0.0.1:{port}");
         let deadline = Instant::now() + START_TIMEOUT;
         let mut running = Running { child, port, key: key.clone() };
         loop {
             if let Ok(Some(status)) = running.child.try_wait() {
                 return Err(format!("The local engine stopped while loading ({status}). {}", self.explain()));
             }
-            if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+            if amber_core::engine::local_server_ready(&base) {
                 return Ok(running);
             }
             if Instant::now() > deadline {

@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use amber_core::audio::{self, Rejected};
-use amber_core::engine::{OpenAiTranscriber, TranscribeOptions, Transcriber, WhisperServerTranscriber};
+use amber_core::engine::{ErrorKind, OpenAiTranscriber, TranscribeOptions, Transcriber, WhisperServerTranscriber};
 use amber_core::providers;
 use amber_core::settings::{EngineKind, Settings};
 use amber_core::text;
@@ -248,7 +248,17 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
         Err(e) => return fail(app, session, e, true),
     };
     let options = TranscribeOptions::new(&settings.language, &settings.vocabulary);
-    let raw = match transcriber.transcribe(&prepared.wav, &options) {
+    let mut result = transcriber.transcribe(&prepared.wav, &options);
+    // The local server went away mid-request - restarted for another model, or crashed. The
+    // engine the settings ask for now gets one more try instead of losing the dictation.
+    if settings.engine == EngineKind::Local && matches!(&result, Err(e) if e.kind == ErrorKind::Unreachable) {
+        crate::diag::warn("local engine went away during the request, trying again");
+        result = match transcriber_for(app) {
+            Ok(t) => t.transcribe(&prepared.wav, &options),
+            Err(e) => return fail(app, session, e, true),
+        };
+    }
+    let raw = match result {
         Ok(raw) => raw,
         Err(e) => {
             crate::diag::warn(format!("engine error: {}", e.detail));
@@ -305,6 +315,10 @@ fn engine_label(s: &Settings) -> String {
         EngineKind::Local => format!("local {}/{}", s.local.runtime, s.local.model),
         EngineKind::Server => format!("{} {}", s.server.provider, s.server.model),
     }
+}
+
+fn transcriber_for(app: &AppHandle) -> Result<Box<dyn Transcriber>, String> {
+    transcriber(app, &app.state::<Core>().settings())
 }
 
 /// The engine the settings ask for, ready to use - or why not.

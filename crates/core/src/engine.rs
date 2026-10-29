@@ -146,6 +146,19 @@ impl Transcriber for WhisperServerTranscriber {
     }
 }
 
+/// Whether a local server (whisper.cpp, llama.cpp) is up and done loading. Both answer 503
+/// while their model loads - whisper.cpp even opens its port before that, so an open port
+/// alone says nothing. Any other answer, even a 404 for a missing /health, means ready.
+pub fn local_server_ready(base_url: &str) -> bool {
+    let url = format!("{}/health", base_url.trim_end_matches('/'));
+    Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .ok()
+        .and_then(|c| c.get(url).send().ok())
+        .is_some_and(|r| r.status().as_u16() != 503)
+}
+
 fn wav_part(wav: &[u8]) -> multipart::Part {
     multipart::Part::bytes(wav.to_vec()).file_name("dictation.wav").mime_str("audio/wav").expect("static mime")
 }
@@ -328,6 +341,16 @@ mod tests {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let e = WhisperServerTranscriber::new(&format!("http://127.0.0.1:{port}")).transcribe(b"", &TranscribeOptions::default()).unwrap_err();
         assert_eq!(e.kind, ErrorKind::Unreachable);
+    }
+
+    #[test]
+    fn local_server_readiness() {
+        let (url, _rx) = serve(vec![json(503, r#"{"status":"loading model"}"#), json(200, "{}"), json(404, "{}")]);
+        assert!(!local_server_ready(&url), "503 is still loading");
+        assert!(local_server_ready(&url));
+        assert!(local_server_ready(&url), "no /health at all, but answering");
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        assert!(!local_server_ready(&format!("http://127.0.0.1:{port}")), "not listening");
     }
 
     #[test]
