@@ -42,8 +42,9 @@ impl Memory {
                 Ok(plain) => History::from_bytes(&plain),
                 Err(e) => {
                     // Another Windows account, a restored backup: kept aside, not overwritten.
-                    crate::diag::warn(format!("history unreadable ({e}), kept as history.unreadable.bin"));
-                    let _ = std::fs::rename(&history_path, data_dir.join("history.unreadable.bin"));
+                    let aside = data_dir.join(format!("history.unreadable-{}.bin", now_ms()));
+                    crate::diag::warn(format!("history unreadable ({e}), kept as {}", aside.display()));
+                    let _ = std::fs::rename(&history_path, aside);
                     History::default()
                 }
             },
