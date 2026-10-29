@@ -108,6 +108,7 @@ export function PhonePage({ s, save, toast }: PageProps) {
             >
               <Switch on={s.phone.cleanup} onChange={(v) => save((x) => (x.phone.cleanup = v))} />
             </Row>
+            <Row label="History and statistics" hint={s.history ? "The phone's dictations are kept in the PC's history and counted in its statistics, as “phone”." : "The history is off; the phone's dictations are only counted."} />
           </Section>
           <Section title="Access">
             <Row label="Access key" hint="It is part of the address. A new key locks out every phone that has the old address.">

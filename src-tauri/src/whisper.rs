@@ -225,6 +225,11 @@ impl Whisper {
         self.set_status(app, Status::of("stopped", None));
     }
 
+    /// The model the server runs right now, without waiting on a load in progress.
+    pub fn running_model(&self) -> Option<String> {
+        self.running.try_lock().ok()?.as_ref().map(|r| r.key.model.clone())
+    }
+
     /// Stops the server only if it runs from [runtime] - before that runtime's files are
     /// replaced or deleted.
     pub fn stop_runtime(&self, app: &tauri::AppHandle, runtime: &str) {

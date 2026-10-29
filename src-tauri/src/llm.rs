@@ -278,9 +278,8 @@ pub fn cleaner(app: &AppHandle, s: &Settings, wait: bool) -> Result<ChatCleaner,
     }
 }
 
-/// What the dictation gets, in this order: a snippet if the dictation is its phrase, else
-/// spoken punctuation ("neue Zeile", "Komma"),
-/// fillers out, German commas, and - when the smart cleanup runs for [profile]'s program - the
+/// What the dictation gets: a snippet if the dictation is its phrase; else the rules (fillers,
+/// spoken punctuation, German commas), and - when the smart cleanup runs for [profile]'s program - the
 /// model's tidy-up in that program's style. A failing model leaves the text as it was: never
 /// lost, never stuck. Returns why the model was skipped, if it was.
 pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str, profile: Option<&Profile>) -> (String, Option<String>) {
@@ -312,15 +311,15 @@ pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str, profile: Option<&Pr
     }
 }
 
-/// The steps that are rules: instant, local, nothing invented.
+/// The steps that are rules - see `text::by_rule` for the order and why.
 pub fn by_rule(s: &Settings, recognized: &str) -> String {
-    let mut text = if s.cleanup.spoken_punctuation { amber_core::spoken::apply(recognized) } else { recognized.to_string() };
-    if s.cleanup.fillers {
-        text = amber_core::text::strip_fillers(&text);
-    }
-    let language = (s.language != "auto").then_some(s.language.as_str());
-    if s.cleanup.german_commas && amber_core::commas::is_german(language, &text) {
-        text = amber_core::commas::apply(&text);
-    }
-    text
+    amber_core::text::by_rule(
+        recognized,
+        amber_core::text::Rules {
+            fillers: s.cleanup.fillers,
+            spoken_punctuation: s.cleanup.spoken_punctuation,
+            german_commas: s.cleanup.german_commas,
+            language: (s.language != "auto").then_some(s.language.as_str()),
+        },
+    )
 }

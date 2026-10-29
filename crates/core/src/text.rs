@@ -95,6 +95,30 @@ pub fn strip_fillers(text: &str) -> String {
     out
 }
 
+/// Which rule steps run - see [by_rule].
+#[derive(Clone, Copy, Debug)]
+pub struct Rules<'a> {
+    pub fillers: bool,
+    pub spoken_punctuation: bool,
+    pub german_commas: bool,
+    /// The set language ("de"), or None for automatic.
+    pub language: Option<&'a str>,
+}
+
+/// The steps that are rules - instant, local, nothing invented - in an order that keeps them
+/// out of each other's way: fillers first (so "ähm Komma" keeps its comma, and no line break
+/// exists yet to be flattened), then spoken punctuation, then German commas line by line.
+pub fn by_rule(text: &str, rules: Rules) -> String {
+    let mut out = if rules.fillers { strip_fillers(text) } else { text.to_string() };
+    if rules.spoken_punctuation {
+        out = crate::spoken::apply(&out);
+    }
+    if rules.german_commas && crate::commas::is_german(rules.language, &out) {
+        out = out.split('\n').map(crate::commas::apply).collect::<Vec<_>>().join("\n");
+    }
+    out
+}
+
 /// The text exactly as it is inserted.
 pub fn compose(cleaned: &str, trailing_space: bool) -> String {
     // After a spoken line break the next dictation starts on the new line, not after a space.
@@ -152,6 +176,20 @@ mod tests {
         assert_eq!(strip_fillers("Folgendes: ähm."), "Folgendes:");
         assert_eq!(strip_fillers("\"Ähm, hallo\", sagte er."), "\"Hallo\", sagte er.");
         assert_eq!(strip_fillers("Er sagte „ja, ähm“ und ging."), "Er sagte „ja“ und ging.");
+    }
+
+    #[test]
+    fn the_whole_chain_keeps_line_breaks_and_spoken_commas() {
+        let all = Rules { fillers: true, spoken_punctuation: true, german_commas: true, language: None };
+        assert_eq!(by_rule("Hallo Anna neue Zeile wie geht es dir", all), "Hallo Anna\nWie geht es dir");
+        assert_eq!(by_rule("Danke Punkt neue Zeile Gruß Fabi", all), "Danke.\nGruß Fabi");
+        assert_eq!(by_rule("Das ist ähm Komma gut so", all), "Das ist, gut so");
+        assert_eq!(
+            by_rule("Ähm ich glaube dass er kommt neuer Absatz Bis morgen weil es spät ist", all),
+            "Ich glaube, dass er kommt\n\nBis morgen, weil es spät ist"
+        );
+        let none = Rules { fillers: false, spoken_punctuation: false, german_commas: false, language: None };
+        assert_eq!(by_rule("ähm Komma", none), "ähm Komma");
     }
 
     #[test]

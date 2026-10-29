@@ -49,8 +49,9 @@ impl Default for Profile {
     }
 }
 
-/// How long an own instruction may be - it goes into every cleanup request.
-pub const INSTRUCTION_CHARS: usize = 300;
+/// How long an own instruction may be - it goes into every cleanup request. As on Android,
+/// where 300 turned out too few.
+pub const INSTRUCTION_CHARS: usize = 2_000;
 
 fn profile(exe: &str, label: &str, style: WritingStyle) -> Profile {
     Profile { exe: exe.into(), label: label.into(), style, ..Profile::default() }
@@ -148,7 +149,7 @@ mod tests {
         assert_eq!(list[0].exe, "notepad.exe");
         assert_eq!(list[0].label, "notepad");
         assert_eq!(list[0].style, WritingStyle::Concise, "the first one wins");
-        assert_eq!(list[0].instruction.len(), INSTRUCTION_CHARS);
+        assert_eq!(list[0].instruction.len(), 1_000, "under the limit, kept whole");
         assert_eq!(sanitize(defaults()), defaults(), "the defaults are already clean");
     }
 }
