@@ -618,21 +618,18 @@ pub struct Preview {
     ms: u64,
 }
 
-/// The settings page's "Try it": what the cleanup makes of a typed text.
+/// The settings page's "Try it": what the cleanup makes of a typed text, in a chosen style.
 #[tauri::command]
-pub async fn cleanup_preview(app: AppHandle, text: String) -> Preview {
+pub async fn cleanup_preview(app: AppHandle, text: String, style: amber_core::profiles::WritingStyle) -> Preview {
     tauri::async_runtime::spawn_blocking(move || {
         let s = app.state::<Core>().settings();
-        let mut fillers = if s.cleanup.fillers { amber_core::text::strip_fillers(&text) } else { text.clone() };
-        let language = (s.language != "auto").then_some(s.language.as_str());
-        if s.cleanup.german_commas && amber_core::commas::is_german(language, &fillers) {
-            fillers = amber_core::commas::apply(&fillers);
-        }
+        let fillers = crate::llm::by_rule(&s, &text);
         if !s.cleanup.smart {
             return Preview { fillers, smart: None, error: None, ms: 0 };
         }
         let t0 = Instant::now();
-        let result = crate::llm::cleaner(&app, &s, true).and_then(|c| c.clean(&fillers).map_err(|e| e.message));
+        let ask = amber_core::cleanup::Ask { style, instruction: "", vocabulary: &s.vocabulary };
+        let result = crate::llm::cleaner(&app, &s, true).and_then(|c| c.clean(&fillers, &ask).map_err(|e| e.message));
         let ms = t0.elapsed().as_millis() as u64;
         match result {
             Ok(smart) => Preview { fillers, smart: Some(smart), error: None, ms },
@@ -641,6 +638,20 @@ pub async fn cleanup_preview(app: AppHandle, text: String) -> Preview {
     })
     .await
     .unwrap_or(Preview { fillers: String::new(), smart: None, error: Some("Preview failed.".into()), ms: 0 })
+}
+
+#[derive(Serialize)]
+pub struct Program {
+    exe: String,
+    title: String,
+}
+
+/// Programs with a window open right now, for adding a profile.
+#[tauri::command]
+pub async fn running_programs() -> Vec<Program> {
+    tauri::async_runtime::spawn_blocking(|| crate::insert::running_programs().into_iter().map(|(exe, title)| Program { exe, title }).collect())
+        .await
+        .unwrap_or_default()
 }
 
 #[derive(Serialize)]

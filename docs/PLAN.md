@@ -41,16 +41,16 @@ took 18.6 s with large-v3-turbo on the CPU). Android 0.16 solved it with ACFT mo
 
 ## Phase 2 - Text that fits where it goes
 
-- [ ] **Profiles per program** (port `AppProfiles`): per exe (discord.exe, outlook.exe,
+- [x] **Profiles per program** (port `AppProfiles`): per exe (discord.exe, outlook.exe,
       code.exe ...) a writing style - as spoken, casual, formal, concise - an own instruction,
       and smart cleanup default/always/never. Defaults: chat apps casual, mail formal, notes
       concise, code editors as spoken. The style goes into the cleanup prompt (port
       `styleRule`); the program is the target window's process. Settings page "Programs" with
       a picker of running programs.
-- [ ] **Spoken punctuation and layout**, German and English: "neue Zeile", "neuer Absatz",
+- [x] **Spoken punctuation and layout**, German and English: "neue Zeile", "neuer Absatz",
       "Komma", "Punkt" (only at a sentence end), "Fragezeichen", "Ausrufezeichen",
       "Doppelpunkt", "new line", "comma" ... Rules in `core`, with tests; switch.
-- [ ] **Own words in the cleanup**: the vocabulary also goes to the smart cleanup as
+- [x] **Own words in the cleanup**: the vocabulary also goes to the smart cleanup as
       "these spellings are correct".
 - [x] **When the window changed during recognition**: no longer pull the focus back - the text
       goes on the clipboard with a notice (as on Android). The settings window's test field

@@ -120,6 +120,7 @@ pub fn run() {
             commands::start_llm,
             commands::cleanup_preview,
             commands::chat_providers,
+            commands::running_programs,
         ])
         .build(tauri::generate_context!())
         .expect("Amber failed to start")

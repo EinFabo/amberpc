@@ -34,6 +34,8 @@ pub struct Settings {
     /// Amber on the phone may use this PC as its server.
     pub phone: PhoneSettings,
     pub cleanup: CleanupSettings,
+    /// Writing style and smart-cleanup choice per program.
+    pub profiles: Vec<crate::profiles::Profile>,
 }
 
 impl Default for Settings {
@@ -55,6 +57,7 @@ impl Default for Settings {
             onboarded: false,
             phone: PhoneSettings::default(),
             cleanup: CleanupSettings::default(),
+            profiles: crate::profiles::defaults(),
         }
     }
 }
@@ -209,6 +212,8 @@ impl Default for PhoneSettings {
 pub struct CleanupSettings {
     /// Drop "äh", "ähm" and the like - rules, local, instant.
     pub fillers: bool,
+    /// "neue Zeile", "Komma", "Fragezeichen" ... become the marks they name.
+    pub spoken_punctuation: bool,
     /// The commas German needs before "dass", "weil", "um ... zu" (see `commas`).
     pub german_commas: bool,
     /// Let a chat model tidy up: self-corrections, false starts, punctuation.
@@ -230,6 +235,7 @@ impl Default for CleanupSettings {
     fn default() -> Self {
         CleanupSettings {
             fillers: true,
+            spoken_punctuation: true,
             german_commas: true,
             smart: false,
             engine: EngineKind::Local,
@@ -272,6 +278,7 @@ impl Settings {
         if self.phone.port < 1024 {
             self.phone.port = d.phone.port;
         }
+        self.profiles = crate::profiles::sanitize(std::mem::take(&mut self.profiles));
         let c = &mut self.cleanup;
         if crate::local::llm_runtime(&c.local_runtime).is_none() {
             c.local_runtime = d.cleanup.local_runtime.clone();

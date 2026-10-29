@@ -3,10 +3,11 @@
 
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { ChatProvider, CleanupPreview } from "../../shared/types";
+import type { ChatProvider, CleanupPreview, WritingStyle } from "../../shared/types";
 import type { PageProps } from "../App";
 import { DownloadItem, StatusLabel, useLocal } from "../downloads";
 import { Row, Section, Segmented, Switch } from "../ui";
+import { STYLES } from "./Programs";
 
 const EXAMPLE = "Ähm, lass uns morgen um drei Uhr treffen, nee stopp, um vier Uhr, äh, im Café weil es da ruhig ist.";
 
@@ -20,6 +21,9 @@ export function CleanupPage(p: PageProps) {
       <Section>
         <Row label="Remove filler words" hint="äh, ähm, öhm, hm … - by fixed rules, on this PC, instantly. Real words like “um” stay.">
           <Switch on={c.fillers} onChange={(v) => save((x) => (x.cleanup.fillers = v))} />
+        </Row>
+        <Row label="Spoken punctuation" hint="Say “neue Zeile”, “neuer Absatz”, “Komma”, “Fragezeichen”, “Punkt” at a sentence end - or “new line”, “comma”, “question mark”.">
+          <Switch on={c.spokenPunctuation} onChange={(v) => save((x) => (x.cleanup.spokenPunctuation = v))} />
         </Row>
         <Row label="German commas" hint="Before “dass”, “weil”, “wenn”, “um … zu”, “sondern” - only where the comma is nearly certain, only in German text.">
           <Switch on={c.germanCommas} onChange={(v) => save((x) => (x.cleanup.germanCommas = v))} />
@@ -159,9 +163,10 @@ function TryIt({ s }: PageProps) {
   const [text, setText] = useState(EXAMPLE);
   const [result, setResult] = useState<CleanupPreview | null>(null);
   const [busy, setBusy] = useState(false);
+  const [style, setStyle] = useState<WritingStyle>("asSpoken");
   const run = async () => {
     setBusy(true);
-    setResult(await invoke<CleanupPreview>("cleanup_preview", { text }));
+    setResult(await invoke<CleanupPreview>("cleanup_preview", { text, style }));
     setBusy(false);
   };
   return (
@@ -173,18 +178,19 @@ function TryIt({ s }: PageProps) {
           <button className="btn primary" disabled={busy || !text.trim()} onClick={run}>
             {busy ? "Cleaning…" : "Clean up"}
           </button>
+          {s.cleanup.smart && <Segmented value={style} options={STYLES} onChange={setStyle} />}
           {result && s.cleanup.smart && <span className="note">{result.error ? "" : `${result.ms} ms`}</span>}
         </div>
         {result && (
           <div className="preview">
-            <div className="note">By rule (fillers, commas)</div>
-            <div>{result.fillers || <i>(nothing left)</i>}</div>
+            <div className="note">By rule (spoken punctuation, fillers, commas)</div>
+            <div style={{ whiteSpace: "pre-wrap" }}>{result.fillers || <i>(nothing left)</i>}</div>
             {s.cleanup.smart && (
               <>
                 <div className="note" style={{ marginTop: 10 }}>
                   Smart cleanup
                 </div>
-                {result.smart ? <div>{result.smart}</div> : <div className="note error">{result.error}</div>}
+                {result.smart ? <div style={{ whiteSpace: "pre-wrap" }}>{result.smart}</div> : <div className="note error">{result.error}</div>}
               </>
             )}
           </div>

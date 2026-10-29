@@ -40,6 +40,8 @@ struct Inner {
     session: u64,
     recorder: Option<Recorder>,
     target: Option<Target>,
+    /// The target's program ("discord.exe"), for its profile.
+    program: Option<String>,
     started: Option<Instant>,
     /// Stop arrived while the microphone was still opening (a very short hold).
     stop_requested: bool,
@@ -51,7 +53,7 @@ pub struct Dictation {
 
 impl Default for Dictation {
     fn default() -> Self {
-        Dictation { inner: Mutex::new(Inner { phase: Phase::Idle, session: 0, recorder: None, target: None, started: None, stop_requested: false }) }
+        Dictation { inner: Mutex::new(Inner { phase: Phase::Idle, session: 0, recorder: None, target: None, program: None, started: None, stop_requested: false }) }
     }
 }
 
@@ -119,6 +121,7 @@ pub fn start(app: &AppHandle) {
         inner.session += 1;
         inner.phase = Phase::Recording;
         inner.target = insert::remember();
+        inner.program = inner.target.and_then(|t| t.program());
         inner.started = Some(Instant::now());
         inner.stop_requested = false;
         inner.session
@@ -182,7 +185,7 @@ pub fn start(app: &AppHandle) {
 /// Ends the recording and sends it off.
 pub fn stop(app: &AppHandle) {
     let core = app.state::<Core>();
-    let (recorder, target, session, started) = {
+    let (recorder, target, program, session, started) = {
         let mut inner = core.dictation.inner.lock().unwrap();
         if inner.phase != Phase::Recording {
             return;
@@ -192,14 +195,14 @@ pub fn stop(app: &AppHandle) {
             return;
         };
         inner.phase = Phase::Transcribing;
-        (recorder, inner.target.take(), inner.session, inner.started.take())
+        (recorder, inner.target.take(), inner.program.take(), inner.session, inner.started.take())
     };
     announce(app, Phase::Transcribing, None);
     let app = app.clone();
     std::thread::spawn(move || {
         let recording = recorder.finish();
         let held_ms = started.map(|s| s.elapsed().as_millis() as u64).unwrap_or(0);
-        run(&app, session, recording, target, held_ms);
+        run(&app, session, recording, target, program, held_ms);
     });
 }
 
@@ -228,7 +231,7 @@ pub fn toggle(app: &AppHandle) {
     }
 }
 
-fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Option<Target>, held_ms: u64) {
+fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Option<Target>, program: Option<String>, held_ms: u64) {
     let core = app.state::<Core>();
     let settings = core.settings();
     if recording.interrupted && recording.samples.is_empty() {
@@ -249,7 +252,8 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
         Err(message) => return fail(app, session, message, true),
     };
     // Fillers out, and - if switched on - the model's tidy-up; a failing cleanup keeps the text.
-    let (cleaned, _skipped) = crate::llm::tidy(app, &settings, &text::clean(&raw));
+    let profile = program.as_deref().and_then(|p| amber_core::profiles::find(&settings.profiles, p));
+    let (cleaned, _skipped) = crate::llm::tidy(app, &settings, &text::clean(&raw), profile);
     if cleaned.is_empty() {
         crate::diag::info(format!("{} ms of audio, nothing recognized", prepared.spoken_ms));
         return fail(app, session, "Nothing recognized.".into(), false);
@@ -274,8 +278,9 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
         }
         Ok(how) => {
             crate::diag::info(format!(
-                "{what} · {} ms audio · {engine} {recognize_ms} ms · {how:?}",
-                prepared.spoken_ms
+                "{what} · {} ms audio · {engine} {recognize_ms} ms · {how:?} into {}",
+                prepared.spoken_ms,
+                program.as_deref().unwrap_or("?")
             ));
             {
                 let mut inner = core.dictation.inner.lock().unwrap();
