@@ -1,0 +1,6 @@
+node_modules
+com.einfabo.amber.sdPlugin/node_modules
+com.einfabo.amber.sdPlugin/bin
+com.einfabo.amber.sdPlugin/logs
+logs
+dist

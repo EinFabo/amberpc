@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "node16",
+    "moduleResolution": "node16",
+    "lib": ["es2023", "dom"],
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "sourceMap": true,
+    "outDir": "com.einfabo.amber.sdPlugin/bin",
+    "rootDir": "src",
+    "skipLibCheck": true,
+    // The SDK lives inside the .sdPlugin folder, because that folder is what gets packed and
+    // shipped - the plugin has to find it at runtime. tsc would not look there on its own.
+    "paths": {
+      "@elgato/streamdeck": ["./com.einfabo.amber.sdPlugin/node_modules/@elgato/streamdeck/dist/plugin/index.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}

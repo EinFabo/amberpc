@@ -29,6 +29,9 @@ pub struct Core {
     pub whisper: Whisper,
     pub hotkey_gesture: Mutex<Gesture>,
     pub pointer_gesture: Mutex<Gesture>,
+    /// A Stream Deck key: held to talk, tapped to toggle.
+    pub deck_gesture: Mutex<Gesture>,
+    pub control: crate::control::Control,
     /// Running downloads by id, with their cancel switch.
     pub downloads: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// The settings window's microphone meter.
@@ -56,6 +59,8 @@ impl Core {
             hotkey_gesture: Mutex::new(Gesture::new(mode)),
             // The bubble always offers both: a click toggles, a long press talks.
             pointer_gesture: Mutex::new(Gesture::for_pointer(Mode::Both)),
+            deck_gesture: Mutex::new(Gesture::new(Mode::Both)),
+            control: crate::control::Control::default(),
             downloads: Mutex::new(HashMap::new()),
             mic_test: Mutex::new(None),
             phone: crate::phone::PhoneApi::default(),

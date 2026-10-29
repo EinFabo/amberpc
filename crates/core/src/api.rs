@@ -7,21 +7,15 @@
 //! Requests from outside the private network are refused, whatever key they carry.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::audio;
 use crate::engine::{ErrorKind, TranscribeOptions, Transcriber};
 use crate::text;
 
 pub const DEFAULT_PORT: u16 = 8765;
-
-/// Ten minutes of 16-bit 48 kHz stereo is about 110 MB; nobody dictates that to a phone.
-const MAX_BODY: usize = 64 << 20;
 
 /// 20 characters from a 31-letter alphabet without look-alikes: 99 bits, easy to read off a
 /// screen if the QR code is no option. Bytes from 248 up are thrown away, so every letter is
@@ -190,284 +184,46 @@ pub struct Hooks {
     pub log: Arc<dyn Fn(String) + Send + Sync>,
 }
 
-/// How much the server takes from one connection. Anything beyond is refused before it
-/// costs memory or a thread for long.
-#[derive(Clone, Copy, Debug)]
-pub struct Limits {
-    /// Request line and headers together.
-    pub max_head: usize,
-    pub max_body: usize,
-    /// Per read and write: a phone that left the Wi-Fi mid-upload frees its slot after this.
-    pub io_timeout: Duration,
-    /// For the whole upload, so a trickle of bytes cannot hold a slot forever either.
-    pub body_deadline: Duration,
-    pub max_connections: usize,
+pub use crate::http::{Limits, Server};
+use crate::http::{error_body, Request};
+
+/// Starts the phone API on [addr].
+pub fn start(addr: SocketAddr, hooks: Hooks) -> std::io::Result<Server> {
+    start_with(addr, hooks, Limits::default())
 }
 
-impl Default for Limits {
-    fn default() -> Self {
-        Limits {
-            max_head: 16 << 10,
-            max_body: MAX_BODY,
-            io_timeout: Duration::from_secs(15),
-            body_deadline: Duration::from_secs(180),
-            max_connections: 8,
-        }
-    }
+/// Transcriptions run one at a time - the engine does them in order anyway.
+pub fn start_with(addr: SocketAddr, hooks: Hooks, limits: Limits) -> std::io::Result<Server> {
+    let hooks = Arc::new(hooks);
+    let busy = Arc::new(Mutex::new(()));
+    Server::start(addr, limits, is_local_peer, Arc::new(move |req: &mut Request| handle(req, &hooks, &busy)))
 }
 
-/// A running server. Stopping (or dropping) closes the port at once; requests already being
-/// answered finish on their own threads, bounded by the limits.
-pub struct Server {
-    stop: Arc<AtomicBool>,
-    accept: Option<JoinHandle<()>>,
-    pub addr: SocketAddr,
-}
-
-impl Server {
-    pub fn start(addr: SocketAddr, hooks: Hooks) -> std::io::Result<Server> {
-        Self::start_with(addr, hooks, Limits::default())
-    }
-
-    /// Plain HTTP/1.1 on std's TcpListener, one short-lived thread per connection, every
-    /// response with `Connection: close`. Transcriptions run one at a time - the engine does
-    /// them in order anyway.
-    pub fn start_with(addr: SocketAddr, hooks: Hooks, limits: Limits) -> std::io::Result<Server> {
-        let listener = TcpListener::bind(addr)?;
-        let addr = listener.local_addr()?;
-        // Non-blocking accept, polled: stopping needs no wake-up connection (which Windows
-        // refuses for 0.0.0.0) and frees the port within one poll.
-        listener.set_nonblocking(true)?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let shared = Arc::new(Shared { hooks, limits, busy: Mutex::new(()), active: AtomicUsize::new(0) });
-        let flag = stop.clone();
-        let accept = std::thread::Builder::new().name("amber-phone-api".into()).spawn(move || {
-            while !flag.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((stream, peer)) => accept_one(stream, peer, &shared),
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(50)),
-                    Err(_) => std::thread::sleep(Duration::from_millis(50)),
-                }
-            }
-        })?;
-        Ok(Server { stop, accept: Some(accept), addr })
-    }
-
-    pub fn stop(mut self) {
-        self.shutdown();
-    }
-
-    fn shutdown(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.accept.take() {
-            let _ = t.join();
-        }
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-struct Shared {
-    hooks: Hooks,
-    limits: Limits,
-    busy: Mutex<()>,
-    active: AtomicUsize,
-}
-
-/// Counts a connection while its thread runs.
-struct Slot(Arc<Shared>);
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        self.0.active.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-fn accept_one(mut stream: TcpStream, peer: SocketAddr, shared: &Arc<Shared>) {
-    let limits = shared.limits;
-    let _ = stream.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(limits.io_timeout));
-    let _ = stream.set_write_timeout(Some(limits.io_timeout));
-    // Strangers get their answer before anything of theirs is read.
-    if !is_local_peer(peer.ip()) {
-        respond(&mut stream, 403, &error_body("Only devices in your own network may use this PC.", "forbidden"));
-        return;
-    }
-    if shared.active.fetch_add(1, Ordering::SeqCst) >= limits.max_connections {
-        shared.active.fetch_sub(1, Ordering::SeqCst);
-        respond(&mut stream, 503, &error_body("Busy - try again in a moment.", "server_error"));
-        return;
-    }
-    let slot = Slot(shared.clone());
-    let spawned = std::thread::Builder::new().name("amber-phone-conn".into()).spawn(move || {
-        let shared = slot.0.clone();
-        // A bug in one request must not take the server (or Amber) down with it.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serve(&mut stream, peer.ip(), &shared)));
-        if outcome.is_err() {
-            (shared.hooks.log)(format!("phone API: request from {} failed internally", peer.ip()));
-            respond(&mut stream, 500, &error_body("Internal error.", "server_error"));
-        }
-        drop(slot);
-    });
-    // A failed spawn drops the closure, and with it the slot and the connection.
-    let _ = spawned;
-}
-
-struct Head {
-    method: String,
-    target: String,
-    headers: Vec<(String, String)>,
-    /// Bytes read past the head: the start of the body.
-    rest: Vec<u8>,
-}
-
-impl Head {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
-    }
-}
-
-/// Reads up to the blank line after the headers, never more than [max] bytes of head.
-fn read_head(stream: &mut TcpStream, max: usize) -> Result<Head, (u16, &'static str)> {
-    let mut buf = Vec::with_capacity(1024);
-    let mut chunk = [0u8; 4096];
-    let end = loop {
-        if let Some(i) = find(&buf, b"\r\n\r\n", 0) {
-            break i;
-        }
-        if buf.len() > max {
-            return Err((431, "Request headers too large."));
-        }
-        match stream.read(&mut chunk) {
-            Ok(0) => return Err((400, "Connection closed mid-request.")),
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(_) => return Err((408, "Request timed out.")),
-        }
-    };
-    if end > max {
-        return Err((431, "Request headers too large."));
-    }
-    let head = std::str::from_utf8(&buf[..end]).map_err(|_| (400, "Malformed request."))?;
-    let mut lines = head.split("\r\n");
-    let mut first = lines.next().unwrap_or("").split(' ');
-    let (method, target, version) = (first.next().unwrap_or(""), first.next().unwrap_or(""), first.next().unwrap_or(""));
-    if method.is_empty() || !target.starts_with('/') || !version.starts_with("HTTP/1.") {
-        return Err((400, "Malformed request."));
-    }
-    let headers = lines
-        .filter_map(|l| l.split_once(':'))
-        .map(|(n, v)| (n.trim().to_string(), v.trim().to_string()))
-        .collect();
-    Ok(Head { method: method.to_ascii_uppercase(), target: target.to_string(), headers, rest: buf[end + 4..].to_vec() })
-}
-
-/// Reads exactly the announced body - only called once the request is authorized and its
-/// size allowed.
-fn read_body(stream: &mut TcpStream, head: &Head, len: usize, deadline: Duration) -> Result<Vec<u8>, (u16, &'static str)> {
-    let started = Instant::now();
-    let mut body = head.rest.clone();
-    body.truncate(len);
-    let mut chunk = vec![0u8; 64 << 10];
-    while body.len() < len {
-        if started.elapsed() > deadline {
-            return Err((408, "The upload took too long."));
-        }
-        let want = (len - body.len()).min(chunk.len());
-        match stream.read(&mut chunk[..want]) {
-            Ok(0) => return Err((400, "The upload broke off.")),
-            Ok(n) => body.extend_from_slice(&chunk[..n]),
-            Err(_) => return Err((408, "The upload broke off.")),
-        }
-    }
-    Ok(body)
-}
-
-fn serve(stream: &mut TcpStream, peer: IpAddr, shared: &Shared) {
-    let hooks = &shared.hooks;
-    let limits = shared.limits;
-    let head = match read_head(stream, limits.max_head) {
-        Ok(h) => h,
-        Err((status, message)) => return respond(stream, status, &error_body(message, "invalid_request_error")),
-    };
-    let bearer = head.header("Authorization").and_then(|v| v.strip_prefix("Bearer ")).map(str::trim);
-    let route = match route(&head.method, &head.target, bearer, &(hooks.key)()) {
-        Ok(r) => r,
+fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>) -> (u16, serde_json::Value) {
+    let peer = req.peer;
+    let bearer = req.header("Authorization").and_then(|v| v.strip_prefix("Bearer ")).map(|v| v.trim().to_string());
+    match route(&req.method, &req.target, bearer.as_deref(), &(hooks.key)()) {
         Err((status, message)) => {
             if status == 401 {
                 (hooks.log)(format!("phone API: refused {peer} (wrong key)"));
             }
-            let kind = if status == 401 { "invalid_api_key" } else { "not_found" };
-            return respond(stream, status, &error_body(message, kind));
+            (status, error_body(message, if status == 401 { "invalid_api_key" } else { "not_found" }))
         }
-    };
-    match route {
-        Route::Health => respond(stream, 200, &serde_json::json!({ "status": "ok", "service": "amber-pc" })),
-        Route::Models => respond(
-            stream,
-            200,
-            &serde_json::json!({ "object": "list", "data": [{ "id": "amber-pc", "object": "model", "owned_by": "amber" }] }),
-        ),
-        Route::Transcribe => {
-            if head.header("Transfer-Encoding").is_some() {
-                return respond(stream, 411, &error_body("Send the upload with a Content-Length.", "invalid_request_error"));
-            }
-            let Some(len) = head.header("Content-Length").and_then(|v| v.parse::<usize>().ok()) else {
-                return respond(stream, 411, &error_body("Send the upload with a Content-Length.", "invalid_request_error"));
-            };
-            if len > limits.max_body {
-                return respond(stream, 413, &error_body("The recording is too large.", "invalid_request_error"));
-            }
-            if head.header("Expect").is_some_and(|v| v.eq_ignore_ascii_case("100-continue")) {
-                let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
-            }
-            let body = match read_body(stream, &head, len, limits.body_deadline) {
+        Ok(Route::Health) => (200, serde_json::json!({ "status": "ok", "service": "amber-pc" })),
+        Ok(Route::Models) => {
+            (200, serde_json::json!({ "object": "list", "data": [{ "id": "amber-pc", "object": "model", "owned_by": "amber" }] }))
+        }
+        Ok(Route::Transcribe) => {
+            // Only now, with the key checked, is the upload read.
+            let body = match req.body() {
                 Ok(b) => b,
-                Err((status, message)) => return respond(stream, status, &error_body(message, "invalid_request_error")),
+                Err((status, message)) => return (status, error_body(message, "invalid_request_error")),
             };
-            let content_type = head.header("Content-Type").unwrap_or("").to_string();
-            let (status, answer) = {
-                let _one_at_a_time = shared.busy.lock().unwrap_or_else(|e| e.into_inner());
-                transcribe(&content_type, &body, peer, hooks)
-            };
-            respond(stream, status, &answer)
+            let content_type = req.header("Content-Type").unwrap_or("").to_string();
+            let _one_at_a_time = busy.lock().unwrap_or_else(|e| e.into_inner());
+            transcribe(&content_type, &body, peer, hooks)
         }
     }
-}
-
-fn respond(stream: &mut TcpStream, status: u16, body: &serde_json::Value) {
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        408 => "Request Timeout",
-        411 => "Length Required",
-        413 => "Payload Too Large",
-        429 => "Too Many Requests",
-        431 => "Request Header Fields Too Large",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        504 => "Gateway Timeout",
-        _ => "Error",
-    };
-    let body = body.to_string();
-    let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
-    let _ = stream.shutdown(std::net::Shutdown::Write);
-}
-
-/// OpenAI's error shape, which the phone (and every other client) knows how to show.
-fn error_body(message: &str, kind: &str) -> serde_json::Value {
-    serde_json::json!({ "error": { "message": message, "type": kind } })
 }
 
 fn transcribe(content_type: &str, body: &[u8], peer: IpAddr, hooks: &Hooks) -> (u16, serde_json::Value) {
@@ -530,6 +286,9 @@ fn transcribe(content_type: &str, body: &[u8], peer: IpAddr, hooks: &Hooks) -> (
 mod tests {
     use super::*;
     use crate::engine::{OpenAiTranscriber, SttError};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
 
     #[test]
     fn keys_are_long_random_and_readable() {
@@ -616,7 +375,7 @@ mod tests {
             engine: Arc::new(move || Ok(Box::new(f.clone()) as Box<dyn Transcriber>)),
             log: Arc::new(move |m| l.lock().unwrap().push(m)),
         };
-        (Server::start_with("127.0.0.1:0".parse().unwrap(), hooks, limits).unwrap(), fake, log)
+        (start_with("127.0.0.1:0".parse().unwrap(), hooks, limits).unwrap(), fake, log)
     }
 
     fn speech() -> Vec<u8> {

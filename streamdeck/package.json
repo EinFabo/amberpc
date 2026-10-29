@@ -1,0 +1,20 @@
+{
+  "name": "amber-streamdeck",
+  "private": true,
+  "license": "UNLICENSED",
+  "version": "0.3.0",
+  "description": "Stream Deck plugin for Amber for Windows: hold a key to dictate",
+  "type": "module",
+  "scripts": {
+    "setup": "npm install && npm install --prefix com.einfabo.amber.sdPlugin",
+    "build": "tsc",
+    "test": "node --test --experimental-strip-types src/*.test.ts",
+    "pack": "npm run build && streamdeck pack com.einfabo.amber.sdPlugin --output dist --force",
+    "link": "streamdeck link com.einfabo.amber.sdPlugin"
+  },
+  "devDependencies": {
+    "@elgato/cli": "^1.9.0",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.7.3"
+  }
+}

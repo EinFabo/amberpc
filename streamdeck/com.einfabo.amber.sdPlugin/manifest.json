@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "UUID": "com.einfabo.amber",
+  "Name": "Amber",
+  "Version": "0.3.0.0",
+  "Author": "EinFabo",
+  "URL": "https://github.com/EinFabo/amberpc",
+  "Description": "Dictate into any window with Amber for Windows: hold the key while you speak, or tap it to start and stop.",
+  "Icon": "imgs/plugin/marketplace",
+  "Category": "Amber",
+  "CategoryIcon": "imgs/plugin/category",
+  "CodePath": "bin/plugin.js",
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "6.5"
+  },
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "Nodejs": {
+    "Version": "20",
+    "Debug": "enabled"
+  },
+  "Actions": [
+    {
+      "Name": "Dictate",
+      "UUID": "com.einfabo.amber.dictate",
+      "Icon": "imgs/actions/dictate/icon",
+      "Tooltip": "Hold to dictate, let go to insert the text. A short tap starts, the next one stops.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/dictate/key",
+          "TitleAlignment": "bottom"
+        }
+      ]
+    }
+  ]
+}

@@ -24,6 +24,23 @@ jobs:
       - uses: swatinem/rust-cache@v2
       - run: cargo test -p amber-core --locked
 
+  streamdeck:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: streamdeck
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm ci --prefix com.einfabo.amber.sdPlugin
+      - run: npm run build
+      - run: npm test
+
   app:
     runs-on: windows-latest
     steps:
