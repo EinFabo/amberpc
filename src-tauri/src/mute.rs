@@ -1,6 +1,11 @@
 //! Muted in Discord while Amber listens: Amber flips Discord's own microphone switch, the one
-//! at the bottom left, through UI Automation - the interface screen readers use. Discord shows
-//! the user muted as usual, and nothing needs setting up there.
+//! at the bottom left. Discord shows the user muted as usual, and nothing needs setting up.
+//!
+//! The switch is found through UI Automation, the interface screen readers use, and pressed
+//! with a click sent to Discord's window as a message. UI Automation's own Toggle would let
+//! Discord take the focus - a game loses it, may leave full screen or pause - while a sent
+//! click cannot bring a window to the front. So there is no fallback that takes the focus:
+//! with Discord minimized the click does not land, and Amber leaves the microphone as it is.
 //!
 //! The ways that did not work: Discord's API needs an application of the user's own in its
 //! developer portal; a Push to Mute keybind fed with keys from Amber proved unreliable; and
@@ -30,8 +35,11 @@ fn worker() -> &'static Mutex<Sender<Job>> {
         std::thread::spawn(move || {
             let mut discord = win::Discord::new();
             for (mute, done) in rx {
+                let state = if mute { "off" } else { "on again" };
                 match discord.set(mute) {
-                    Ok(win::Outcome::Changed) => crate::diag::info(format!("Discord microphone {}", if mute { "off" } else { "on again" })),
+                    Ok(win::Outcome::Clicked) => crate::diag::info(format!("Discord microphone {state}")),
+                    Ok(win::Outcome::NotTaken) => crate::diag::warn(format!("Discord microphone should be {state}, but the switch did not change")),
+                    Ok(win::Outcome::Minimized) => crate::diag::warn("Discord is minimized - its microphone switch cannot be pressed without taking the focus"),
                     Ok(win::Outcome::NoSwitch) => crate::diag::warn("Discord runs, but its microphone switch was not found"),
                     Ok(_) => {}
                     Err(e) => crate::diag::warn(format!("could not switch Discord's microphone: {e}")),
@@ -74,22 +82,33 @@ pub fn release_now() {
 
 #[cfg(windows)]
 mod win {
-    use windows::Win32::System::Variant::VARIANT;
-    use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
+    use std::time::{Duration, Instant};
+
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, TRUE, WPARAM};
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
     use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+    use windows::Win32::System::Variant::VARIANT;
     use windows::Win32::UI::Accessibility::{
-        CUIAutomation, IUIAutomation, IUIAutomationTogglePattern, ToggleState_On, TreeScope_Descendants, UIA_ButtonControlTypeId,
-        UIA_ControlTypePropertyId, UIA_TogglePatternId,
+        CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTogglePattern, ToggleState_On, TreeScope_Descendants,
+        UIA_ButtonControlTypeId, UIA_ControlTypePropertyId, UIA_TogglePatternId,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowThreadProcessId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, PostMessageW, WM_LBUTTONDOWN,
+        WM_LBUTTONUP, WM_MOUSEMOVE,
+    };
 
     /// Discord, its test builds included.
     const PROGRAMS: &[&str] = &["discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"];
     /// The microphone switch's name in Discord in English and German, muted or not.
     const LABELS: &[&str] = &["Mute", "Unmute", "Stummschalten", "Stummschaltung aufheben"];
+    /// How long a sent click gets to show in the switch, for the log.
+    const CLICK_TAKES: Duration = Duration::from_millis(600);
 
     pub enum Outcome {
-        Changed,
+        Clicked,
+        /// Sent, but the switch did not change in time.
+        NotTaken,
+        Minimized,
         /// Already as wanted - muted by the user before, or unmuted by them meanwhile.
         Unchanged,
         /// Discord is not running.
@@ -98,9 +117,54 @@ mod win {
         NoSwitch,
     }
 
+    struct Switch {
+        window: HWND,
+        element: IUIAutomationElement,
+        toggle: IUIAutomationTogglePattern,
+    }
+
+    impl Switch {
+        fn muted(&self) -> windows::core::Result<bool> {
+            Ok(unsafe { self.toggle.CurrentToggleState() }? == ToggleState_On)
+        }
+
+        /// Waits up to [limit] for the switch to show [muted].
+        fn shows(&self, muted: bool, limit: Duration) -> bool {
+            let until = Instant::now() + limit;
+            loop {
+                if self.muted().is_ok_and(|m| m == muted) {
+                    return true;
+                }
+                if Instant::now() > until {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        }
+
+        /// A click into the middle of the switch, as messages to Discord's window; false if
+        /// there is nowhere to click.
+        fn click(&self) -> bool {
+            let Ok(r) = (unsafe { self.element.CurrentBoundingRectangle() }) else { return false };
+            if r.right <= r.left || r.bottom <= r.top {
+                return false;
+            }
+            let mut p = POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+            if !unsafe { ScreenToClient(self.window, &mut p) }.as_bool() {
+                return false;
+            }
+            let at = LPARAM(((p.y as u16 as isize) << 16) | p.x as u16 as isize);
+            unsafe {
+                PostMessageW(Some(self.window), WM_MOUSEMOVE, WPARAM(0), at).is_ok()
+                    && PostMessageW(Some(self.window), WM_LBUTTONDOWN, WPARAM(1), at).is_ok()
+                    && PostMessageW(Some(self.window), WM_LBUTTONUP, WPARAM(0), at).is_ok()
+            }
+        }
+    }
+
     pub struct Discord {
         uia: Option<IUIAutomation>,
-        switch: Option<IUIAutomationTogglePattern>,
+        switch: Option<Switch>,
         /// Amber switched the microphone off; only then it switches it back on.
         muted_by_amber: bool,
     }
@@ -116,29 +180,31 @@ mod win {
             if !mute && !self.muted_by_amber {
                 return Ok(Outcome::Unchanged);
             }
-            let switch = match self.switch()? {
-                Ok(s) => s,
-                Err(outcome) => {
-                    self.muted_by_amber = false;
-                    return Ok(outcome);
-                }
-            };
-            let muted = unsafe { switch.CurrentToggleState() }.map_err(|e| e.to_string())? == ToggleState_On;
-            if muted == mute {
+            if let Err(outcome) = self.find()? {
+                self.muted_by_amber = false;
+                return Ok(outcome);
+            }
+            let switch = self.switch.as_ref().expect("found");
+            if switch.muted().map_err(|e| e.to_string())? == mute {
                 self.muted_by_amber = false;
                 return Ok(Outcome::Unchanged);
             }
-            unsafe { switch.Toggle() }.map_err(|e| e.to_string())?;
+            if unsafe { IsIconic(switch.window) }.as_bool() {
+                return Ok(Outcome::Minimized);
+            }
+            if !switch.click() {
+                return Ok(Outcome::NoSwitch);
+            }
+            // Sent: the switch is Amber's to switch back, even if the click shows only later -
+            // the unmute looks at the switch itself before clicking again.
             self.muted_by_amber = mute;
-            Ok(Outcome::Changed)
+            Ok(if switch.shows(mute, CLICK_TAKES) { Outcome::Clicked } else { Outcome::NotTaken })
         }
 
         /// The switch found last time if it still answers, else a fresh search (some 20 ms).
-        fn switch(&mut self) -> Result<Result<IUIAutomationTogglePattern, Outcome>, String> {
-            if let Some(s) = &self.switch {
-                if unsafe { s.CurrentToggleState() }.is_ok() {
-                    return Ok(Ok(s.clone()));
-                }
+        fn find(&mut self) -> Result<Result<(), Outcome>, String> {
+            if self.switch.as_ref().is_some_and(|s| s.muted().is_ok()) {
+                return Ok(Ok(()));
             }
             self.switch = None;
             let windows = discord_windows();
@@ -147,17 +213,17 @@ mod win {
             }
             let uia = self.uia.as_ref().ok_or("UI Automation is not available")?;
             let buttons = unsafe { uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_ButtonControlTypeId.0)) }.map_err(|e| e.to_string())?;
-            for hwnd in windows {
-                let Ok(found) = (unsafe { uia.ElementFromHandle(hwnd).and_then(|root| root.FindAll(TreeScope_Descendants, &buttons)) }) else { continue };
+            for window in windows {
+                let Ok(found) = (unsafe { uia.ElementFromHandle(window).and_then(|root| root.FindAll(TreeScope_Descendants, &buttons)) }) else { continue };
                 for i in 0..unsafe { found.Length() }.unwrap_or(0) {
-                    let Ok(button) = (unsafe { found.GetElement(i) }) else { continue };
-                    if !unsafe { button.CurrentName() }.is_ok_and(|n| LABELS.contains(&n.to_string().as_str())) {
+                    let Ok(element) = (unsafe { found.GetElement(i) }) else { continue };
+                    if !unsafe { element.CurrentName() }.is_ok_and(|n| LABELS.contains(&n.to_string().as_str())) {
                         continue;
                     }
                     // The bar of a call has a "Mute" too, without a state; the switch has one.
-                    if let Ok(toggle) = unsafe { button.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) } {
-                        self.switch = Some(toggle.clone());
-                        return Ok(Ok(toggle));
+                    if let Ok(toggle) = unsafe { element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) } {
+                        self.switch = Some(Switch { window, element, toggle });
+                        return Ok(Ok(()));
                     }
                 }
             }
@@ -194,7 +260,9 @@ mod win {
 #[cfg(not(windows))]
 mod win {
     pub enum Outcome {
-        Changed,
+        Clicked,
+        NotTaken,
+        Minimized,
         NoSwitch,
         Unchanged,
     }
@@ -207,7 +275,7 @@ mod win {
         }
 
         pub fn set(&mut self, _mute: bool) -> Result<Outcome, String> {
-            let _ = (Outcome::Changed, Outcome::NoSwitch);
+            let _ = (Outcome::Clicked, Outcome::NotTaken, Outcome::Minimized, Outcome::NoSwitch);
             Ok(Outcome::Unchanged)
         }
     }

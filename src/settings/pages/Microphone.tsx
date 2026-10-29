@@ -95,7 +95,7 @@ export function MicrophonePage({ s, save, toast, phase }: PageProps) {
       <Section title="Discord">
         <Row
           label="Mute me in Discord while dictating"
-          hint="While Amber listens it switches your microphone off in Discord - the switch at the bottom left - and on again at the stop. Nothing to set up; if you were muted already, you stay muted. Works with the hotkey, the bubble and the Stream Deck."
+          hint="While Amber listens it switches your microphone off in Discord - the switch at the bottom left - and on again at the stop, without taking the focus from your game. Nothing to set up; if you were muted already, you stay muted. Discord must not be minimized (behind other windows is fine)."
         >
           <Switch on={s.discord.muteWhileDictating} onChange={(v) => save((x) => (x.discord.muteWhileDictating = v))} />
         </Row>
