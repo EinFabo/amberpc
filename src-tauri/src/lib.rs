@@ -131,7 +131,6 @@ pub fn run() {
             commands::recognize_again,
             commands::stats_summary,
             commands::stats_clear,
-            commands::discord_press_key,
         ])
         .build(tauri::generate_context!())
         .expect("Amber failed to start")
@@ -139,7 +138,7 @@ pub fn run() {
             // Closing the settings window keeps Amber running in the tray; only "Quit" ends it.
             tauri::RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
             // Never leave the user muted in Discord.
-            tauri::RunEvent::Exit => mute::release(),
+            tauri::RunEvent::Exit => mute::release_now(),
             _ => {}
         });
 }

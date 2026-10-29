@@ -1,81 +1,133 @@
-//! Muting yourself in Discord while dictating. Discord offers no API for that to other
-//! programs, but it has a "Push to Mute" keybind: Amber holds a key no keyboard has
-//! (F13-F24) for as long as it listens, and lets go when the recording ends. Held, not
-//! toggled - whoever was muted before stays muted after.
+//! Discord hears silence while Amber listens. Windows keeps an audio session per program and
+//! device, for recording as for playback; muting Discord's recording sessions - what the
+//! volume mixer does for playback - hands Discord silence and leaves every other program's
+//! microphone alone, Amber's own included. Nothing to set up in Discord - its API would need
+//! an application of the user's own in Discord's developer portal, a Push to Mute keybind fed
+//! with keys from Amber proved unreliable.
+//!
+//! The work runs on a thread of its own, in order: COM wants its own apartment, and a mute
+//! must never overtake the unmute that follows it.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Sender};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use amber_core::settings::DiscordSettings;
 
-/// The key held down right now (13..=24), 0 for none.
-static HELD: AtomicU8 = AtomicU8::new(0);
+/// Whether Amber muted Discord and has not given the microphone back yet.
+static MUTED: AtomicBool = AtomicBool::new(false);
 
-/// Holds the Push to Mute key, if muting is on.
+/// Mute or unmute, and whom to tell when it is done.
+type Job = (bool, Option<Sender<()>>);
+
+fn worker() -> &'static Mutex<Sender<Job>> {
+    static WORKER: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
+    WORKER.get_or_init(|| {
+        let (tx, rx) = channel::<Job>();
+        std::thread::spawn(move || {
+            win::init();
+            for (mute, done) in rx {
+                let what = if mute { "mute" } else { "unmute" };
+                match win::set(mute) {
+                    Ok(0) => {}
+                    Ok(n) => crate::diag::info(format!("Discord: {what}d {n} recording session{}", if n == 1 { "" } else { "s" })),
+                    Err(e) => crate::diag::warn(format!("could not {what} Discord: {e}")),
+                }
+                if let Some(done) = done {
+                    let _ = done.send(());
+                }
+            }
+        });
+        Mutex::new(tx)
+    })
+}
+
+fn send(mute: bool, done: Option<Sender<()>>) {
+    let _ = worker().lock().unwrap().send((mute, done));
+}
+
+/// Mutes Discord's microphone, if the switch is on.
 pub fn hold(s: &DiscordSettings) {
-    if !s.mute_while_dictating {
-        return;
-    }
-    let n = s.key_number();
-    // Already held: that key stays the one to release.
-    if HELD.compare_exchange(0, n, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-        win::key(n, false);
+    if s.mute_while_dictating && !MUTED.swap(true, Ordering::SeqCst) {
+        send(true, None);
     }
 }
 
-/// Lets the key go; nothing happens if none is held.
+/// Gives Discord its microphone back, if Amber took it. Every Discord recording session is
+/// unmuted, not only the ones muted at the start: Windows can carry a mute over to a session
+/// opened later, and no Windows settings page mutes a program's recording - a muted one is
+/// always Amber's doing.
 pub fn release() {
-    let n = HELD.swap(0, Ordering::SeqCst);
-    if n != 0 {
-        win::key(n, true);
+    if MUTED.swap(false, Ordering::SeqCst) {
+        send(false, None);
     }
 }
 
-/// After a crash with the key held, Windows still counts it as down - and Discord keeps the
-/// user muted. A stray key-up at start sets that right.
+/// Amber is quitting: gives the microphone back and waits a moment for it to happen.
+pub fn release_now() {
+    if MUTED.swap(false, Ordering::SeqCst) {
+        let (tx, rx) = channel();
+        send(false, Some(tx));
+        let _ = rx.recv_timeout(Duration::from_secs(2));
+    }
+}
+
+/// After a crash while dictating, Discord would stay muted: unmuted at start.
 pub fn reset(s: &DiscordSettings) {
-    if s.mute_while_dictating && HELD.load(Ordering::SeqCst) == 0 {
-        win::key(s.key_number(), true);
+    if s.mute_while_dictating {
+        send(false, None);
     }
-}
-
-/// One press of [key] after [delay_ms] - for recording the keybind in Discord, since the key
-/// cannot be pressed by hand. Skipped while a dictation holds it.
-pub fn press_later(key: u8, delay_ms: u64) {
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-        if HELD.load(Ordering::SeqCst) != 0 {
-            return;
-        }
-        win::key(key, false);
-        std::thread::sleep(std::time::Duration::from_millis(120));
-        win::key(key, true);
-    });
 }
 
 #[cfg(windows)]
 mod win {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC,
-        VIRTUAL_KEY, VK_F13,
+    use windows::core::Interface;
+    use windows::Win32::Media::Audio::{
+        eCapture, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
+        DEVICE_STATE_ACTIVE,
     };
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
 
-    /// F13..F24 down or up, with its scan code for programs that read those.
-    pub fn key(n: u8, up: bool) {
-        let vk = VIRTUAL_KEY(VK_F13.0 + (n.clamp(13, 24) - 13) as u16);
-        let scan = unsafe { MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC) } as u16;
-        let input = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT { wVk: vk, wScan: scan, dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) }, time: 0, dwExtraInfo: 0 },
-            },
-        };
-        if unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) } == 0 {
-            crate::diag::warn(format!("could not send F{n} for Discord"));
+    /// Discord, its test builds included.
+    const PROGRAMS: &[&str] = &["discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"];
+
+    pub fn init() {
+        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    }
+
+    /// Mutes or unmutes Discord's recording sessions on every microphone; how many changed.
+    pub fn set(mute: bool) -> windows::core::Result<usize> {
+        let mut changed = 0;
+        unsafe {
+            let devices = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)?.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)?;
+            for i in 0..devices.GetCount()? {
+                let Ok(manager) = devices.Item(i).and_then(|d| d.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)) else { continue };
+                let sessions = manager.GetSessionEnumerator()?;
+                for j in 0..sessions.GetCount()? {
+                    let Ok(session) = sessions.GetSession(j) else { continue };
+                    // Sessions shared by several processes have no single one: not Discord's.
+                    let Ok(pid) = session.cast::<IAudioSessionControl2>().and_then(|c| c.GetProcessId()) else { continue };
+                    if !crate::insert::exe_of_pid(pid).is_some_and(|exe| PROGRAMS.contains(&exe.as_str())) {
+                        continue;
+                    }
+                    let volume: ISimpleAudioVolume = session.cast()?;
+                    if volume.GetMute()?.as_bool() != mute {
+                        volume.SetMute(mute, std::ptr::null())?;
+                        changed += 1;
+                    }
+                }
+            }
         }
+        Ok(changed)
     }
 }
 
 #[cfg(not(windows))]
 mod win {
-    pub fn key(_n: u8, _up: bool) {}
+    pub fn init() {}
+
+    pub fn set(_mute: bool) -> Result<usize, String> {
+        Ok(0)
+    }
 }
