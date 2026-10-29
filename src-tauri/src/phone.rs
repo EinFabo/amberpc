@@ -20,13 +20,14 @@ pub struct PhoneApi {
     error: Mutex<Option<String>>,
 }
 
-/// Starts, restarts or stops the server to match the settings. Can wait for a running
-/// transcription to finish, so call it off the main thread.
+/// Starts, restarts or stops the server to match the settings. Reads the settings under the
+/// lock, so of two quick changes the later one always wins. Stopping only closes the port
+/// (answers in progress finish on their own threads), so this never waits long.
 pub fn sync(app: &AppHandle) {
     let core = app.state::<Core>();
-    let settings = core.settings().phone;
     let phone = &core.phone;
     let mut running = phone.running.lock().unwrap();
+    let settings = core.settings().phone;
     if running.as_ref().is_some_and(|(_, port)| settings.enabled && *port == settings.port) {
         return;
     }

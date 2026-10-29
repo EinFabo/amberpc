@@ -7,11 +7,12 @@
 //! Requests from outside the private network are refused, whatever key they carry.
 
 use std::collections::HashMap;
-use std::io::Read;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::audio;
 use crate::engine::{ErrorKind, TranscribeOptions, Transcriber};
@@ -22,13 +23,20 @@ pub const DEFAULT_PORT: u16 = 8765;
 /// Ten minutes of 16-bit 48 kHz stereo is about 110 MB; nobody dictates that to a phone.
 const MAX_BODY: usize = 64 << 20;
 
-/// 20 characters from a 32-letter alphabet without look-alikes: 100 bits, easy to read off a
-/// screen if the QR code is no option.
+/// 20 characters from a 31-letter alphabet without look-alikes: 99 bits, easy to read off a
+/// screen if the QR code is no option. Bytes from 248 up are thrown away, so every letter is
+/// equally likely.
 pub fn new_key() -> String {
     const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
-    let mut bytes = [0u8; 20];
-    getrandom::fill(&mut bytes).expect("system random generator");
-    bytes.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect()
+    let limit = (256 / ALPHABET.len() * ALPHABET.len()) as u8;
+    let mut key = String::with_capacity(20);
+    while key.len() < 20 {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).expect("system random generator");
+        key.extend(bytes.iter().filter(|b| **b < limit).map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char));
+    }
+    key.truncate(20);
+    key
 }
 
 /// The address the phone gets, key included.
@@ -47,13 +55,15 @@ pub enum Route {
 /// Bearer token; the health check needs none.
 pub fn route(method: &str, path: &str, bearer: Option<&str>, key: &str) -> Result<Route, (u16, &'static str)> {
     let path = path.split('?').next().unwrap_or("");
+    // No key configured means nobody gets in - never "any empty key fits".
+    let key_ok = |candidate: &str| !key.is_empty() && same(candidate, key);
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if method == "GET" && (segments.is_empty() || segments == ["health"]) {
         return Ok(Route::Health);
     }
     let rest: &[&str] = match segments.split_first() {
-        Some((first, rest)) if same(first, key) => rest,
-        _ if bearer.is_some_and(|b| same(b, key)) => &segments,
+        Some((first, rest)) if key_ok(first) => rest,
+        _ if bearer.is_some_and(key_ok) => &segments,
         _ => return Err((401, "Missing or wrong access key - copy the address again from Amber on the PC.")),
     };
     // Accept the forms the phone builds from whatever was typed: ".../v1/audio/transcriptions"
@@ -104,7 +114,7 @@ pub fn parse_multipart(content_type: &str, body: &[u8]) -> Result<Vec<Part>, Str
         let data_start = head_end + 4;
         let next = find(body, &delimiter, data_start).ok_or("multipart body not terminated")?;
         // The CRLF before the delimiter belongs to the delimiter, not the data.
-        let data_end = if next >= 2 && &body[next - 2..next] == b"\r\n" { next - 2 } else { next };
+        let data_end = if next >= data_start + 2 && &body[next - 2..next] == b"\r\n" { next - 2 } else { next };
         let disposition = head
             .lines()
             .find(|l| l.to_ascii_lowercase().starts_with("content-disposition:"))
@@ -180,34 +190,67 @@ pub struct Hooks {
     pub log: Arc<dyn Fn(String) + Send + Sync>,
 }
 
-/// A running server; dropping it (or [Server::stop]) closes the port.
+/// How much the server takes from one connection. Anything beyond is refused before it
+/// costs memory or a thread for long.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Request line and headers together.
+    pub max_head: usize,
+    pub max_body: usize,
+    /// Per read and write: a phone that left the Wi-Fi mid-upload frees its slot after this.
+    pub io_timeout: Duration,
+    /// For the whole upload, so a trickle of bytes cannot hold a slot forever either.
+    pub body_deadline: Duration,
+    pub max_connections: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            max_head: 16 << 10,
+            max_body: MAX_BODY,
+            io_timeout: Duration::from_secs(15),
+            body_deadline: Duration::from_secs(180),
+            max_connections: 8,
+        }
+    }
+}
+
+/// A running server. Stopping (or dropping) closes the port at once; requests already being
+/// answered finish on their own threads, bounded by the limits.
 pub struct Server {
-    inner: Arc<tiny_http::Server>,
-    threads: Vec<JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    accept: Option<JoinHandle<()>>,
     pub addr: SocketAddr,
 }
 
 impl Server {
-    /// Listens on [addr] with a few worker threads. Transcriptions run one at a time - the
-    /// engine does them in order anyway, and a queue is better than a pile-up.
     pub fn start(addr: SocketAddr, hooks: Hooks) -> std::io::Result<Server> {
+        Self::start_with(addr, hooks, Limits::default())
+    }
+
+    /// Plain HTTP/1.1 on std's TcpListener, one short-lived thread per connection, every
+    /// response with `Connection: close`. Transcriptions run one at a time - the engine does
+    /// them in order anyway.
+    pub fn start_with(addr: SocketAddr, hooks: Hooks, limits: Limits) -> std::io::Result<Server> {
         let listener = TcpListener::bind(addr)?;
         let addr = listener.local_addr()?;
-        let inner = Arc::new(tiny_http::Server::from_listener(listener, None).map_err(std::io::Error::other)?);
-        let hooks = Arc::new(hooks);
-        let busy = Arc::new(Mutex::new(()));
-        let threads = (0..3)
-            .map(|_| {
-                let (server, hooks, busy) = (inner.clone(), hooks.clone(), busy.clone());
-                std::thread::spawn(move || {
-                    // Ends when the server is unblocked by stop().
-                    while let Ok(request) = server.recv() {
-                        handle(request, &hooks, &busy);
-                    }
-                })
-            })
-            .collect();
-        Ok(Server { inner, threads, addr })
+        // Non-blocking accept, polled: stopping needs no wake-up connection (which Windows
+        // refuses for 0.0.0.0) and frees the port within one poll.
+        listener.set_nonblocking(true)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(Shared { hooks, limits, busy: Mutex::new(()), active: AtomicUsize::new(0) });
+        let flag = stop.clone();
+        let accept = std::thread::Builder::new().name("amber-phone-api".into()).spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, peer)) => accept_one(stream, peer, &shared),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(50)),
+                    Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                }
+            }
+        })?;
+        Ok(Server { stop, accept: Some(accept), addr })
     }
 
     pub fn stop(mut self) {
@@ -215,10 +258,8 @@ impl Server {
     }
 
     fn shutdown(&mut self) {
-        for _ in 0..self.threads.len() {
-            self.inner.unblock();
-        }
-        for t in self.threads.drain(..) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.accept.take() {
             let _ = t.join();
         }
     }
@@ -230,9 +271,198 @@ impl Drop for Server {
     }
 }
 
-fn json_response(status: u16, body: serde_json::Value) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).expect("static header");
-    tiny_http::Response::from_data(body.to_string().into_bytes()).with_status_code(status).with_header(header)
+struct Shared {
+    hooks: Hooks,
+    limits: Limits,
+    busy: Mutex<()>,
+    active: AtomicUsize,
+}
+
+/// Counts a connection while its thread runs.
+struct Slot(Arc<Shared>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn accept_one(mut stream: TcpStream, peer: SocketAddr, shared: &Arc<Shared>) {
+    let limits = shared.limits;
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(limits.io_timeout));
+    let _ = stream.set_write_timeout(Some(limits.io_timeout));
+    // Strangers get their answer before anything of theirs is read.
+    if !is_local_peer(peer.ip()) {
+        respond(&mut stream, 403, &error_body("Only devices in your own network may use this PC.", "forbidden"));
+        return;
+    }
+    if shared.active.fetch_add(1, Ordering::SeqCst) >= limits.max_connections {
+        shared.active.fetch_sub(1, Ordering::SeqCst);
+        respond(&mut stream, 503, &error_body("Busy - try again in a moment.", "server_error"));
+        return;
+    }
+    let slot = Slot(shared.clone());
+    let spawned = std::thread::Builder::new().name("amber-phone-conn".into()).spawn(move || {
+        let shared = slot.0.clone();
+        // A bug in one request must not take the server (or Amber) down with it.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serve(&mut stream, peer.ip(), &shared)));
+        if outcome.is_err() {
+            (shared.hooks.log)(format!("phone API: request from {} failed internally", peer.ip()));
+            respond(&mut stream, 500, &error_body("Internal error.", "server_error"));
+        }
+        drop(slot);
+    });
+    // A failed spawn drops the closure, and with it the slot and the connection.
+    let _ = spawned;
+}
+
+struct Head {
+    method: String,
+    target: String,
+    headers: Vec<(String, String)>,
+    /// Bytes read past the head: the start of the body.
+    rest: Vec<u8>,
+}
+
+impl Head {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
+}
+
+/// Reads up to the blank line after the headers, never more than [max] bytes of head.
+fn read_head(stream: &mut TcpStream, max: usize) -> Result<Head, (u16, &'static str)> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 4096];
+    let end = loop {
+        if let Some(i) = find(&buf, b"\r\n\r\n", 0) {
+            break i;
+        }
+        if buf.len() > max {
+            return Err((431, "Request headers too large."));
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return Err((400, "Connection closed mid-request.")),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => return Err((408, "Request timed out.")),
+        }
+    };
+    if end > max {
+        return Err((431, "Request headers too large."));
+    }
+    let head = std::str::from_utf8(&buf[..end]).map_err(|_| (400, "Malformed request."))?;
+    let mut lines = head.split("\r\n");
+    let mut first = lines.next().unwrap_or("").split(' ');
+    let (method, target, version) = (first.next().unwrap_or(""), first.next().unwrap_or(""), first.next().unwrap_or(""));
+    if method.is_empty() || !target.starts_with('/') || !version.starts_with("HTTP/1.") {
+        return Err((400, "Malformed request."));
+    }
+    let headers = lines
+        .filter_map(|l| l.split_once(':'))
+        .map(|(n, v)| (n.trim().to_string(), v.trim().to_string()))
+        .collect();
+    Ok(Head { method: method.to_ascii_uppercase(), target: target.to_string(), headers, rest: buf[end + 4..].to_vec() })
+}
+
+/// Reads exactly the announced body - only called once the request is authorized and its
+/// size allowed.
+fn read_body(stream: &mut TcpStream, head: &Head, len: usize, deadline: Duration) -> Result<Vec<u8>, (u16, &'static str)> {
+    let started = Instant::now();
+    let mut body = head.rest.clone();
+    body.truncate(len);
+    let mut chunk = vec![0u8; 64 << 10];
+    while body.len() < len {
+        if started.elapsed() > deadline {
+            return Err((408, "The upload took too long."));
+        }
+        let want = (len - body.len()).min(chunk.len());
+        match stream.read(&mut chunk[..want]) {
+            Ok(0) => return Err((400, "The upload broke off.")),
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
+            Err(_) => return Err((408, "The upload broke off.")),
+        }
+    }
+    Ok(body)
+}
+
+fn serve(stream: &mut TcpStream, peer: IpAddr, shared: &Shared) {
+    let hooks = &shared.hooks;
+    let limits = shared.limits;
+    let head = match read_head(stream, limits.max_head) {
+        Ok(h) => h,
+        Err((status, message)) => return respond(stream, status, &error_body(message, "invalid_request_error")),
+    };
+    let bearer = head.header("Authorization").and_then(|v| v.strip_prefix("Bearer ")).map(str::trim);
+    let route = match route(&head.method, &head.target, bearer, &(hooks.key)()) {
+        Ok(r) => r,
+        Err((status, message)) => {
+            if status == 401 {
+                (hooks.log)(format!("phone API: refused {peer} (wrong key)"));
+            }
+            let kind = if status == 401 { "invalid_api_key" } else { "not_found" };
+            return respond(stream, status, &error_body(message, kind));
+        }
+    };
+    match route {
+        Route::Health => respond(stream, 200, &serde_json::json!({ "status": "ok", "service": "amber-pc" })),
+        Route::Models => respond(
+            stream,
+            200,
+            &serde_json::json!({ "object": "list", "data": [{ "id": "amber-pc", "object": "model", "owned_by": "amber" }] }),
+        ),
+        Route::Transcribe => {
+            if head.header("Transfer-Encoding").is_some() {
+                return respond(stream, 411, &error_body("Send the upload with a Content-Length.", "invalid_request_error"));
+            }
+            let Some(len) = head.header("Content-Length").and_then(|v| v.parse::<usize>().ok()) else {
+                return respond(stream, 411, &error_body("Send the upload with a Content-Length.", "invalid_request_error"));
+            };
+            if len > limits.max_body {
+                return respond(stream, 413, &error_body("The recording is too large.", "invalid_request_error"));
+            }
+            if head.header("Expect").is_some_and(|v| v.eq_ignore_ascii_case("100-continue")) {
+                let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+            }
+            let body = match read_body(stream, &head, len, limits.body_deadline) {
+                Ok(b) => b,
+                Err((status, message)) => return respond(stream, status, &error_body(message, "invalid_request_error")),
+            };
+            let content_type = head.header("Content-Type").unwrap_or("").to_string();
+            let (status, answer) = {
+                let _one_at_a_time = shared.busy.lock().unwrap_or_else(|e| e.into_inner());
+                transcribe(&content_type, &body, peer, hooks)
+            };
+            respond(stream, status, &answer)
+        }
+    }
+}
+
+fn respond(stream: &mut TcpStream, status: u16, body: &serde_json::Value) {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        408 => "Request Timeout",
+        411 => "Length Required",
+        413 => "Payload Too Large",
+        429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "Error",
+    };
+    let body = body.to_string();
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
 /// OpenAI's error shape, which the phone (and every other client) knows how to show.
@@ -240,70 +470,28 @@ fn error_body(message: &str, kind: &str) -> serde_json::Value {
     serde_json::json!({ "error": { "message": message, "type": kind } })
 }
 
-fn handle(mut request: tiny_http::Request, hooks: &Hooks, busy: &Mutex<()>) {
-    let peer = request.remote_addr().map(|a| a.ip());
-    if !peer.is_some_and(is_local_peer) {
-        let _ = request.respond(json_response(403, error_body("Only devices in your own network may use this PC.", "forbidden")));
-        return;
-    }
-    let peer = peer.expect("checked above");
-    let header = |name: &str| {
-        request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name)).map(|h| h.value.as_str().to_string())
-    };
-    let bearer = header("Authorization").and_then(|v| v.strip_prefix("Bearer ").map(str::trim).map(str::to_string));
-    let content_type = header("Content-Type").unwrap_or_default();
-    let method = request.method().as_str().to_uppercase();
-
-    let response = match route(&method, request.url(), bearer.as_deref(), &(hooks.key)()) {
-        Err((status, message)) => {
-            if status == 401 {
-                (hooks.log)(format!("phone API: refused {peer} (wrong key)"));
-            }
-            json_response(status, error_body(message, if status == 401 { "invalid_api_key" } else { "not_found" }))
-        }
-        Ok(Route::Health) => json_response(200, serde_json::json!({ "status": "ok", "service": "amber-pc" })),
-        Ok(Route::Models) => json_response(
-            200,
-            serde_json::json!({ "object": "list", "data": [{ "id": "amber-pc", "object": "model", "owned_by": "amber" }] }),
-        ),
-        Ok(Route::Transcribe) => {
-            let mut body = Vec::new();
-            let read = request.as_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut body);
-            if read.is_err() {
-                json_response(400, error_body("The upload broke off.", "invalid_request_error"))
-            } else if body.len() > MAX_BODY {
-                json_response(413, error_body("The recording is too large.", "invalid_request_error"))
-            } else {
-                let _one_at_a_time = busy.lock().unwrap_or_else(|e| e.into_inner());
-                transcribe(&content_type, &body, peer, hooks)
-            }
-        }
-    };
-    let _ = request.respond(response);
-}
-
-fn transcribe(content_type: &str, body: &[u8], peer: IpAddr, hooks: &Hooks) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+fn transcribe(content_type: &str, body: &[u8], peer: IpAddr, hooks: &Hooks) -> (u16, serde_json::Value) {
     let started = Instant::now();
     let parts = match parse_multipart(content_type, body) {
         Ok(p) => p,
-        Err(e) => return json_response(400, error_body(&e, "invalid_request_error")),
+        Err(e) => return (400, error_body(&e, "invalid_request_error")),
     };
     let fields: HashMap<&str, &Part> = parts.iter().map(|p| (p.name.as_str(), p)).collect();
     let Some(file) = fields.get("file") else {
-        return json_response(400, error_body("The form has no 'file'.", "invalid_request_error"));
+        return (400, error_body("The form has no 'file'.", "invalid_request_error"));
     };
     let field = |name: &str| fields.get(name).map(|p| String::from_utf8_lossy(&p.data).trim().to_string()).filter(|v| !v.is_empty());
 
     let (samples, rate) = match audio::decode_wav(&file.data) {
         Ok(decoded) => decoded,
-        Err(e) => return json_response(400, error_body(&format!("Amber reads WAV only: {e}"), "invalid_request_error")),
+        Err(e) => return (400, error_body(&format!("Amber reads WAV only: {e}"), "invalid_request_error")),
     };
     let mono16k = audio::resample(&samples, rate, audio::TARGET_RATE);
     // Silence is a valid question with an empty answer - the phone's connection test sends a
     // quiet tone and counts "nothing recognized" as success.
     if !audio::has_speech(&mono16k, audio::TARGET_RATE) {
         (hooks.log)(format!("phone API: {peer}, {} ms of audio, nothing heard", audio::duration_ms(mono16k.len(), audio::TARGET_RATE)));
-        return json_response(200, serde_json::json!({ "text": "" }));
+        return (200, serde_json::json!({ "text": "" }));
     }
     let wav = audio::encode_wav(&audio::pad_for_engine(&mono16k, audio::TARGET_RATE), audio::TARGET_RATE);
     let options = TranscribeOptions::new(&field("language").unwrap_or_else(|| "auto".into()), &field("prompt").unwrap_or_default());
@@ -312,7 +500,7 @@ fn transcribe(content_type: &str, body: &[u8], peer: IpAddr, hooks: &Hooks) -> t
         Ok(e) => e,
         Err(e) => {
             (hooks.log)(format!("phone API: engine unavailable: {e}"));
-            return json_response(503, error_body(&e, "server_error"));
+            return (503, error_body(&e, "server_error"));
         }
     };
     match engine.transcribe(&wav, &options) {
@@ -324,7 +512,7 @@ fn transcribe(content_type: &str, body: &[u8], peer: IpAddr, hooks: &Hooks) -> t
                 audio::duration_ms(mono16k.len(), audio::TARGET_RATE),
                 started.elapsed().as_millis()
             ));
-            json_response(200, serde_json::json!({ "text": cleaned }))
+            (200, serde_json::json!({ "text": cleaned }))
         }
         Err(e) => {
             (hooks.log)(format!("phone API: engine error: {}", e.detail));
@@ -333,7 +521,7 @@ fn transcribe(content_type: &str, body: &[u8], peer: IpAddr, hooks: &Hooks) -> t
                 ErrorKind::RateLimited => 429,
                 _ => 502,
             };
-            json_response(status, error_body(&e.message, "server_error"))
+            (status, error_body(&e.message, "server_error"))
         }
     }
 }
@@ -416,6 +604,10 @@ mod tests {
     }
 
     fn server(answer: Result<String, ErrorKind>) -> (Server, Arc<Fake>, Arc<Mutex<Vec<String>>>) {
+        server_with(answer, Limits::default())
+    }
+
+    fn server_with(answer: Result<String, ErrorKind>, limits: Limits) -> (Server, Arc<Fake>, Arc<Mutex<Vec<String>>>) {
         let fake = Arc::new(Fake(Mutex::new(Vec::new()), answer));
         let log = Arc::new(Mutex::new(Vec::new()));
         let (f, l) = (fake.clone(), log.clone());
@@ -424,7 +616,7 @@ mod tests {
             engine: Arc::new(move || Ok(Box::new(f.clone()) as Box<dyn Transcriber>)),
             log: Arc::new(move |m| l.lock().unwrap().push(m)),
         };
-        (Server::start("127.0.0.1:0".parse().unwrap(), hooks).unwrap(), fake, log)
+        (Server::start_with("127.0.0.1:0".parse().unwrap(), hooks, limits).unwrap(), fake, log)
     }
 
     fn speech() -> Vec<u8> {
@@ -473,6 +665,131 @@ mod tests {
         assert_eq!(e.kind, ErrorKind::Server);
         assert!(e.detail.contains("502") && e.detail.contains("engine down"), "{}", e.detail);
         srv.stop();
+    }
+
+    /// Sends raw bytes, returns the status line of the answer (or what went wrong).
+    fn raw(addr: SocketAddr, request: &[u8]) -> String {
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let _ = s.write_all(request);
+        let mut answer = String::new();
+        let _ = s.read_to_string(&mut answer);
+        answer.lines().next().unwrap_or("").to_string()
+    }
+
+    fn quick() -> Limits {
+        Limits { io_timeout: Duration::from_millis(300), body_deadline: Duration::from_secs(2), ..Limits::default() }
+    }
+
+    #[test]
+    fn an_absurd_content_length_costs_nothing() {
+        // Review finding: tiny_http allocated the announced length when dropping a request -
+        // one packet without a key aborted Amber.
+        let (srv, _, _) = server(Ok(String::new()));
+        let huge = b"GET /health HTTP/1.1\r\nContent-Length: 1000000000000000\r\n\r\n";
+        assert_eq!(raw(srv.addr, huge), "HTTP/1.1 200 OK");
+        let post = b"POST /testkey/v1/audio/transcriptions HTTP/1.1\r\nContent-Length: 1000000000000000\r\n\r\n";
+        assert_eq!(raw(srv.addr, post), "HTTP/1.1 413 Payload Too Large");
+        assert_eq!(raw(srv.addr, b"GET / HTTP/1.1\r\n\r\n"), "HTTP/1.1 200 OK", "still alive");
+    }
+
+    #[test]
+    fn half_sent_requests_cannot_block_the_server() {
+        // Review finding: three connections announcing a body they never send stopped all
+        // workers for good. Now they time out, and others are answered meanwhile.
+        let (srv, _, _) = server_with(Ok(String::new()), quick());
+        let hanging: Vec<TcpStream> = (0..5)
+            .map(|_| {
+                let mut s = TcpStream::connect(srv.addr).unwrap();
+                s.write_all(b"POST /testkey/v1/audio/transcriptions HTTP/1.1\r\nContent-Length: 5000\r\n\r\n").unwrap();
+                s
+            })
+            .collect();
+        assert_eq!(raw(srv.addr, b"GET /health HTTP/1.1\r\n\r\n"), "HTTP/1.1 200 OK");
+        for mut s in hanging {
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut answer = String::new();
+            let _ = s.read_to_string(&mut answer);
+            assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+        }
+        // Wrong key: answered at once, the announced body is never waited for.
+        let t0 = Instant::now();
+        let wrong = b"POST /nope/v1/audio/transcriptions HTTP/1.1\r\nContent-Length: 5000\r\n\r\n";
+        assert_eq!(raw(srv.addr, wrong), "HTTP/1.1 401 Unauthorized");
+        assert!(t0.elapsed() < Duration::from_millis(250));
+    }
+
+    #[test]
+    fn oversized_heads_and_garbage_are_refused() {
+        let (srv, _, _) = server(Ok(String::new()));
+        let mut big = b"GET /health HTTP/1.1\r\nX: ".to_vec();
+        big.extend(std::iter::repeat_n(b'a', 40_000));
+        big.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(raw(srv.addr, &big), "HTTP/1.1 431 Request Header Fields Too Large");
+        assert_eq!(raw(srv.addr, b"\x16\x03\x01 TLS hello\r\n\r\n"), "HTTP/1.1 400 Bad Request");
+        let chunked = b"POST /testkey/v1/audio/transcriptions HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+        assert_eq!(raw(srv.addr, chunked), "HTTP/1.1 411 Length Required");
+    }
+
+    #[test]
+    fn a_part_without_data_does_not_panic() {
+        // Review finding: a delimiter right after the part headers sliced backwards.
+        let body = b"--B\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\n--B--\r\n";
+        let parts = parse_multipart("multipart/form-data; boundary=B", body).unwrap();
+        assert_eq!(parts[0].data, b"");
+        // And small bodies of every shape: errors, never panics.
+        let alphabet: [&[u8]; 7] = [b"--B", b"\r\n", b"name=\"f\"", b"Content-Disposition: form-data; ", b"x", b"--", b"\r\n\r\n"];
+        for a in &alphabet {
+            for b in &alphabet {
+                for c in &alphabet {
+                    for d in &alphabet {
+                        let body = [*a, *b, *c, *d].concat();
+                        let _ = parse_multipart("multipart/form-data; boundary=B", &body);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_crashing_request_leaves_the_server_running() {
+        let (srv, _, _) = server(Ok(String::new()));
+        let mut wav = audio::encode_wav(&[0.1; 4], 16_000);
+        wav[24..28].copy_from_slice(&1u32.to_le_bytes()); // 1 Hz: refused, not resampled 16 000-fold
+        let form = [
+            &b"--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\n"[..],
+            &wav,
+            b"\r\n--B--\r\n",
+        ]
+        .concat();
+        let mut req = format!(
+            "POST /testkey/v1/audio/transcriptions HTTP/1.1\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: {}\r\n\r\n",
+            form.len()
+        )
+        .into_bytes();
+        req.extend_from_slice(&form);
+        assert_eq!(raw(srv.addr, &req), "HTTP/1.1 400 Bad Request");
+        assert_eq!(raw(srv.addr, b"GET / HTTP/1.1\r\n\r\n"), "HTTP/1.1 200 OK");
+    }
+
+    #[test]
+    fn stopping_frees_the_port_even_with_a_hanging_client() {
+        // Review finding: on Windows the old server kept the port after "off".
+        let (srv, _, _) = server(Ok(String::new()));
+        let addr = srv.addr;
+        let mut hanging = TcpStream::connect(addr).unwrap();
+        hanging.write_all(b"POST /testkey/v1/audio/transcriptions HTTP/1.1\r\nContent-Length: 99\r\n\r\n").unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let t0 = Instant::now();
+        srv.stop();
+        assert!(t0.elapsed() < Duration::from_secs(1), "stop waited {:?}", t0.elapsed());
+        assert!(TcpListener::bind(addr).is_ok());
+    }
+
+    #[test]
+    fn no_key_means_no_entry() {
+        assert_eq!(route("POST", "/v1/audio/transcriptions", Some(""), "").unwrap_err().0, 401);
+        assert_eq!(route("POST", "//v1/audio/transcriptions", None, "").unwrap_err().0, 401);
     }
 
     #[test]
