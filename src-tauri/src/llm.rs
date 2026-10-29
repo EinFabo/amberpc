@@ -275,10 +275,14 @@ pub fn cleaner(app: &AppHandle, s: &Settings, wait: bool) -> Result<ChatCleaner,
     }
 }
 
-/// What the dictation gets: the recognized text with fillers stripped and, if switched on,
-/// tidied by the model. A failing model leaves the text as it was - never lost, never stuck.
+/// What the dictation gets: the recognized text with fillers stripped, German commas added,
+/// and, if switched on, tidied by the model. A failing model leaves the text as it was - never lost, never stuck.
 pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str) -> (String, Option<String>) {
-    let text = if s.cleanup.fillers { amber_core::text::strip_fillers(recognized) } else { recognized.to_string() };
+    let mut text = if s.cleanup.fillers { amber_core::text::strip_fillers(recognized) } else { recognized.to_string() };
+    let language = (s.language != "auto").then_some(s.language.as_str());
+    if s.cleanup.german_commas && amber_core::commas::is_german(language, &text) {
+        text = amber_core::commas::apply(&text);
+    }
     if !s.cleanup.smart || text.is_empty() {
         return (text, None);
     }

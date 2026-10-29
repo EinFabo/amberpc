@@ -81,7 +81,7 @@ pub struct LocalSettings {
 
 impl Default for LocalSettings {
     fn default() -> Self {
-        LocalSettings { runtime: "cpu".into(), model: "small-q5_1".into(), threads: 0, keep_loaded: true }
+        LocalSettings { runtime: "cpu".into(), model: "futo-multilingual-244".into(), threads: 0, keep_loaded: true }
     }
 }
 
@@ -93,11 +93,14 @@ pub struct ServerSettings {
     /// Only used for "custom"; known providers have a fixed address.
     pub base_url: String,
     pub model: String,
+    /// A server that cannot be reached hands the recording to a downloaded local model -
+    /// never the other way round, so the voice only ever stays more private.
+    pub local_fallback: bool,
 }
 
 impl Default for ServerSettings {
     fn default() -> Self {
-        ServerSettings { provider: "groq".into(), base_url: String::new(), model: "whisper-large-v3-turbo".into() }
+        ServerSettings { provider: "groq".into(), base_url: String::new(), model: "whisper-large-v3-turbo".into(), local_fallback: true }
     }
 }
 
@@ -206,6 +209,8 @@ impl Default for PhoneSettings {
 pub struct CleanupSettings {
     /// Drop "äh", "ähm" and the like - rules, local, instant.
     pub fillers: bool,
+    /// The commas German needs before "dass", "weil", "um ... zu" (see `commas`).
+    pub german_commas: bool,
     /// Let a chat model tidy up: self-corrections, false starts, punctuation.
     pub smart: bool,
     /// Where that model runs.
@@ -225,6 +230,7 @@ impl Default for CleanupSettings {
     fn default() -> Self {
         CleanupSettings {
             fillers: true,
+            german_commas: true,
             smart: false,
             engine: EngineKind::Local,
             local_runtime: "cuda".into(),

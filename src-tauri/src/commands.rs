@@ -210,6 +210,8 @@ pub struct LocalItem {
     size_mb: u32,
     installed: bool,
     wants_gpu: bool,
+    /// Kept for existing downloads; shown only while installed.
+    replaced: bool,
 }
 
 #[derive(Serialize)]
@@ -219,6 +221,8 @@ pub struct LocalInfo {
     models: Vec<LocalItem>,
     has_nvidia: bool,
     recommended: (&'static str, &'static str),
+    /// Model id -> measured milliseconds for 10 s of speech on the current runtime.
+    measured: std::collections::HashMap<&'static str, u64>,
     status: whisper::Status,
     downloads: Vec<String>,
     folder: String,
@@ -234,27 +238,55 @@ pub fn local_info(core: State<Core>) -> LocalInfo {
     LocalInfo {
         runtimes: local::RUNTIMES
             .iter()
-            .map(|r| LocalItem { id: r.id, label: r.label, note: r.note, size_mb: r.size_mb, installed: layout.runtime_installed(r), wants_gpu: r.id == "cuda" })
+            .map(|r| LocalItem { id: r.id, label: r.label, note: r.note, size_mb: r.size_mb, installed: layout.runtime_installed(r), wants_gpu: r.id == "cuda", replaced: false })
             .collect(),
         models: local::MODELS
             .iter()
-            .map(|m| LocalItem { id: m.id, label: m.label, note: m.note, size_mb: m.size_mb, installed: layout.model_installed(m), wants_gpu: m.wants_gpu })
+            .map(|m| LocalItem { id: m.id, label: m.label, note: m.note, size_mb: m.size_mb, installed: layout.model_installed(m), wants_gpu: m.wants_gpu, replaced: m.replaced })
             .collect(),
         has_nvidia,
-        recommended: local::recommend(has_nvidia),
+        recommended: local::recommend(has_nvidia, threads(), total_ram_mb()),
+        measured: local::MODELS
+            .iter()
+            .filter_map(|m| {
+                let key = amber_core::estimate::key("local", &core.settings().local.runtime, m.id);
+                // What a 10-second dictation takes on this PC, once measured.
+                core.estimates.rate(&key).map(|r| (m.id, 200 + (10_000.0 * r.per_ms) as u64))
+            })
+            .collect(),
         status: core.whisper.status(),
         downloads: core.downloads.lock().unwrap().keys().cloned().collect(),
         folder: layout.root.display().to_string(),
         llm_runtimes: local::LLM_RUNTIMES
             .iter()
-            .map(|r| LocalItem { id: r.id, label: r.label, note: r.note, size_mb: r.size_mb(), installed: layout.llm_runtime_installed(r), wants_gpu: r.id == "cuda" })
+            .map(|r| LocalItem { id: r.id, label: r.label, note: r.note, size_mb: r.size_mb(), installed: layout.llm_runtime_installed(r), wants_gpu: r.id == "cuda", replaced: false })
             .collect(),
         llm_models: local::LLM_MODELS
             .iter()
-            .map(|m| LocalItem { id: m.id, label: m.label, note: m.note, size_mb: m.size_mb, installed: layout.llm_model_installed(m), wants_gpu: true })
+            .map(|m| LocalItem { id: m.id, label: m.label, note: m.note, size_mb: m.size_mb, installed: layout.llm_model_installed(m), wants_gpu: true, replaced: false })
             .collect(),
         llm_status: core.llm.status(),
     }
+}
+
+fn threads() -> u32 {
+    std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4)
+}
+
+/// Installed memory, for the model suggestion.
+#[cfg(windows)]
+fn total_ram_mb() -> u64 {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    match unsafe { GlobalMemoryStatusEx(&mut status) } {
+        Ok(()) => status.ullTotalPhys / (1 << 20),
+        Err(_) => 0,
+    }
+}
+
+#[cfg(not(windows))]
+fn total_ram_mb() -> u64 {
+    0
 }
 
 /// The NVIDIA driver puts its CUDA library into System32.
@@ -591,7 +623,11 @@ pub struct Preview {
 pub async fn cleanup_preview(app: AppHandle, text: String) -> Preview {
     tauri::async_runtime::spawn_blocking(move || {
         let s = app.state::<Core>().settings();
-        let fillers = if s.cleanup.fillers { amber_core::text::strip_fillers(&text) } else { text.clone() };
+        let mut fillers = if s.cleanup.fillers { amber_core::text::strip_fillers(&text) } else { text.clone() };
+        let language = (s.language != "auto").then_some(s.language.as_str());
+        if s.cleanup.german_commas && amber_core::commas::is_german(language, &fillers) {
+            fillers = amber_core::commas::apply(&fillers);
+        }
         if !s.cleanup.smart {
             return Preview { fillers, smart: None, error: None, ms: 0 };
         }

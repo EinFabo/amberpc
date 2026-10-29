@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use amber_core::audio::{self, Rejected};
 use amber_core::engine::{ErrorKind, OpenAiTranscriber, TranscribeOptions, Transcriber, WhisperServerTranscriber};
+use amber_core::{estimate, local};
 use amber_core::providers;
 use amber_core::settings::{EngineKind, Settings};
 use amber_core::text;
@@ -242,30 +243,11 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
         }
     };
 
-    let t0 = Instant::now();
-    let transcriber = match transcriber(app, &settings) {
-        Ok(t) => t,
-        Err(e) => return fail(app, session, e, true),
-    };
     let options = TranscribeOptions::new(&settings.language, &settings.vocabulary);
-    let mut result = transcriber.transcribe(&prepared.wav, &options);
-    // The local server went away mid-request - restarted for another model, or crashed. The
-    // engine the settings ask for now gets one more try instead of losing the dictation.
-    if settings.engine == EngineKind::Local && matches!(&result, Err(e) if e.kind == ErrorKind::Unreachable) {
-        crate::diag::warn("local engine went away during the request, trying again");
-        result = match transcriber_for(app) {
-            Ok(t) => t.transcribe(&prepared.wav, &options),
-            Err(e) => return fail(app, session, e, true),
-        };
-    }
-    let raw = match result {
-        Ok(raw) => raw,
-        Err(e) => {
-            crate::diag::warn(format!("engine error: {}", e.detail));
-            return fail(app, session, e.message, true);
-        }
+    let (raw, engine, recognize_ms) = match recognize(app, &settings, &prepared.wav, &options, prepared.spoken_ms) {
+        Ok(r) => r,
+        Err(message) => return fail(app, session, message, true),
     };
-    let recognize_ms = t0.elapsed().as_millis();
     // Fillers out, and - if switched on - the model's tidy-up; a failing cleanup keeps the text.
     let (cleaned, _skipped) = crate::llm::tidy(app, &settings, &text::clean(&raw));
     if cleaned.is_empty() {
@@ -285,10 +267,9 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
     let outcome = insert::insert(&final_text, &settings.insert, target);
 
     let what = if settings.log_text { format!("\"{cleaned}\"") } else { format!("{} words", text::words(&cleaned)) };
-    let engine = engine_label(&settings);
     match outcome {
         Ok(Outcome::OnClipboard(message)) => {
-            crate::diag::warn(format!("{what} left on the clipboard: target window is elevated"));
+            crate::diag::warn(format!("{what} left on the clipboard: {message}"));
             fail(app, session, message, true);
         }
         Ok(how) => {
@@ -310,25 +291,77 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
     }
 }
 
-fn engine_label(s: &Settings) -> String {
-    match s.engine {
-        EngineKind::Local => format!("local {}/{}", s.local.runtime, s.local.model),
-        EngineKind::Server => format!("{} {}", s.server.provider, s.server.model),
+/// An engine ready for one request, with the names it is logged and measured under.
+pub struct Picked {
+    pub transcriber: Box<dyn Transcriber>,
+    label: String,
+    estimate_key: String,
+}
+
+/// Fixed cost per request on top of the audio: a round trip, a context switch.
+const OVERHEAD_MS: u64 = 200;
+
+/// Recognizes [wav] with the engine the settings ask for. A local server that went away
+/// mid-request gets one more try; a server that cannot be reached hands the recording to a
+/// downloaded local model (if allowed) - never the other way round. Learns how long it took.
+fn recognize(app: &AppHandle, settings: &Settings, wav: &[u8], options: &TranscribeOptions, spoken_ms: u64) -> Result<(String, String, u128), String> {
+    let core = app.state::<Core>();
+    let mut picked = transcriber(app, settings)?;
+    let mut t0 = Instant::now();
+    let mut result = picked.transcriber.transcribe(wav, options);
+
+    if let Err(e) = &result {
+        if settings.engine == EngineKind::Local && e.kind == ErrorKind::Unreachable {
+            // Restarted for another model, or crashed.
+            crate::diag::warn("local engine went away during the request, trying again");
+            picked = transcriber(app, settings)?;
+            t0 = Instant::now();
+            result = picked.transcriber.transcribe(wav, options);
+        } else if settings.engine == EngineKind::Server && e.kind.service_unavailable() && settings.server.local_fallback && local_ready(&core, settings) {
+            crate::diag::warn(format!("server unavailable ({}), recognizing on this PC", e.detail));
+            crate::notify(app, "Amber", "The server could not be reached - recognized on this PC instead.");
+            picked = local(app)?;
+            t0 = Instant::now();
+            result = picked.transcriber.transcribe(wav, options);
+        }
+    }
+    match result {
+        Ok(raw) => {
+            let took = t0.elapsed().as_millis();
+            core.estimates.learn(&picked.estimate_key, spoken_ms, took as u64, OVERHEAD_MS);
+            Ok((raw, picked.label, took))
+        }
+        Err(e) => {
+            crate::diag::warn(format!("engine error: {}", e.detail));
+            Err(e.message)
+        }
     }
 }
 
-fn transcriber_for(app: &AppHandle) -> Result<Box<dyn Transcriber>, String> {
-    transcriber(app, &app.state::<Core>().settings())
+/// Whether the local engine could take over: runtime and model downloaded.
+fn local_ready(core: &Core, s: &Settings) -> bool {
+    let layout = &core.paths.layout;
+    local::runtime(&s.local.runtime).is_some_and(|rt| layout.runtime_installed(rt))
+        && local::model(&s.local.model).is_some_and(|m| layout.model_installed(m))
+}
+
+/// The local whisper server - with a short encoder context when the model it runs (which may
+/// still be the previous one while the chosen one downloads) was tuned for it.
+fn local(app: &AppHandle) -> Result<Picked, String> {
+    let served = app.state::<Core>().whisper.ensure(app)?;
+    let slack = local::model(&served.model).filter(|m| m.short_context).map(|m| m.context_slack);
+    Ok(Picked {
+        transcriber: Box::new(WhisperServerTranscriber::new(&served.url, slack)),
+        label: format!("local {}/{}", served.runtime, served.model),
+        estimate_key: estimate::key("local", &served.runtime, &served.model),
+    })
 }
 
 /// The engine the settings ask for, ready to use - or why not.
-pub fn transcriber(app: &AppHandle, settings: &Settings) -> Result<Box<dyn Transcriber>, String> {
+pub fn transcriber(app: &AppHandle, settings: &Settings) -> Result<Picked, String> {
     let core = app.state::<Core>();
     match settings.engine {
-        EngineKind::Local => {
-            let url = core.whisper.ensure(app)?;
-            Ok(Box::new(WhisperServerTranscriber::new(&url)))
-        }
+        EngineKind::Local => local(app),
         EngineKind::Server => {
             let provider = providers::by_id(&settings.server.provider).ok_or("Unknown server provider.")?;
             let base = providers::effective_base_url(provider, &settings.server.base_url);
@@ -337,7 +370,11 @@ pub fn transcriber(app: &AppHandle, settings: &Settings) -> Result<Box<dyn Trans
             if provider.needs_key && key.is_empty() {
                 return Err(format!("No API key for {} yet - add it in the settings.", provider.name));
             }
-            Ok(Box::new(OpenAiTranscriber::new(&base, &key, &settings.server.model)))
+            Ok(Picked {
+                transcriber: Box::new(OpenAiTranscriber::new(&base, &key, &settings.server.model)),
+                label: format!("{} {}", provider.id, settings.server.model),
+                estimate_key: estimate::key(provider.id, "", &settings.server.model),
+            })
         }
     }
 }

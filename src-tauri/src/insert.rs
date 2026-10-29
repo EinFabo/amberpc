@@ -1,6 +1,7 @@
 //! Putting the text where the cursor is. The window that had focus when the dictation
-//! started is remembered and gets focus back first; then the text is pasted (clipboard +
-//! Ctrl+V) or typed (Unicode keystrokes).
+//! started is remembered; if another program is in front by the time the text is ready, the
+//! text goes on the clipboard instead of into the wrong place. Otherwise it is pasted
+//! (clipboard + Ctrl+V) or typed (Unicode keystrokes).
 
 use amber_core::settings::{InsertMethod, InsertSettings};
 
@@ -26,18 +27,13 @@ mod win {
     use std::time::{Duration, Instant};
     use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
     use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
-    use windows::Win32::System::Threading::{
-        AttachThreadInput, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenProcessToken,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
         KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
         VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_V,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
     pub fn remember() -> Option<Target> {
         let hwnd = unsafe { GetForegroundWindow() };
@@ -58,27 +54,21 @@ mod win {
         crate::bubble::settings_hwnd().map(|h| h == hwnd.0 as isize).unwrap_or(false)
     }
 
-    /// Gives focus back to [target] if something else took it. Windows only lets the
-    /// foreground process hand out focus; attaching to its input queue for a moment counts.
-    fn refocus(target: Target) {
+    /// Whether the window in front is still the one the dictation was meant for - or another
+    /// window of the same program (a popup, a second browser window). If the user moved on to
+    /// another program while Amber was recognizing, nothing is typed there.
+    fn still_in_front(target: Target) -> bool {
+        let fg = unsafe { GetForegroundWindow() };
         let hwnd = HWND(target.hwnd as *mut _);
-        unsafe {
-            if !IsWindow(Some(hwnd)).as_bool() {
-                return;
-            }
-            let fg = GetForegroundWindow();
-            if fg == hwnd {
-                return;
-            }
-            let fg_thread = GetWindowThreadProcessId(fg, None);
-            let me = GetCurrentThreadId();
-            let attached = fg_thread != 0 && fg_thread != me && AttachThreadInput(me, fg_thread, true).as_bool();
-            let _ = SetForegroundWindow(hwnd);
-            if attached {
-                let _ = AttachThreadInput(me, fg_thread, false);
-            }
+        if fg == hwnd {
+            return true;
         }
-        std::thread::sleep(Duration::from_millis(60));
+        let (mut a, mut b) = (0u32, 0u32);
+        unsafe {
+            GetWindowThreadProcessId(fg, Some(&mut a));
+            GetWindowThreadProcessId(hwnd, Some(&mut b));
+        }
+        a != 0 && a == b
     }
 
     const MODIFIERS: [VIRTUAL_KEY; 11] =
@@ -210,8 +200,10 @@ mod win {
                 "Windows blocks typing into this window (it probably runs as administrator). The text is on the clipboard - press Ctrl+V.".into(),
             ));
         }
-        if let Some(t) = target {
-            refocus(t);
+        if target.is_some_and(|t| !still_in_front(t)) {
+            let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+            set_clipboard(&mut cb, text)?;
+            return Ok(Outcome::OnClipboard("You switched to another window, so the text is on the clipboard - press Ctrl+V where you want it.".into()));
         }
         wait_for_modifiers();
         match settings.method {

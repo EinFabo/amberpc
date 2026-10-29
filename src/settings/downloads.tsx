@@ -59,6 +59,7 @@ export function DownloadItem({
   onSelect,
   recommended,
   warning,
+  measured,
   toast,
 }: {
   local: Local;
@@ -68,6 +69,8 @@ export function DownloadItem({
   onSelect: () => void;
   recommended?: boolean;
   warning?: string;
+  /** Measured milliseconds for 10 s of speech on this PC. */
+  measured?: number;
   toast: (message: string) => void;
 }) {
   const { info, progress, errors, reload, download } = local;
@@ -84,10 +87,12 @@ export function DownloadItem({
         <div>
           {item.label}
           {recommended && <span className="tag amber">recommended</span>}
+          {item.replaced && <span className="tag">replaced</span>}
           {item.installed && <span className="tag ok">installed</span>}
         </div>
         <div className="hint">
           {item.note} · {size(item.sizeMb)}
+          {measured !== undefined && ` · ${(measured / 1000).toFixed(1)} s for 10 s of speech here`}
           {warning && ` · ${warning}`}
         </div>
         {errors[key] && <div className="note error">{errors[key]}</div>}

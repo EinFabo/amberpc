@@ -21,7 +21,7 @@ export type InsertMethod = "paste" | "type";
 export interface Settings {
   engine: EngineKind;
   local: { runtime: string; model: string; threads: number; keepLoaded: boolean };
-  server: { provider: string; baseUrl: string; model: string };
+  server: { provider: string; baseUrl: string; model: string; localFallback: boolean };
   language: string;
   vocabulary: string;
   microphone: string;
@@ -36,6 +36,7 @@ export interface Settings {
   phone: { enabled: boolean; port: number; cleanup: boolean };
   cleanup: {
     fillers: boolean;
+    germanCommas: boolean;
     smart: boolean;
     engine: EngineKind;
     localRuntime: string;
@@ -70,6 +71,7 @@ export interface LocalItem {
   sizeMb: number;
   installed: boolean;
   wantsGpu: boolean;
+  replaced: boolean;
 }
 
 export interface LocalStatus {
@@ -82,6 +84,8 @@ export interface LocalInfo {
   models: LocalItem[];
   hasNvidia: boolean;
   recommended: [string, string];
+  /** Model id -> measured milliseconds for 10 s of speech on the current runtime. */
+  measured: Record<string, number>;
   status: LocalStatus;
   downloads: string[];
   folder: string;
