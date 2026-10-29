@@ -58,13 +58,13 @@ took 18.6 s with large-v3-turbo on the CPU). Android 0.16 solved it with ACFT mo
 
 ## Phase 3 - Nothing gets lost
 
-- [ ] **History** (on by default): the last dictations kept on this PC - text, program, time, engine -
+- [x] **History** (on by default): the last dictations kept on this PC - text, program, time, engine -
       with copy and "insert again"; auto-delete after a week; off switch. Tray entry "Insert
       last dictation again".
-- [ ] **Recognize again**: a recording whose recognition failed (key refused, quota, server
+- [x] **Recognize again**: a recording whose recognition failed (key refused, quota, server
       error) is kept in memory for 10 minutes; one click recognizes it again, also with
       another engine.
-- [ ] **Statistics**: words and dictations today/this week, per program, median wait
+- [x] **Statistics**: words and dictations today/this week, per program, median wait
       per engine, time saved compared with typing at 40 wpm - counts and timings only, never
       text (port `StatsLedger`).
 

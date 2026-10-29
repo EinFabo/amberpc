@@ -15,6 +15,8 @@ import { WelcomePage } from "./pages/Welcome";
 import { PhonePage } from "./pages/Phone";
 import { CleanupPage } from "./pages/Cleanup";
 import { ProgramsPage } from "./pages/Programs";
+import { HistoryPage } from "./pages/History";
+import { StatisticsPage } from "./pages/Statistics";
 
 export interface PageProps {
   ov: Overview;
@@ -26,7 +28,7 @@ export interface PageProps {
   phase: Phase;
 }
 
-export type PageId = "welcome" | "engine" | "cleanup" | "programs" | "microphone" | "hotkeys" | "bubble" | "insert" | "phone" | "app";
+export type PageId = "welcome" | "engine" | "cleanup" | "programs" | "microphone" | "hotkeys" | "bubble" | "insert" | "phone" | "history" | "statistics" | "app";
 
 const PAGES: { id: PageId; label: string; value: (o: Overview) => string }[] = [
   { id: "engine", label: "Engine", value: (o) => (o.settings.engine === "local" ? "Local" : providerName(o)) },
@@ -41,6 +43,8 @@ const PAGES: { id: PageId; label: string; value: (o: Overview) => string }[] = [
   { id: "bubble", label: "Bubble", value: (o) => ({ always: "Shown", whileDictating: "When used", hidden: "Hidden" })[o.settings.bubble.visibility] },
   { id: "insert", label: "Inserting", value: (o) => (o.settings.insert.method === "paste" ? "Paste" : "Type") },
   { id: "phone", label: "Phone", value: (o) => (o.settings.phone.enabled ? "On" : "Off") },
+  { id: "history", label: "History", value: (o) => (o.settings.history ? `${o.settings.historyDays} days` : "Off") },
+  { id: "statistics", label: "Statistics", value: (o) => (o.settings.statistics ? "" : "Off") },
   { id: "app", label: "App", value: (o) => `v${o.version}` },
 ];
 
@@ -50,7 +54,7 @@ function providerName(o: Overview) {
 
 function initialPage(): PageId {
   const p = new URLSearchParams(location.search).get("page");
-  return (["welcome", "engine", "cleanup", "programs", "microphone", "hotkeys", "bubble", "insert", "phone", "app"] as PageId[]).includes(p as PageId)
+  return (["welcome", "engine", "cleanup", "programs", "microphone", "hotkeys", "bubble", "insert", "phone", "history", "statistics", "app"] as PageId[]).includes(p as PageId)
     ? (p as PageId)
     : "engine";
 }
@@ -135,6 +139,8 @@ export function App() {
         {page === "bubble" && <BubblePage {...props} />}
         {page === "insert" && <InsertPage {...props} />}
         {page === "phone" && <PhonePage {...props} />}
+        {page === "history" && <HistoryPage {...props} />}
+        {page === "statistics" && <StatisticsPage {...props} />}
         {page === "app" && <AppPage {...props} />}
       </main>
       {toastMsg && <div className={`toast ${toastMsg.ok ? "ok" : ""}`}>{toastMsg.text}</div>}

@@ -46,4 +46,5 @@ windows = { version = "0.61", features = [
   "Win32_Graphics_Gdi",
   "Win32_UI_HiDpi",
   "Win32_System_SystemInformation",
+  "Win32_System_Time",
 ] }

@@ -28,7 +28,7 @@ pub fn save(path: &Path, keys: &HashMap<String, String>) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
     unsafe {
         let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
@@ -40,7 +40,7 @@ fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(windows)]
-fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
     unsafe {
         let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
@@ -61,11 +61,11 @@ unsafe fn take_blob(blob: windows::Win32::Security::Cryptography::CRYPT_INTEGER_
 
 // Elsewhere (only for `cargo check` off Windows) the keys are stored as they are.
 #[cfg(not(windows))]
-fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(data.to_vec())
 }
 
 #[cfg(not(windows))]
-fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(data.to_vec())
 }

@@ -45,6 +45,9 @@ export interface Settings {
   onboarded: boolean;
   phone: { enabled: boolean; port: number; cleanup: boolean };
   profiles: Profile[];
+  history: boolean;
+  historyDays: number;
+  statistics: boolean;
   cleanup: {
     fillers: boolean;
     spokenPunctuation: boolean;
@@ -149,4 +152,28 @@ export interface ChatProvider {
 export interface Program {
   exe: string;
   title: string;
+}
+
+export interface HistoryEntry {
+  at: number;
+  text: string;
+  program: string;
+  engine: string;
+  inserted: boolean;
+}
+
+export interface StatsSummary {
+  wordsToday: number;
+  dictationsToday: number;
+  lastDays: number[];
+  totalWords: number;
+  totalDictations: number;
+  minutesSavedToday: number;
+  minutesSavedTotal: number;
+  wordsByProgram: [string, number][];
+  medianWaitMs: Record<string, number>;
+  streakDays: number;
+  longestAudioMs: number;
+  speakingWpm: number | null;
+  firstDay: number | null;
 }

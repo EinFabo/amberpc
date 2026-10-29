@@ -36,6 +36,12 @@ pub struct Settings {
     pub cleanup: CleanupSettings,
     /// Writing style and smart-cleanup choice per program.
     pub profiles: Vec<crate::profiles::Profile>,
+    /// Keep the last dictations on this PC (encrypted for the Windows account).
+    pub history: bool,
+    /// How many days the history keeps a dictation.
+    pub history_days: u32,
+    /// Count words and timings per dictation for the statistics - never the text.
+    pub statistics: bool,
 }
 
 impl Default for Settings {
@@ -58,6 +64,9 @@ impl Default for Settings {
             phone: PhoneSettings::default(),
             cleanup: CleanupSettings::default(),
             profiles: crate::profiles::defaults(),
+            history: true,
+            history_days: 7,
+            statistics: true,
         }
     }
 }
@@ -279,6 +288,7 @@ impl Settings {
             self.phone.port = d.phone.port;
         }
         self.profiles = crate::profiles::sanitize(std::mem::take(&mut self.profiles));
+        self.history_days = self.history_days.clamp(1, 90);
         let c = &mut self.cleanup;
         if crate::local::llm_runtime(&c.local_runtime).is_none() {
             c.local_runtime = d.cleanup.local_runtime.clone();

@@ -41,13 +41,17 @@ pub fn sync(app: &AppHandle) {
     }
     key(&core);
 
-    let (k, e, t) = (app.clone(), app.clone(), app.clone());
+    let (k, e, t, r) = (app.clone(), app.clone(), app.clone(), app.clone());
     let hooks = Hooks {
         // Read per request, so a new key takes effect at once.
         key: Arc::new(move || k.state::<Core>().key(KEY_ID).unwrap_or_default()),
         engine: Arc::new(move || crate::dictation::transcriber(&e, &e.state::<Core>().settings()).map(|p| p.transcriber)),
         // Like the PC's own dictations: fillers out, the model's tidy-up if it is on and
         // ready - never a wait for a model that is still loading.
+        record: Arc::new(move |text, audio_ms, wait_ms| {
+            let core = r.state::<Core>();
+            core.memory.remember(&core.settings(), text, "phone", "phone API", true, audio_ms, wait_ms);
+        }),
         tidy: Arc::new(move |text| {
             let settings = t.state::<Core>().settings();
             if settings.phone.cleanup {

@@ -233,6 +233,8 @@ pub fn toggle(app: &AppHandle) {
 
 fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Option<Target>, program: Option<String>, held_ms: u64) {
     let core = app.state::<Core>();
+    // What the user waits: from the stop to the text being there.
+    let stopped = Instant::now();
     let settings = core.settings();
     if recording.interrupted && recording.samples.is_empty() {
         return fail(app, session, "The microphone stopped delivering sound.".into(), true);
@@ -249,7 +251,11 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
     let options = TranscribeOptions::new(&settings.language, &settings.vocabulary);
     let (raw, engine, recognize_ms) = match recognize(app, &settings, &prepared.wav, &options, prepared.spoken_ms) {
         Ok(r) => r,
-        Err(message) => return fail(app, session, message, true),
+        Err(message) => {
+            // Kept in memory for a few minutes: one click recognizes it again.
+            core.memory.keep_failed(prepared.wav, prepared.spoken_ms, program);
+            return fail(app, session, format!("{message} The recording is kept - tray → \"Recognize again\"."), true);
+        }
     };
     // Fillers out, and - if switched on - the model's tidy-up; a failing cleanup keeps the text.
     let profile = program.as_deref().and_then(|p| amber_core::profiles::find(&settings.profiles, p));
@@ -271,6 +277,16 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
     let outcome = insert::insert(&final_text, &settings.insert, target);
 
     let what = if settings.log_text { format!("\"{cleaned}\"") } else { format!("{} words", text::words(&cleaned)) };
+    let inserted = matches!(outcome, Ok(Outcome::Pasted | Outcome::Typed));
+    core.memory.remember(
+        &settings,
+        &cleaned,
+        program.as_deref().unwrap_or(""),
+        &engine,
+        inserted,
+        prepared.spoken_ms,
+        stopped.elapsed().as_millis() as u64,
+    );
     match outcome {
         Ok(Outcome::OnClipboard(message)) => {
             crate::diag::warn(format!("{what} left on the clipboard: {message}"));
@@ -292,8 +308,35 @@ fn run(app: &AppHandle, session: u64, recording: capture::Recording, target: Opt
             announce(app, Phase::Done, Some(cleaned));
             settle(app, session, Duration::from_millis(900));
         }
-        Err(e) => fail(app, session, format!("The text could not be inserted: {e}"), true),
+        Err(e) => fail(app, session, format!("The text could not be inserted ({e}). It is in the history."), true),
     }
+}
+
+/// Recognizes the last failed recording once more (with the engine set now) and puts the
+/// text on the clipboard - by now the window it was meant for may be anywhere.
+pub fn recognize_again(app: &AppHandle) -> Result<String, String> {
+    let core = app.state::<Core>();
+    let failed = core.memory.take_failed().ok_or("No failed recording from the last ten minutes.")?;
+    let settings = core.settings();
+    let started = Instant::now();
+    let options = TranscribeOptions::new(&settings.language, &settings.vocabulary);
+    let (raw, engine, _) = match recognize(app, &settings, &failed.wav, &options, failed.spoken_ms) {
+        Ok(r) => r,
+        Err(e) => {
+            // Still there for another try (another engine, the key fixed).
+            core.memory.keep_failed(failed.wav, failed.spoken_ms, failed.program);
+            return Err(e);
+        }
+    };
+    let profile = failed.program.as_deref().and_then(|p| amber_core::profiles::find(&settings.profiles, p));
+    let (text, _) = crate::llm::tidy(app, &settings, &text::clean(&raw), profile);
+    if text.is_empty() {
+        return Err("Nothing recognized.".into());
+    }
+    insert::to_clipboard(&text)?;
+    core.memory.remember(&settings, &text, failed.program.as_deref().unwrap_or(""), &engine, false, failed.spoken_ms, started.elapsed().as_millis() as u64);
+    crate::diag::info(format!("recognized again: {} words, on the clipboard", text::words(&text)));
+    Ok(text)
 }
 
 /// An engine ready for one request, with the names it is logged and measured under.
