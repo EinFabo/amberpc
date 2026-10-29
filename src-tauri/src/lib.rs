@@ -43,7 +43,6 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     diag::init(&paths.logs);
     diag::info(format!("Amber {} starting", env!("CARGO_PKG_VERSION")));
     app.manage(Core::new(paths));
-    mute::reset(&app.state::<state::Core>().settings().discord);
 
     let core = app.state::<Core>();
     let settings = core.settings();
