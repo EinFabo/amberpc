@@ -15,6 +15,7 @@ pub mod local;
 pub mod profiles;
 pub mod providers;
 pub mod settings;
+pub mod snippets;
 pub mod spoken;
 pub mod stats;
 pub mod text;

@@ -59,6 +59,7 @@ export interface Settings {
   history: boolean;
   historyDays: number;
   statistics: boolean;
+  snippets: Snippet[];
   cleanup: {
     fillers: boolean;
     spokenPunctuation: boolean;
@@ -187,4 +188,9 @@ export interface StatsSummary {
   longestAudioMs: number;
   speakingWpm: number | null;
   firstDay: number | null;
+}
+
+export interface Snippet {
+  trigger: string;
+  text: string;
 }

@@ -42,6 +42,8 @@ pub struct Settings {
     pub history_days: u32,
     /// Count words and timings per dictation for the statistics - never the text.
     pub statistics: bool,
+    /// Spoken phrases that insert a saved text.
+    pub snippets: Vec<crate::snippets::Snippet>,
 }
 
 impl Default for Settings {
@@ -67,6 +69,7 @@ impl Default for Settings {
             history: true,
             history_days: 7,
             statistics: true,
+            snippets: Vec::new(),
         }
     }
 }
@@ -301,6 +304,7 @@ impl Settings {
         }
         self.profiles = crate::profiles::sanitize(std::mem::take(&mut self.profiles));
         self.history_days = self.history_days.clamp(1, 90);
+        self.snippets = crate::snippets::sanitize(std::mem::take(&mut self.snippets));
         let c = &mut self.cleanup;
         if crate::local::llm_runtime(&c.local_runtime).is_none() {
             c.local_runtime = d.cleanup.local_runtime.clone();

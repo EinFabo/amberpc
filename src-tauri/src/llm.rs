@@ -278,11 +278,17 @@ pub fn cleaner(app: &AppHandle, s: &Settings, wait: bool) -> Result<ChatCleaner,
     }
 }
 
-/// What the dictation gets, in this order: spoken punctuation ("neue Zeile", "Komma"),
+/// What the dictation gets, in this order: a snippet if the dictation is its phrase, else
+/// spoken punctuation ("neue Zeile", "Komma"),
 /// fillers out, German commas, and - when the smart cleanup runs for [profile]'s program - the
 /// model's tidy-up in that program's style. A failing model leaves the text as it was: never
 /// lost, never stuck. Returns why the model was skipped, if it was.
 pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str, profile: Option<&Profile>) -> (String, Option<String>) {
+    // A snippet's phrase on its own: its saved text, exactly as saved.
+    if let Some(snippet) = amber_core::snippets::find(&s.snippets, recognized) {
+        crate::diag::info(format!("snippet \"{}\"", snippet.trigger));
+        return (snippet.text.clone(), None);
+    }
     let text = by_rule(s, recognized);
     if !profiles::smart_cleanup(s.cleanup.smart, profile) || text.is_empty() {
         return (text, None);
