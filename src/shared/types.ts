@@ -60,6 +60,7 @@ export interface Settings {
   historyDays: number;
   statistics: boolean;
   snippets: Snippet[];
+  discord: { muteWhileDictating: boolean; key: string };
   cleanup: {
     fillers: boolean;
     spokenPunctuation: boolean;

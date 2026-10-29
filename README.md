@@ -111,6 +111,13 @@ The key shows the state (flame, listening, working, failed; grey while Amber is 
 running). It talks to Amber through a control port on 127.0.0.1 only, with a fresh token
 every start, handed over in `%APPDATA%\app.amber.pc\streamdeck.json`.
 
+**Muted in Discord while dictating** (Microphone page; any dictation, not only the Stream
+Deck): Discord has no API for that, but a *Push to Mute* keybind. Amber holds a key no
+keyboard has (F13-F24, default F20) while it listens and lets go when the recording ends -
+held, not toggled, so whoever was muted before stays muted. Set it up once: Discord → User
+Settings → Keybinds → Add a Keybind → *Push to Mute* → *Record Keybind*, and let Amber press
+the key (the button on the Microphone page presses it after 8 s).
+
 ```bash
 cd streamdeck && npm run setup && npm test && npm run pack   # -> dist/
 ```

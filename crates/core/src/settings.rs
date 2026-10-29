@@ -44,6 +44,7 @@ pub struct Settings {
     pub statistics: bool,
     /// Spoken phrases that insert a saved text.
     pub snippets: Vec<crate::snippets::Snippet>,
+    pub discord: DiscordSettings,
 }
 
 impl Default for Settings {
@@ -70,6 +71,7 @@ impl Default for Settings {
             history_days: 7,
             statistics: true,
             snippets: Vec::new(),
+            discord: DiscordSettings::default(),
         }
     }
 }
@@ -268,6 +270,29 @@ impl Default for CleanupSettings {
     }
 }
 
+/// Muting yourself in Discord while dictating, through Discord's own "Push to Mute" keybind:
+/// Amber holds a key that no keyboard has (F13-F24) for as long as it listens.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscordSettings {
+    pub mute_while_dictating: bool,
+    /// "F13" .. "F24", the key set as Push to Mute in Discord.
+    pub key: String,
+}
+
+impl Default for DiscordSettings {
+    fn default() -> Self {
+        DiscordSettings { mute_while_dictating: false, key: "F20".into() }
+    }
+}
+
+impl DiscordSettings {
+    /// The key's number, 13..=24.
+    pub fn key_number(&self) -> u8 {
+        self.key.trim().trim_start_matches(['F', 'f']).parse::<u8>().ok().filter(|n| (13..=24).contains(n)).unwrap_or(20)
+    }
+}
+
 pub const BUBBLE_SIZES: std::ops::RangeInclusive<u32> = 40..=96;
 
 impl Settings {
@@ -307,6 +332,7 @@ impl Settings {
         self.profiles = crate::profiles::sanitize(std::mem::take(&mut self.profiles));
         self.history_days = self.history_days.clamp(1, 90);
         self.snippets = crate::snippets::sanitize(std::mem::take(&mut self.snippets));
+        self.discord.key = format!("F{}", self.discord.key_number());
         let c = &mut self.cleanup;
         if crate::local::llm_runtime(&c.local_runtime).is_none() {
             c.local_runtime = d.cleanup.local_runtime.clone();
@@ -424,6 +450,7 @@ mod tests {
         assert!(s.cleanup.fillers && !s.cleanup.smart, "fillers on, the model only when asked for");
         assert_eq!(s.phone.port, 8765);
         assert!(!s.phone.enabled, "the phone API is off unless turned on");
+
         assert_eq!(s.bubble.size, 96);
         assert_eq!(s.bubble.opacity, 0.3);
         assert_eq!(s.bubble.y, BubbleSettings::default().y);
@@ -435,5 +462,11 @@ mod tests {
         let mut s = Settings::default();
         s.language = " DE ".into();
         assert_eq!(s.sanitized().language, "de");
+
+        let mut s = Settings::default();
+        s.discord.key = "f13".into();
+        assert_eq!(s.clone().sanitized().discord.key, "F13");
+        s.discord.key = "F5".into();
+        assert_eq!(s.sanitized().discord.key, "F20", "only keys no keyboard has");
     }
 }
