@@ -1,8 +1,9 @@
 //! Muted in Discord while Amber listens: Amber flips Discord's own microphone switch, the one
 //! at the bottom left. Discord shows the user muted as usual, and nothing needs setting up.
 //!
-//! The switch is found through UI Automation, the interface screen readers use, and pressed
-//! with a click sent to Discord's window as a message. UI Automation's own Toggle would let
+//! The switch is found through UI Automation, the interface screen readers use - afresh each
+//! time, since Discord replaces it when it flips - and pressed with a click sent to Discord's
+//! window as a message. UI Automation's own Toggle would let
 //! Discord take the focus - a game loses it, may leave full screen or pause - while a sent
 //! click cannot bring a window to the front. So there is no fallback that takes the focus:
 //! with Discord minimized the click does not land, and Amber leaves the microphone as it is.
@@ -128,20 +129,6 @@ mod win {
             Ok(unsafe { self.toggle.CurrentToggleState() }? == ToggleState_On)
         }
 
-        /// Waits up to [limit] for the switch to show [muted].
-        fn shows(&self, muted: bool, limit: Duration) -> bool {
-            let until = Instant::now() + limit;
-            loop {
-                if self.muted().is_ok_and(|m| m == muted) {
-                    return true;
-                }
-                if Instant::now() > until {
-                    return false;
-                }
-                std::thread::sleep(Duration::from_millis(30));
-            }
-        }
-
         /// A click into the middle of the switch, as messages to Discord's window; false if
         /// there is nowhere to click.
         fn click(&self) -> bool {
@@ -162,9 +149,10 @@ mod win {
         }
     }
 
+    /// The switch is looked up afresh every time: Discord replaces it with a new one when it
+    /// flips, and the old one goes on answering "not muted".
     pub struct Discord {
         uia: Option<IUIAutomation>,
-        switch: Option<Switch>,
         /// Amber switched the microphone off; only then it switches it back on.
         muted_by_amber: bool,
     }
@@ -173,18 +161,20 @@ mod win {
         pub fn new() -> Self {
             let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
             let uia = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.ok();
-            Discord { uia, switch: None, muted_by_amber: false }
+            Discord { uia, muted_by_amber: false }
         }
 
         pub fn set(&mut self, mute: bool) -> Result<Outcome, String> {
             if !mute && !self.muted_by_amber {
                 return Ok(Outcome::Unchanged);
             }
-            if let Err(outcome) = self.find()? {
-                self.muted_by_amber = false;
-                return Ok(outcome);
-            }
-            let switch = self.switch.as_ref().expect("found");
+            let switch = match self.find()? {
+                Ok(switch) => switch,
+                Err(outcome) => {
+                    self.muted_by_amber = false;
+                    return Ok(outcome);
+                }
+            };
             if switch.muted().map_err(|e| e.to_string())? == mute {
                 self.muted_by_amber = false;
                 return Ok(Outcome::Unchanged);
@@ -198,15 +188,25 @@ mod win {
             // Sent: the switch is Amber's to switch back, even if the click shows only later -
             // the unmute looks at the switch itself before clicking again.
             self.muted_by_amber = mute;
-            Ok(if switch.shows(mute, CLICK_TAKES) { Outcome::Clicked } else { Outcome::NotTaken })
+            Ok(if self.shows(mute, CLICK_TAKES) { Outcome::Clicked } else { Outcome::NotTaken })
         }
 
-        /// The switch found last time if it still answers, else a fresh search (some 20 ms).
-        fn find(&mut self) -> Result<Result<(), Outcome>, String> {
-            if self.switch.as_ref().is_some_and(|s| s.muted().is_ok()) {
-                return Ok(Ok(()));
+        /// Waits up to [limit] for the switch to show [muted].
+        fn shows(&self, muted: bool, limit: Duration) -> bool {
+            let until = Instant::now() + limit;
+            loop {
+                if self.find().is_ok_and(|f| f.is_ok_and(|s| s.muted().is_ok_and(|m| m == muted))) {
+                    return true;
+                }
+                if Instant::now() > until {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
-            self.switch = None;
+        }
+
+        /// The switch as Discord shows it now (some 20 ms).
+        fn find(&self) -> Result<Result<Switch, Outcome>, String> {
             let windows = discord_windows();
             if windows.is_empty() {
                 return Ok(Err(Outcome::NoDiscord));
@@ -222,8 +222,7 @@ mod win {
                     }
                     // The bar of a call has a "Mute" too, without a state; the switch has one.
                     if let Ok(toggle) = unsafe { element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) } {
-                        self.switch = Some(Switch { window, element, toggle });
-                        return Ok(Ok(()));
+                        return Ok(Ok(Switch { window, element, toggle }));
                     }
                 }
             }
