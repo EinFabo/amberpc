@@ -34,15 +34,24 @@ pub fn spawn(app: &AppHandle) {
 }
 
 
+/// With a timeout: the plugin's default is none, and a check that stalls (sleep, captive
+/// portal) would block every later check until Amber restarts.
+fn updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    app.updater_builder().timeout(Duration::from_secs(300)).build().map_err(|e| e.to_string())
+}
+
 pub async fn check(app: &AppHandle) -> Result<Option<UpdateInfo>, String> {
-    let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?;
+    let update = updater(app)?.check().await.map_err(|e| e.to_string())?;
     Ok(update.map(|u| UpdateInfo { version: u.version.clone(), notes: u.body.clone() }))
 }
 
 /// Downloads and installs a newer version if there is one. [quiet]: wait until no
 /// dictation runs, and announce the restart.
 pub async fn install(app: &AppHandle, quiet: bool) -> Result<bool, String> {
-    let Some(update) = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())? else {
+    if !quiet && app.state::<Core>().dictation.is_active() {
+        return Err("Finish the dictation first.".into());
+    }
+    let Some(update) = updater(app)?.check().await.map_err(|e| e.to_string())? else {
         return Ok(false);
     };
     crate::diag::info(format!("update {} found, downloading", update.version));

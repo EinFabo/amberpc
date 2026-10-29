@@ -287,16 +287,16 @@ pub fn install_runtime(zip_path: &Path, dest: &Path, rt: &Runtime) -> Result<(),
     result
 }
 
-/// What whisper-server's start-up output says about the GPU: `Some(true)` when a CUDA device
-/// shows up at all (only a loaded GPU backend can list one, and weights placed on it are
-/// proof), `Some(false)` when it found none, `None` when it has not said yet.
+/// What whisper-server's start-up output says about the GPU: `Some(true)` once it uses a
+/// CUDA backend or put the weights on CUDA0, `Some(false)` when it found no GPU or could not
+/// start the backend, `None` when it has not said yet. Merely listing a device proves nothing.
 pub fn gpu_in_use<'a>(output: impl IntoIterator<Item = &'a str>) -> Option<bool> {
     for line in output {
         let l = line.to_ascii_lowercase();
-        if l.contains("no gpu found") {
+        if l.contains("no gpu found") || l.contains("failed to initialize") {
             return Some(false);
         }
-        if l.contains("cuda0") || (l.contains("whisper_backend_init_gpu: using") && !l.contains("using cpu")) {
+        if l.contains("using cuda") || l.contains("cuda0 total size") {
             return Some(true);
         }
     }
@@ -359,6 +359,10 @@ mod tests {
         ];
         assert_eq!(gpu_in_use(loaded), Some(true));
         assert_eq!(gpu_in_use(["whisper_model_load:        CUDA0 total size =   573.45 MB"]), Some(true));
+        // Listed, then failed to start: the CPU does the work.
+        let failed = ["whisper_backend_init_gpu: device 0: CUDA0 (type: 1)", "whisper_backend_init_gpu: failed to initialize CUDA0 backend"];
+        assert_eq!(gpu_in_use(failed), Some(false));
+        assert_eq!(gpu_in_use(["whisper_backend_init_gpu: device 0: CUDA0 (type: 1)"]), None);
     }
 
     #[test]

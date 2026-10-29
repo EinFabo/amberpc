@@ -1,5 +1,6 @@
 //! Amber for Windows: dictation into any window, locally or through a server.
 
+mod autostart;
 mod bubble;
 mod capture;
 mod commands;
@@ -16,34 +17,12 @@ mod whisper;
 use amber_core::local::Layout;
 use amber_core::settings::EngineKind;
 use tauri::{AppHandle, Manager};
-use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_notification::NotificationExt;
 
 use state::{Core, Paths};
 
-/// Started by Windows at login: stay in the tray.
-const AUTOSTART_ARG: &str = "--autostart";
-
 pub fn notify(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
-}
-
-/// Debug builds and release builds run straight from the build folder (`target\release`)
-/// must not point Windows' autostart at themselves - only the installed app registers.
-fn is_installed() -> bool {
-    !cfg!(debug_assertions)
-        && std::env::current_exe().map(|p| !p.to_string_lossy().to_lowercase().contains(r"\target\")).unwrap_or(false)
-}
-
-pub fn sync_autostart(app: &AppHandle, on: bool) {
-    if !is_installed() {
-        return;
-    }
-    let launcher = app.autolaunch();
-    let result = if on { launcher.enable() } else { launcher.disable() };
-    if let Err(e) = result {
-        diag::warn(format!("autostart not changed: {e}"));
-    }
 }
 
 fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
@@ -67,7 +46,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         diag::warn(format!("hotkey: {e}"));
         notify(app, "Amber: hotkey unavailable", &e);
     }
-    sync_autostart(app, settings.autostart);
+    autostart::sync_at_start(app);
 
     if settings.engine == EngineKind::Local && settings.local.keep_loaded {
         let app = app.clone();
@@ -76,7 +55,8 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let autostarted = std::env::args().any(|a| a == AUTOSTART_ARG);
+    // Started by Windows at login: stay in the tray.
+    let autostarted = std::env::args().any(|a| a == amber_core::autostart::ARG);
     if !settings.onboarded {
         bubble::open_settings(app, Some("welcome"));
     } else if !autostarted {
@@ -93,7 +73,6 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| setup(app.handle()))

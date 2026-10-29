@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { DownloadEvent, LocalInfo, LocalItem, LocalStatus } from "../../shared/types";
@@ -69,11 +69,9 @@ function Vocabulary({ value, onSave }: { value: string; onSave: (v: string) => v
   );
 }
 
-/** Local engine state and downloads. [onFinished] hears when a download ends. */
-export function useLocal(onFinished?: (key: string, ok: boolean) => void) {
+/** Local engine state and downloads. */
+export function useLocal() {
   const [info, setInfo] = useState<LocalInfo | null>(null);
-  const finished = useRef(onFinished);
-  finished.current = onFinished;
   const [progress, setProgress] = useState<Record<string, DownloadEvent>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -87,7 +85,6 @@ export function useLocal(onFinished?: (key: string, ok: boolean) => void) {
         setProgress((p) => ({ ...p, [d.key]: d }));
         if (d.state === "failed") setErrors((x) => ({ ...x, [d.key]: d.message ?? "failed" }));
         if (d.state !== "running") {
-          finished.current?.(d.key, d.state === "done");
           setProgress((p) => {
             const { [d.key]: _, ...rest } = p;
             return rest;
@@ -100,25 +97,20 @@ export function useLocal(onFinished?: (key: string, ok: boolean) => void) {
     return () => subs.forEach((s) => s.then((un) => un()));
   }, [reload]);
 
-  const download = async (kind: "runtime" | "model", id: string) => {
+  const download = async (kind: "runtime" | "model", id: string, select: boolean) => {
     const key = `${kind}:${id}`;
     setErrors(({ [key]: _, ...rest }) => rest);
     setProgress((p) => ({ ...p, [key]: { key, done: 0, total: null, state: "running" } }));
-    await invoke("download", { kind, id });
+    await invoke("download", { kind, id, select });
   };
 
   return { info, progress, errors, reload, download };
 }
 
 function LocalEngine({ s, save, toast }: PageProps) {
-  // Chosen while downloading: selected once the download is complete, so the engine that
-  // works now keeps working until then.
-  const pending = useRef<Record<string, () => void>>({});
-  const { info, progress, errors, reload, download } = useLocal((key, ok) => {
-    const select = pending.current[key];
-    delete pending.current[key];
-    if (ok && select) select();
-  });
+  // A download is selected by Amber once it is complete, so the engine that works now keeps
+  // working until then.
+  const { info, progress, errors, reload, download } = useLocal();
   if (!info) return null;
 
   const item = (kind: "runtime" | "model", it: LocalItem, selected: boolean, select: () => void) => {
@@ -169,10 +161,7 @@ function LocalEngine({ s, save, toast }: PageProps) {
         ) : (
           <button
             className="btn"
-            onClick={async () => {
-              pending.current[key] = select;
-              await download(kind, it.id);
-            }}
+            onClick={() => download(kind, it.id, true)}
           >
             Download
           </button>

@@ -93,7 +93,7 @@ pub fn save_settings(app: AppHandle, core: State<Core>, settings: Settings) -> R
         bubble::apply(&app);
     }
     if after.autostart != before.autostart {
-        crate::sync_autostart(&app, after.autostart);
+        crate::autostart::set(after.autostart);
     }
     let local_changed = after.local != before.local || after.engine != before.engine;
     if local_changed {
@@ -261,8 +261,10 @@ fn key_of(kind: Kind, id: &str) -> String {
 }
 
 /// Downloads a runtime or a model in the background; progress arrives as "download" events.
+/// [select]: make it the one in use once it is installed - done here, not in the window,
+/// which may be closed long before a large model arrives.
 #[tauri::command]
-pub fn download(app: AppHandle, core: State<Core>, kind: Kind, id: String) -> Result<(), String> {
+pub fn download(app: AppHandle, core: State<Core>, kind: Kind, id: String, select: bool) -> Result<(), String> {
     let key = key_of(kind, &id);
     let (url, sha, dest, staging) = match kind {
         Kind::Runtime => {
@@ -303,8 +305,15 @@ pub fn download(app: AppHandle, core: State<Core>, kind: Kind, id: String) -> Re
             Ok(()) => {
                 crate::diag::info(format!("download {key} installed"));
                 emit(0, None, "done", None);
-                // If this completed what the settings ask for, load it right away.
                 let core = app.state::<Core>();
+                if select {
+                    let after = core.update_settings(|s| match kind {
+                        Kind::Runtime => s.local.runtime = id.clone(),
+                        Kind::Model => s.local.model = id.clone(),
+                    });
+                    let _ = app.emit("settings-changed", after);
+                }
+                // If this completed what the settings ask for, load it right away.
                 let s = core.settings();
                 if s.engine == EngineKind::Local && s.local.keep_loaded {
                     let _ = core.whisper.ensure(&app);
