@@ -1,9 +1,11 @@
-//! Discord hears silence while Amber listens. Windows keeps an audio session per program and
-//! device, for recording as for playback; muting Discord's recording sessions - what the
-//! volume mixer does for playback - hands Discord silence and leaves every other program's
-//! microphone alone, Amber's own included. Nothing to set up in Discord - its API would need
-//! an application of the user's own in Discord's developer portal, a Push to Mute keybind fed
-//! with keys from Amber proved unreliable.
+//! Muted in Discord while Amber listens: Amber flips Discord's own microphone switch, the one
+//! at the bottom left, through UI Automation - the interface screen readers use. Discord shows
+//! the user muted as usual, and nothing needs setting up there.
+//!
+//! The ways that did not work: Discord's API needs an application of the user's own in its
+//! developer portal; a Push to Mute keybind fed with keys from Amber proved unreliable; and
+//! muting Discord's recording session in Windows silences the microphone for every program on
+//! it, Amber included (measured).
 //!
 //! The work runs on a thread of its own, in order: COM wants its own apartment, and a mute
 //! must never overtake the unmute that follows it.
@@ -15,7 +17,7 @@ use std::time::Duration;
 
 use amber_core::settings::DiscordSettings;
 
-/// Whether Amber muted Discord and has not given the microphone back yet.
+/// Whether a mute was asked for and not taken back yet.
 static MUTED: AtomicBool = AtomicBool::new(false);
 
 /// Mute or unmute, and whom to tell when it is done.
@@ -26,13 +28,13 @@ fn worker() -> &'static Mutex<Sender<Job>> {
     WORKER.get_or_init(|| {
         let (tx, rx) = channel::<Job>();
         std::thread::spawn(move || {
-            win::init();
+            let mut discord = win::Discord::new();
             for (mute, done) in rx {
-                let what = if mute { "mute" } else { "unmute" };
-                match win::set(mute) {
-                    Ok(0) => {}
-                    Ok(n) => crate::diag::info(format!("Discord: {what}d {n} recording session{}", if n == 1 { "" } else { "s" })),
-                    Err(e) => crate::diag::warn(format!("could not {what} Discord: {e}")),
+                match discord.set(mute) {
+                    Ok(win::Outcome::Changed) => crate::diag::info(format!("Discord microphone {}", if mute { "off" } else { "on again" })),
+                    Ok(win::Outcome::NoSwitch) => crate::diag::warn("Discord runs, but its microphone switch was not found"),
+                    Ok(_) => {}
+                    Err(e) => crate::diag::warn(format!("could not switch Discord's microphone: {e}")),
                 }
                 if let Some(done) = done {
                     let _ = done.send(());
@@ -47,24 +49,21 @@ fn send(mute: bool, done: Option<Sender<()>>) {
     let _ = worker().lock().unwrap().send((mute, done));
 }
 
-/// Mutes Discord's microphone, if the switch is on.
+/// Mutes the user in Discord, if the switch is on.
 pub fn hold(s: &DiscordSettings) {
     if s.mute_while_dictating && !MUTED.swap(true, Ordering::SeqCst) {
         send(true, None);
     }
 }
 
-/// Gives Discord its microphone back, if Amber took it. Every Discord recording session is
-/// unmuted, not only the ones muted at the start: Windows can carry a mute over to a session
-/// opened later, and no Windows settings page mutes a program's recording - a muted one is
-/// always Amber's doing.
+/// Unmutes the user in Discord - only if Amber muted them, and they did not unmute meanwhile.
 pub fn release() {
     if MUTED.swap(false, Ordering::SeqCst) {
         send(false, None);
     }
 }
 
-/// Amber is quitting: gives the microphone back and waits a moment for it to happen.
+/// Amber is quitting: unmutes and waits a moment for it to happen.
 pub fn release_now() {
     if MUTED.swap(false, Ordering::SeqCst) {
         let (tx, rx) = channel();
@@ -73,61 +72,143 @@ pub fn release_now() {
     }
 }
 
-/// After a crash while dictating, Discord would stay muted: unmuted at start.
-pub fn reset(s: &DiscordSettings) {
-    if s.mute_while_dictating {
-        send(false, None);
-    }
-}
-
 #[cfg(windows)]
 mod win {
-    use windows::core::Interface;
-    use windows::Win32::Media::Audio::{
-        eCapture, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
-        DEVICE_STATE_ACTIVE,
+    use windows::Win32::System::Variant::VARIANT;
+    use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationTogglePattern, ToggleState_On, TreeScope_Descendants, UIA_ButtonControlTypeId,
+        UIA_ControlTypePropertyId, UIA_TogglePatternId,
     };
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowThreadProcessId};
 
     /// Discord, its test builds included.
     const PROGRAMS: &[&str] = &["discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"];
+    /// The microphone switch's name in Discord in English and German, muted or not.
+    const LABELS: &[&str] = &["Mute", "Unmute", "Stummschalten", "Stummschaltung aufheben"];
 
-    pub fn init() {
-        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    pub enum Outcome {
+        Changed,
+        /// Already as wanted - muted by the user before, or unmuted by them meanwhile.
+        Unchanged,
+        /// Discord is not running.
+        NoDiscord,
+        /// Discord runs, but the switch is not where it was.
+        NoSwitch,
     }
 
-    /// Mutes or unmutes Discord's recording sessions on every microphone; how many changed.
-    pub fn set(mute: bool) -> windows::core::Result<usize> {
-        let mut changed = 0;
-        unsafe {
-            let devices = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)?.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)?;
-            for i in 0..devices.GetCount()? {
-                let Ok(manager) = devices.Item(i).and_then(|d| d.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)) else { continue };
-                let sessions = manager.GetSessionEnumerator()?;
-                for j in 0..sessions.GetCount()? {
-                    let Ok(session) = sessions.GetSession(j) else { continue };
-                    // Sessions shared by several processes have no single one: not Discord's.
-                    let Ok(pid) = session.cast::<IAudioSessionControl2>().and_then(|c| c.GetProcessId()) else { continue };
-                    if !crate::insert::exe_of_pid(pid).is_some_and(|exe| PROGRAMS.contains(&exe.as_str())) {
+    pub struct Discord {
+        uia: Option<IUIAutomation>,
+        switch: Option<IUIAutomationTogglePattern>,
+        /// Amber switched the microphone off; only then it switches it back on.
+        muted_by_amber: bool,
+    }
+
+    impl Discord {
+        pub fn new() -> Self {
+            let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            let uia = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.ok();
+            Discord { uia, switch: None, muted_by_amber: false }
+        }
+
+        pub fn set(&mut self, mute: bool) -> Result<Outcome, String> {
+            if !mute && !self.muted_by_amber {
+                return Ok(Outcome::Unchanged);
+            }
+            let switch = match self.switch()? {
+                Ok(s) => s,
+                Err(outcome) => {
+                    self.muted_by_amber = false;
+                    return Ok(outcome);
+                }
+            };
+            let muted = unsafe { switch.CurrentToggleState() }.map_err(|e| e.to_string())? == ToggleState_On;
+            if muted == mute {
+                self.muted_by_amber = false;
+                return Ok(Outcome::Unchanged);
+            }
+            unsafe { switch.Toggle() }.map_err(|e| e.to_string())?;
+            self.muted_by_amber = mute;
+            Ok(Outcome::Changed)
+        }
+
+        /// The switch found last time if it still answers, else a fresh search (some 20 ms).
+        fn switch(&mut self) -> Result<Result<IUIAutomationTogglePattern, Outcome>, String> {
+            if let Some(s) = &self.switch {
+                if unsafe { s.CurrentToggleState() }.is_ok() {
+                    return Ok(Ok(s.clone()));
+                }
+            }
+            self.switch = None;
+            let windows = discord_windows();
+            if windows.is_empty() {
+                return Ok(Err(Outcome::NoDiscord));
+            }
+            let uia = self.uia.as_ref().ok_or("UI Automation is not available")?;
+            let buttons = unsafe { uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_ButtonControlTypeId.0)) }.map_err(|e| e.to_string())?;
+            for hwnd in windows {
+                let Ok(found) = (unsafe { uia.ElementFromHandle(hwnd).and_then(|root| root.FindAll(TreeScope_Descendants, &buttons)) }) else { continue };
+                for i in 0..unsafe { found.Length() }.unwrap_or(0) {
+                    let Ok(button) = (unsafe { found.GetElement(i) }) else { continue };
+                    if !unsafe { button.CurrentName() }.is_ok_and(|n| LABELS.contains(&n.to_string().as_str())) {
                         continue;
                     }
-                    let volume: ISimpleAudioVolume = session.cast()?;
-                    if volume.GetMute()?.as_bool() != mute {
-                        volume.SetMute(mute, std::ptr::null())?;
-                        changed += 1;
+                    // The bar of a call has a "Mute" too, without a state; the switch has one.
+                    if let Ok(toggle) = unsafe { button.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) } {
+                        self.switch = Some(toggle.clone());
+                        return Ok(Ok(toggle));
                     }
                 }
             }
+            Ok(Err(Outcome::NoSwitch))
         }
-        Ok(changed)
+    }
+
+    /// Discord's windows: Chromium frames with a title, of a Discord process.
+    fn discord_windows() -> Vec<HWND> {
+        unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> windows::core::BOOL {
+            let list = &mut *(data.0 as *mut Vec<isize>);
+            let mut class = [0u16; 64];
+            let n = GetClassNameW(hwnd, &mut class);
+            if GetWindowTextLengthW(hwnd) > 0 && String::from_utf16_lossy(&class[..n.max(0) as usize]) == "Chrome_WidgetWin_1" {
+                list.push(hwnd.0 as isize);
+            }
+            TRUE
+        }
+        let mut all: Vec<isize> = Vec::new();
+        unsafe {
+            let _ = EnumWindows(Some(each), LPARAM(&mut all as *mut _ as isize));
+        }
+        all.into_iter()
+            .map(|h| HWND(h as *mut _))
+            .filter(|&h| {
+                let mut pid = 0u32;
+                unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+                crate::insert::exe_of_pid(pid).is_some_and(|exe| PROGRAMS.contains(&exe.as_str()))
+            })
+            .collect()
     }
 }
 
 #[cfg(not(windows))]
 mod win {
-    pub fn init() {}
+    pub enum Outcome {
+        Changed,
+        NoSwitch,
+        Unchanged,
+    }
 
-    pub fn set(_mute: bool) -> Result<usize, String> {
-        Ok(0)
+    pub struct Discord;
+
+    impl Discord {
+        pub fn new() -> Self {
+            Discord
+        }
+
+        pub fn set(&mut self, _mute: bool) -> Result<Outcome, String> {
+            let _ = (Outcome::Changed, Outcome::NoSwitch);
+            Ok(Outcome::Unchanged)
+        }
     }
 }
