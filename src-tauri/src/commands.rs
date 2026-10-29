@@ -116,6 +116,12 @@ pub fn save_settings(app: AppHandle, core: State<Core>, settings: Settings) -> R
             let _ = app.state::<Core>().llm.ensure(&app);
         });
     }
+    if before.history && !after.history {
+        // Switched off: what was kept goes too.
+        core.memory.clear_history();
+    } else if after.history_days < before.history_days {
+        core.memory.prune(after.history_days);
+    }
     if after.phone != before.phone {
         // Stopping may wait for a phone dictation in progress.
         let app = app.clone();
@@ -675,4 +681,40 @@ pub fn chat_providers(core: State<Core>) -> Vec<ChatProvider> {
             has_key: core.has_key(p.id),
         })
         .collect()
+}
+
+#[tauri::command]
+pub fn history_list(core: State<Core>) -> Vec<amber_core::history::Entry> {
+    core.memory.history()
+}
+
+#[tauri::command]
+pub fn history_delete(core: State<Core>, at: u64) {
+    core.memory.forget(at);
+}
+
+#[tauri::command]
+pub fn history_clear(core: State<Core>) {
+    core.memory.clear_history();
+}
+
+#[tauri::command]
+pub fn copy_text(text: String) -> Result<(), String> {
+    crate::insert::to_clipboard(&text)
+}
+
+#[tauri::command]
+pub async fn recognize_again(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::dictation::recognize_again(&app)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn stats_summary(core: State<Core>) -> amber_core::stats::Summary {
+    let today = amber_core::stats::day_of(crate::memory::now_ms(), crate::memory::utc_offset_minutes());
+    amber_core::stats::summary(&core.memory.ledger.all(), today, amber_core::stats::DEFAULT_TYPING_WPM, 14)
+}
+
+#[tauri::command]
+pub fn stats_clear(core: State<Core>) {
+    core.memory.ledger.clear();
 }

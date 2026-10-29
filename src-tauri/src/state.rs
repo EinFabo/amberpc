@@ -41,6 +41,8 @@ pub struct Core {
     pub llm: crate::llm::Llm,
     /// How long recognition takes per engine and model on this PC.
     pub estimates: amber_core::estimate::Estimates,
+    /// History, statistics and the last failed recording.
+    pub memory: crate::memory::Memory,
     epoch: Instant,
 }
 
@@ -53,6 +55,7 @@ impl Core {
         let keys = crate::secrets::load(&paths.secrets);
         let mode = settings.hotkey.mode;
         let paths_root = paths.layout.root.clone();
+        let settings_snapshot = settings.clone();
         Core {
             paths,
             settings: RwLock::new(settings),
@@ -69,6 +72,7 @@ impl Core {
             phone: crate::phone::PhoneApi::default(),
             llm: crate::llm::Llm::default(),
             estimates: amber_core::estimate::Estimates::load(&paths_root.join("estimates.json")),
+            memory: crate::memory::Memory::load(&paths_root, &settings_snapshot),
             epoch: Instant::now(),
         }
     }

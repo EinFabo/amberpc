@@ -184,6 +184,9 @@ pub struct Hooks {
     /// What the PC does to its own dictations before inserting them (fillers, the smart
     /// cleanup) - so the phone gets the same without an update of its app.
     pub tidy: Arc<dyn Fn(String) -> String + Send + Sync>,
+    /// A finished phone dictation: the text, the audio length and how long it took - for the
+    /// PC's history and statistics.
+    pub record: Arc<dyn Fn(&str, u64, u64) + Send + Sync>,
     pub log: Arc<dyn Fn(String) + Send + Sync>,
 }
 
@@ -265,6 +268,7 @@ fn transcribe(content_type: &str, body: &[u8], peer: IpAddr, hooks: &Hooks) -> (
     match engine.transcribe(&wav, &options) {
         Ok(raw) => {
             let cleaned = (hooks.tidy)(text::clean(&raw));
+            (hooks.record)(&cleaned, audio::duration_ms(mono16k.len(), audio::TARGET_RATE), started.elapsed().as_millis() as u64);
             (hooks.log)(format!(
                 "phone API: {peer}, {} words from {} ms of audio in {} ms",
                 text::words(&cleaned),
@@ -378,6 +382,7 @@ mod tests {
             engine: Arc::new(move || Ok(Box::new(f.clone()) as Box<dyn Transcriber>)),
             // Stands in for the PC's cleanup: drops the fillers the fake engine heard.
             tidy: Arc::new(|t| text::strip_fillers(&t)),
+            record: Arc::new(|_, _, _| {}),
             log: Arc::new(move |m| l.lock().unwrap().push(m)),
         };
         (start_with("127.0.0.1:0".parse().unwrap(), hooks, limits).unwrap(), fake, log)

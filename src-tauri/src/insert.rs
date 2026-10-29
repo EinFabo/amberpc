@@ -285,6 +285,13 @@ mod win {
         }
     }
 
+    /// Puts [text] on the clipboard (kept out of the clipboard history), for "Copy" and
+    /// "Recognize again".
+    pub fn to_clipboard(text: &str) -> Result<(), String> {
+        let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        set_clipboard(&mut cb, &text.replace("\r\n", "\n").replace('\n', "\r\n"))
+    }
+
     pub fn insert(text: &str, settings: &InsertSettings, target: Option<Target>) -> Result<Outcome, String> {
         if blocked_by_uipi(target) {
             let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
@@ -310,7 +317,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{insert, program_of_window, remember, running_programs};
+pub use win::{insert, program_of_window, remember, running_programs, to_clipboard};
 
 impl Target {
     /// The target's program, lowercase ("discord.exe"), for its profile.
@@ -325,6 +332,11 @@ impl Target {
 #[cfg(not(windows))]
 pub fn running_programs() -> Vec<(String, String)> {
     Vec::new()
+}
+
+#[cfg(not(windows))]
+pub fn to_clipboard(_text: &str) -> Result<(), String> {
+    Err("The clipboard is only implemented on Windows.".into())
 }
 
 #[cfg(not(windows))]

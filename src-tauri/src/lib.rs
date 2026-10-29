@@ -10,6 +10,7 @@ mod dictation;
 mod hotkeys;
 mod insert;
 mod llm;
+mod memory;
 mod phone;
 mod process;
 mod secrets;
@@ -121,6 +122,13 @@ pub fn run() {
             commands::cleanup_preview,
             commands::chat_providers,
             commands::running_programs,
+            commands::history_list,
+            commands::history_delete,
+            commands::history_clear,
+            commands::copy_text,
+            commands::recognize_again,
+            commands::stats_summary,
+            commands::stats_clear,
         ])
         .build(tauri::generate_context!())
         .expect("Amber failed to start")
