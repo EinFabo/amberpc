@@ -8,6 +8,12 @@
 # Before: bump "version" in package.json and [workspace.package] in Cargo.toml, commit, push.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+REPO_DIR="$(pwd)"
+
+# Never two releases (or a release and a build) at once: they share the Windows build folder.
+exec 9>"${TMPDIR:-/tmp}/amberpc-build.lock"
+flock -n 9 || { echo "another Amber build or release is running - wait for it"; exit 1; }
+export AMBER_BUILD_LOCKED=1
 NOTES="${1:?usage: tools/release.sh \"release notes\"}"
 REPO="EinFabo/amberpc"
 
@@ -20,8 +26,14 @@ git fetch -q origin main
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "HEAD is not origin/main - push first"; exit 1; }
 if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then echo "$TAG already released"; exit 1; fi
 
+# Built from a clean export of exactly this commit - not from the working tree, which may
+# change while the build runs.
+EXPORT="$(mktemp -d)"
+git archive HEAD | tar -x -C "$EXPORT"
+export WIN_SRC="$EXPORT"
+
 echo "== tests"
-cargo test -p amber-core --quiet
+( cd "$EXPORT" && CARGO_TARGET_DIR="$REPO_DIR/target" cargo test -p amber-core --quiet )
 tools/win.sh test > /dev/null || { echo "Windows tests failed - run tools/win.sh test"; exit 1; }
 BUNDLE="/mnt/c/Users/fabia/build/amberpc/target/release/bundle/nsis"
 SETUP="Amber_${VERSION}_x64-setup.exe"
@@ -37,9 +49,9 @@ cp "$BUNDLE/$SETUP" "$BUNDLE/$SETUP.sig" "$OUT/"
 
 echo "== Stream Deck plugin"
 PLUGIN="com.einfabo.amber.streamDeckPlugin"
-( cd streamdeck && npm ci --silent && npm ci --silent --prefix com.einfabo.amber.sdPlugin && npm test --silent && npm run --silent pack ) > "$OUT/plugin.log" 2>&1 \
+( cd "$EXPORT/streamdeck" && npm ci --silent && npm ci --silent --prefix com.einfabo.amber.sdPlugin && npm test --silent && npm run --silent pack ) > "$OUT/plugin.log" 2>&1 \
   || { tail -30 "$OUT/plugin.log"; echo "plugin build failed"; exit 1; }
-cp "streamdeck/dist/$PLUGIN" "$OUT/"
+cp "$EXPORT/streamdeck/dist/$PLUGIN" "$OUT/"
 
 # What the Tauri updater reads: version, notes, and per platform the installer URL with
 # its minisign signature.
@@ -62,5 +74,5 @@ gh release create "$TAG" -R "$REPO" --target main --title "Amber $TAG" \
 Download \`$SETUP\` below and run it. Installed copies update themselves.
 \`$PLUGIN\` is the Stream Deck plugin - double-click installs it." \
   "$OUT/$SETUP" "$OUT/$SETUP.sig" "$OUT/latest.json" "$OUT/$PLUGIN"
-rm -rf "$OUT"
+rm -rf "$OUT" "$EXPORT"
 echo "done: https://github.com/$REPO/releases/tag/$TAG"
