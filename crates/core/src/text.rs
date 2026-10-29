@@ -50,40 +50,46 @@ const FILLERS: [&str; 12] = ["äh", "ähm", "ähh", "öh", "öhm", "hm", "hmm", 
 /// Drops hesitation sounds with the commas around them, and gives the sentence its capital
 /// back when it started with one. Cannot invent anything, costs nothing, always on.
 pub fn strip_fillers(text: &str) -> String {
+    const QUOTES: &str = "\"'„“”‚‘’«»";
     let tokens: Vec<&str> = text.split_whitespace().collect();
     let mut kept: Vec<String> = Vec::with_capacity(tokens.len());
     let mut dropped_first = false;
+    // Opening quotes of a dropped filler belong to the next word.
+    let mut carry = String::new();
     for (i, token) in tokens.iter().enumerate() {
-        let core = token.trim_matches(|c: char| ",.;:!?-\"'…".contains(c)).to_lowercase();
+        let core = token.trim_matches(|c: char| ",.;:!?-…".contains(c) || QUOTES.contains(c)).to_lowercase();
         if !FILLERS.contains(&core.as_str()) {
-            kept.push(token.to_string());
+            kept.push(format!("{}{token}", std::mem::take(&mut carry)));
             continue;
         }
         if i == 0 {
             dropped_first = true;
         }
-        // "ist, ähm, gut" -> "ist gut": the comma before a filler belonged to it.
-        if token.ends_with(',') {
-            if let Some(last) = kept.last_mut() {
-                if last.ends_with(',') {
-                    last.pop();
-                }
-            }
+        carry.extend(token.chars().take_while(|c| QUOTES.contains(*c)));
+        let tail: String = token.chars().rev().take_while(|c| !c.is_alphanumeric()).collect::<Vec<_>>().into_iter().rev().collect();
+        let Some(last) = kept.last_mut() else { continue };
+        // "ist, ähm, gut" -> "ist gut", "„ja, ähm“" -> "„ja“": a filler that ends a clause
+        // (with a comma, a full stop or a quote) took the comma before it along.
+        if !tail.is_empty() && last.ends_with(',') {
+            last.pop();
         }
-        // A filler that ended the sentence hands its full stop to the word before it.
-        if let Some(end) = token.chars().last().filter(|c| ".!?".contains(*c)) {
-            if let Some(last) = kept.last_mut() {
-                let last_trimmed = last.trim_end_matches(',').to_string();
-                *last = format!("{last_trimmed}{end}");
-            }
+        // A filler that ended the sentence hands its full stop to the word before it - unless
+        // that word already ends one ("Gut. Hm." stays "Gut.").
+        if let Some(end) = tail.chars().find(|c| ".!?".contains(*c)) {
+            let trimmed = last.trim_end_matches(',').to_string();
+            *last = if trimmed.ends_with(['.', '!', '?', ':', ';']) { trimmed } else { format!("{trimmed}{end}") };
         }
+        // Closing quotes stay with the sentence they close.
+        last.extend(tail.chars().filter(|c| QUOTES.contains(*c)));
     }
     let mut out = kept.join(" ");
     if dropped_first {
         out = out.trim_start_matches(|c: char| c == ',' || c.is_whitespace()).to_string();
-        let mut chars = out.chars();
-        if let Some(first) = chars.next().filter(|c| c.is_lowercase()) {
-            out = first.to_uppercase().chain(chars).collect();
+        // Past an opening quote, the first letter gets its capital back.
+        let lead: String = out.chars().take_while(|c| QUOTES.contains(*c)).collect();
+        let mut rest = out[lead.len()..].chars();
+        if let Some(first) = rest.next().filter(|c| c.is_lowercase()) {
+            out = format!("{lead}{}{}", first.to_uppercase(), rest.as_str());
         }
     }
     out
@@ -139,6 +145,12 @@ mod tests {
         assert_eq!(strip_fillers("Um vier Uhr ist das eh egal."), "Um vier Uhr ist das eh egal.");
         // Only whole words.
         assert_eq!(strip_fillers("Das Ähm-Problem und die Hummel."), "Das Ähm-Problem und die Hummel.");
+        // Review findings: no doubled or mixed sentence ends, quotes survive.
+        assert_eq!(strip_fillers("Gut. Hm."), "Gut.");
+        assert_eq!(strip_fillers("Echt? Hm."), "Echt?");
+        assert_eq!(strip_fillers("Folgendes: ähm."), "Folgendes:");
+        assert_eq!(strip_fillers("\"Ähm, hallo\", sagte er."), "\"Hallo\", sagte er.");
+        assert_eq!(strip_fillers("Er sagte „ja, ähm“ und ging."), "Er sagte „ja“ und ging.");
     }
 
     #[test]

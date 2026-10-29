@@ -3,6 +3,7 @@
 //! choice between it and a server with an API key.
 
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,20 @@ struct Running {
     child: Child,
     port: u16,
     key: Key,
+    /// Its `--api-key`: without one, any web page could use the model by scanning loopback.
+    api_key: String,
+}
+
+impl Running {
+    fn endpoint(&self) -> Endpoint {
+        Endpoint { url: format!("http://127.0.0.1:{}", self.port), key: self.api_key.clone() }
+    }
+}
+
+/// Where the running model answers, and the key it wants.
+pub struct Endpoint {
+    pub url: String,
+    pub key: String,
 }
 
 #[derive(Default)]
@@ -33,7 +48,15 @@ pub struct Llm {
     running: Mutex<Option<Running>>,
     output: Output,
     status: Mutex<Option<Status>>,
+    /// A background load is under way.
+    loading: AtomicBool,
+    /// When the last start failed - a model that does not fit is not retried at every
+    /// dictation.
+    failed_at: Mutex<Option<Instant>>,
 }
+
+/// How long a failed start keeps background loads from trying again.
+const RETRY_AFTER: Duration = Duration::from_secs(180);
 
 /// Loading 2.4 GB from a slow disk onto a GPU, or into RAM for the CPU.
 const START_TIMEOUT: Duration = Duration::from_secs(180);
@@ -51,14 +74,54 @@ impl Llm {
         let _ = app.emit("llm-status", status);
     }
 
-    /// The address of a llama-server with the configured model, started first if needed.
-    /// Like the whisper server: settings are read under the lock, and a running server is
-    /// only replaced once its successor is fully downloaded.
-    pub fn ensure(&self, app: &AppHandle) -> Result<String, String> {
+    /// The running server, if it is the configured one and done loading - never waits. If
+    /// not, a load starts in the background (unless the last one failed a moment ago).
+    pub fn ready(&self, app: &AppHandle) -> Option<Endpoint> {
+        let c = app.state::<Core>().settings().cleanup;
+        if let Ok(mut running) = self.running.try_lock() {
+            if let Some(r) = running.as_mut() {
+                if matches!(r.child.try_wait(), Ok(None)) && r.key.runtime == c.local_runtime && r.key.model == c.local_model {
+                    return Some(r.endpoint());
+                }
+            }
+        }
+        self.warm(app, false);
+        None
+    }
+
+    /// Loads in the background. [force]: also right after a failure - the user asked.
+    pub fn warm(&self, app: &AppHandle, force: bool) {
+        let recently_failed = self.failed_at.lock().unwrap().is_some_and(|t| t.elapsed() < RETRY_AFTER);
+        if (recently_failed && !force) || self.loading.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let llm = &app.state::<Core>().llm;
+            let _ = llm.ensure(&app);
+            llm.loading.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// A llama-server with the configured model, started first if needed - or stopped, if
+    /// the settings no longer want it. Blocks while the model loads. Like the whisper server:
+    /// settings are read under the lock, and a running server is only replaced once its
+    /// successor is fully downloaded.
+    pub fn ensure(&self, app: &AppHandle) -> Result<Endpoint, String> {
         let mut running = self.running.lock().unwrap();
         let core = app.state::<Core>();
         let layout = &core.paths.layout;
-        let c = core.settings().cleanup;
+        let settings = core.settings();
+        if !wants_local(&settings) {
+            // Switched off (or to a server) while this waited for the lock.
+            if let Some(mut r) = running.take() {
+                process::stop(&mut r.child);
+                crate::diag::info("cleanup model stopped");
+            }
+            self.set_status(app, Status::of("stopped", None));
+            return Err("The smart cleanup on this PC is off.".into());
+        }
+        let c = settings.cleanup;
         let key = Key { runtime: c.local_runtime.clone(), model: c.local_model.clone() };
         let rt = local::llm_runtime(&key.runtime).ok_or("Unknown runtime.")?;
         let model = local::llm_model(&key.model).ok_or("Unknown model.")?;
@@ -73,7 +136,7 @@ impl Llm {
         if let Some(r) = running.as_mut() {
             let alive = matches!(r.child.try_wait(), Ok(None));
             if alive && (r.key == key || missing.is_some()) {
-                return Ok(format!("http://127.0.0.1:{}", r.port));
+                return Ok(r.endpoint());
             }
             if !alive {
                 crate::diag::warn(format!("cleanup model had exited: {}", process::last_lines(&self.output, 6)));
@@ -90,14 +153,16 @@ impl Llm {
         let started = Instant::now();
         match self.spawn(layout, rt, model, &key) {
             Ok(r) => {
-                let url = format!("http://127.0.0.1:{}", r.port);
+                let endpoint = r.endpoint();
                 crate::diag::info(format!("cleanup model ready: {} on {} in {} ms", model.label, rt.label, started.elapsed().as_millis()));
                 *running = Some(r);
+                *self.failed_at.lock().unwrap() = None;
                 self.set_status(app, Status::of("ready", Some(format!("{} on {}", model.label, rt.label))));
-                Ok(url)
+                Ok(endpoint)
             }
             Err(e) => {
                 crate::diag::error(format!("cleanup model failed to start: {e}"));
+                *self.failed_at.lock().unwrap() = Some(Instant::now());
                 self.set_status(app, Status::of("failed", Some(e.clone())));
                 Err(e)
             }
@@ -106,14 +171,15 @@ impl Llm {
 
     fn spawn(&self, layout: &local::Layout, rt: &local::LlmRuntime, model: &local::LlmModel, key: &Key) -> Result<Running, String> {
         let port = process::free_port().map_err(|e| format!("No free port: {e}"))?;
-        let gpu_layers = if rt.id == "cuda" { "999" } else { "0" };
+        let api_key = amber_core::api::new_key();
         let mut cmd = Command::new(layout.llm_server_exe(rt));
         // Run in the models folder and pass only the file name: the path of a user folder
-        // with unusual characters could arrive mangled.
+        // with unusual characters could arrive mangled. No --n-gpu-layers: left unset,
+        // llama.cpp fits as many layers as the graphics memory next to Whisper allows.
         let model_path = layout.llm_model_path(model);
         cmd.current_dir(model_path.parent().unwrap_or(&layout.root))
             .args(["--model", model.file, "--host", "127.0.0.1", "--port", &port.to_string()])
-            .args(["--ctx-size", CONTEXT, "--parallel", "1", "--n-gpu-layers", gpu_layers])
+            .args(["--ctx-size", CONTEXT, "--parallel", "1", "--api-key", &api_key])
             .args(["--threads", &process::default_threads().to_string()]);
         let mut child = process::spawn(cmd, &self.output).map_err(|e| format!("The cleanup engine could not be started: {e}"))?;
 
@@ -126,7 +192,7 @@ impl Llm {
                 return Err(format!("The cleanup engine stopped while loading ({status}). {}", self.explain()));
             }
             if amber_core::engine::local_server_ready(&base) {
-                return Ok(Running { child, port, key: key.clone() });
+                return Ok(Running { child, port, key: key.clone(), api_key });
             }
             if Instant::now() > deadline {
                 process::stop(&mut child);
@@ -175,14 +241,20 @@ pub fn wants_local(s: &Settings) -> bool {
     s.cleanup.smart && s.cleanup.engine == EngineKind::Local
 }
 
-/// The client for the smart cleanup the settings ask for - or why not.
-pub fn cleaner(app: &AppHandle, s: &Settings) -> Result<ChatCleaner, String> {
+/// The client for the smart cleanup the settings ask for - or why not. [wait]: for the local
+/// model, wait while it loads (the settings page's preview) instead of skipping (a dictation).
+pub fn cleaner(app: &AppHandle, s: &Settings, wait: bool) -> Result<ChatCleaner, String> {
     let c = &s.cleanup;
     match c.engine {
         EngineKind::Local => {
-            let url = app.state::<Core>().llm.ensure(app)?;
+            let llm = &app.state::<Core>().llm;
+            let endpoint = if wait {
+                llm.ensure(app)?
+            } else {
+                llm.ready(app).ok_or("the cleanup model is still loading")?
+            };
             // llama-server serves the one model it loaded, whatever the request names.
-            Ok(ChatCleaner::new(&url, "", c.local_model.as_str(), None))
+            Ok(ChatCleaner::new(&endpoint.url, &endpoint.key, c.local_model.as_str(), None))
         }
         EngineKind::Server => {
             let provider = providers::by_id(&c.provider).ok_or("Unknown cleanup provider.")?;
@@ -211,7 +283,8 @@ pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str) -> (String, Option<
         return (text, None);
     }
     let started = Instant::now();
-    match cleaner(app, s).and_then(|c| c.clean(&text).map_err(|e| format!("{} ({})", e.message, e.detail))) {
+    // Never waits for a model that is still loading: the text goes in as recognized.
+    match cleaner(app, s, false).and_then(|c| c.clean(&text).map_err(|e| format!("{} ({})", e.message, e.detail))) {
         Ok(cleaned) => {
             crate::diag::info(format!("cleanup: {} -> {} chars in {} ms", text.chars().count(), cleaned.chars().count(), started.elapsed().as_millis()));
             (cleaned, None)

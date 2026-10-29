@@ -52,10 +52,20 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     }
     autostart::sync_at_start(app);
 
-    if settings.engine == EngineKind::Local && settings.local.keep_loaded {
+    // Speech model first, cleanup model after it: loading both at once could leave a smaller
+    // graphics card without room for Whisper - and then dictation itself would break.
+    let load_whisper = settings.engine == EngineKind::Local && settings.local.keep_loaded;
+    let load_llm = llm::wants_local(&settings);
+    if load_whisper || load_llm {
         let app = app.clone();
         std::thread::spawn(move || {
-            let _ = app.state::<Core>().whisper.ensure(&app);
+            let core = app.state::<Core>();
+            if load_whisper {
+                let _ = core.whisper.ensure(&app);
+            }
+            if load_llm {
+                core.llm.warm(&app, true);
+            }
         });
     }
 
@@ -67,12 +77,6 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         bubble::open_settings(app, None);
     }
     control::start(app);
-    if llm::wants_local(&settings) {
-        let app = app.clone();
-        std::thread::spawn(move || {
-            let _ = app.state::<Core>().llm.ensure(&app);
-        });
-    }
     if settings.phone.enabled {
         let app = app.clone();
         std::thread::spawn(move || phone::sync(&app));

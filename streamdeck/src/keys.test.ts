@@ -21,3 +21,26 @@ test("off, failed and listening are told apart", () => {
 	assert.equal(keyTitle(null), "Amber off");
 	assert.equal(keyTitle("recording"), "Listening");
 });
+
+test("a key that appears later is drawn at once, and polls never overlap", async () => {
+	const { Poller } = await import("./client.ts");
+	// No handshake file in this test environment: Amber counts as not reachable.
+	process.env.APPDATA = "/nonexistent";
+	const poller = new Poller(10_000, 10_000);
+	const seen: unknown[] = [];
+	const stops: (() => void)[] = [];
+	try {
+		stops.push(poller.watch((s) => seen.push(["first", s])));
+		// Let the first poll finish; concurrent polls meanwhile must not notify twice.
+		await Promise.all([poller.poll(), poller.poll()]);
+		await new Promise((r) => setTimeout(r, 100));
+		assert.deepEqual(seen, [["first", null]]);
+		stops.push(poller.watch((s) => seen.push(["second", s])));
+		assert.deepEqual(seen, [
+			["first", null],
+			["second", null],
+		]);
+	} finally {
+		for (const stop of stops) stop();
+	}
+});
