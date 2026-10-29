@@ -112,11 +112,11 @@ running). It talks to Amber through a control port on 127.0.0.1 only, with a fre
 every start, handed over in `%APPDATA%\app.amber.pc\streamdeck.json`.
 
 **Muted in Discord while dictating** (Microphone page; any dictation, not only the Stream
-Deck): while Amber listens it flips Discord's own microphone switch off through UI
-Automation (the interface screen readers use) and back on at the stop - only if it was on
-before, and only if the user did not switch it themselves meanwhile. Nothing to set up in
-Discord. (Muting Discord's recording session in Windows instead silences the microphone for
-every program, Amber included; Discord's API needs an own app in its developer portal.)
+Deck): while Amber listens it presses Discord's own microphone switch - found through UI
+Automation, pressed with a click sent to Discord's window as a message, which cannot take
+the focus from the game or program in front - and presses it again at the stop. Only if the
+microphone was on, and only if the user did not switch it themselves meanwhile. Nothing to
+set up in Discord; with Discord minimized it does nothing.
 
 ```bash
 cd streamdeck && npm run setup && npm test && npm run pack   # -> dist/
