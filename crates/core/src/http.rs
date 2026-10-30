@@ -11,7 +11,8 @@
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -28,7 +29,11 @@ pub struct Limits {
     pub io_timeout: Duration,
     /// For the whole upload, so a trickle of bytes cannot hold a slot forever either.
     pub body_deadline: Duration,
+    /// For request line and headers, counted from the connection - the same for the head.
+    pub head_deadline: Duration,
     pub max_connections: usize,
+    /// From one address at a time: one device on the network cannot take every slot.
+    pub max_per_peer: usize,
 }
 
 impl Default for Limits {
@@ -38,7 +43,9 @@ impl Default for Limits {
             max_body: 64 << 20,
             io_timeout: Duration::from_secs(15),
             body_deadline: Duration::from_secs(180),
+            head_deadline: Duration::from_secs(10),
             max_connections: 8,
+            max_per_peer: 3,
         }
     }
 }
@@ -121,7 +128,7 @@ impl Server {
         // refuses for 0.0.0.0) and frees the port within one poll.
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
-        let shared = Arc::new(Shared { handler, limits, allow, active: AtomicUsize::new(0) });
+        let shared = Arc::new(Shared { handler, limits, allow, active: AtomicUsize::new(0), per_peer: Mutex::new(HashMap::new()) });
         let flag = stop.clone();
         let accept = std::thread::Builder::new().name("amber-http".into()).spawn(move || {
             while !flag.load(Ordering::Relaxed) {
@@ -157,14 +164,40 @@ struct Shared {
     limits: Limits,
     allow: fn(IpAddr) -> bool,
     active: AtomicUsize,
+    /// Open connections per address.
+    per_peer: Mutex<HashMap<IpAddr, usize>>,
 }
 
-/// Counts a connection while its thread runs.
-struct Slot(Arc<Shared>);
+/// Counts a connection, in all and for its address, while its thread runs.
+struct Slot(Arc<Shared>, IpAddr);
+
+impl Slot {
+    /// None if the server, or this address, has no room for another connection.
+    fn take(shared: &Arc<Shared>, peer: IpAddr) -> Option<Slot> {
+        let mut per_peer = shared.per_peer.lock().unwrap();
+        let mine = per_peer.entry(peer).or_insert(0);
+        if *mine >= shared.limits.max_per_peer {
+            return None;
+        }
+        if shared.active.fetch_add(1, Ordering::SeqCst) >= shared.limits.max_connections {
+            shared.active.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        *mine += 1;
+        Some(Slot(shared.clone(), peer))
+    }
+}
 
 impl Drop for Slot {
     fn drop(&mut self) {
         self.0.active.fetch_sub(1, Ordering::SeqCst);
+        let mut per_peer = self.0.per_peer.lock().unwrap();
+        if let Some(n) = per_peer.get_mut(&self.1) {
+            *n -= 1;
+            if *n == 0 {
+                per_peer.remove(&self.1);
+            }
+        }
     }
 }
 
@@ -178,17 +211,16 @@ fn accept_one(mut stream: TcpStream, peer: SocketAddr, shared: &Arc<Shared>) {
         respond(&mut stream, 403, &error_body("Not allowed from this address.", "forbidden"));
         return;
     }
-    if shared.active.fetch_add(1, Ordering::SeqCst) >= limits.max_connections {
-        shared.active.fetch_sub(1, Ordering::SeqCst);
+    let Some(slot) = Slot::take(shared, peer.ip()) else {
         respond(&mut stream, 503, &error_body("Busy - try again in a moment.", "server_error"));
         return;
-    }
-    let slot = Slot(shared.clone());
+    };
+    let accepted = Instant::now();
     // A failed spawn drops the closure, and with it the slot and the connection.
     let _ = std::thread::Builder::new().name("amber-http-conn".into()).spawn(move || {
         let shared = slot.0.clone();
         // A bug in one request must not take the server (or Amber) down with it.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serve(&mut stream, peer.ip(), &shared)));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serve(&mut stream, peer.ip(), &shared, accepted)));
         if outcome.is_err() {
             respond(&mut stream, 500, &error_body("Internal error.", "server_error"));
         }
@@ -196,11 +228,13 @@ fn accept_one(mut stream: TcpStream, peer: SocketAddr, shared: &Arc<Shared>) {
     });
 }
 
-fn serve(stream: &mut TcpStream, peer: IpAddr, shared: &Shared) {
-    let (method, target, headers, rest) = match read_head(stream, shared.limits.max_head) {
+fn serve(stream: &mut TcpStream, peer: IpAddr, shared: &Shared, accepted: Instant) {
+    let limits = shared.limits;
+    let (method, target, headers, rest) = match read_head(stream, limits.max_head, accepted + limits.head_deadline, limits.io_timeout) {
         Ok(h) => h,
         Err((status, message)) => return respond(stream, status, &error_body(message, "invalid_request_error")),
     };
+    let _ = stream.set_read_timeout(Some(limits.io_timeout));
     let mut request = Request { method, target, peer, headers, rest, stream, limits: shared.limits };
     let (status, body) = (shared.handler)(&mut request);
     respond(request.stream, status, &body);
@@ -208,8 +242,9 @@ fn serve(stream: &mut TcpStream, peer: IpAddr, shared: &Shared) {
 
 type Head = (String, String, Vec<(String, String)>, Vec<u8>);
 
-/// Reads up to the blank line after the headers, never more than [max] bytes of head.
-fn read_head(stream: &mut TcpStream, max: usize) -> Result<Head, (u16, &'static str)> {
+/// Reads up to the blank line after the headers, never more than [max] bytes of head, and
+/// not past [until] - a byte now and then must not hold the connection for days.
+fn read_head(stream: &mut TcpStream, max: usize, until: Instant, io_timeout: Duration) -> Result<Head, (u16, &'static str)> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 4096];
     let end = loop {
@@ -219,6 +254,11 @@ fn read_head(stream: &mut TcpStream, max: usize) -> Result<Head, (u16, &'static 
         if buf.len() > max {
             return Err((431, "Request headers too large."));
         }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err((408, "Request timed out."));
+        }
+        let _ = stream.set_read_timeout(Some(left.min(io_timeout)));
         match stream.read(&mut chunk) {
             Ok(0) => return Err((400, "Connection closed mid-request.")),
             Ok(n) => buf.extend_from_slice(&chunk[..n]),

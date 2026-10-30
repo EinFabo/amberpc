@@ -134,6 +134,15 @@ impl Memory {
         *self.failed.lock().unwrap() = Some(Failed { wav, spoken_ms, program, at: Instant::now() });
     }
 
+    /// A taken recording back after another failed try - only into an empty slot, and with
+    /// its own age, so it still goes after ten minutes.
+    pub fn return_failed(&self, failed: Failed) {
+        let mut slot = self.failed.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(failed);
+        }
+    }
+
     /// The failed recording, if it is recent enough - taken, so it is recognized once.
     pub fn take_failed(&self) -> Option<Failed> {
         self.failed.lock().unwrap().take().filter(|f| f.at.elapsed() < KEEP_FAILED)

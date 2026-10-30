@@ -544,11 +544,14 @@ pub fn bubble_pointer(app: AppHandle, core: State<Core>, kind: String) {
         match kind.as_str() {
             "press" => g.press(now, recording),
             "release" => g.release(now, recording),
-            "drag" => {
-                let a = g.drag(recording);
-                bubble::start_drag(&app);
-                a
-            }
+            "drag" => match g.drag(now, recording) {
+                Some(a) => {
+                    bubble::start_drag(&app);
+                    a
+                }
+                // Talking for a while already: the mouse only slipped.
+                None => return,
+            },
             _ => return,
         }
     };

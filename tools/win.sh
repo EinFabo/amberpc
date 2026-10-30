@@ -34,9 +34,13 @@ case "${1:-check}" in
   test) CMD="cargo test --workspace" ;;
   build)
     # The updater signs the installer; key and password stay in ~/.amberpc, outside the repo.
-    KEY_WIN="$(wslpath -w "$HOME/.amberpc/updater.key")"
-    PW="$(cat "$HOME/.amberpc/updater.password")"
-    CMD="\$env:TAURI_SIGNING_PRIVATE_KEY='$KEY_WIN'; \$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD='$PW'; npm run tauri build" ;;
+    # Handed to Windows as environment variables (WSLENV, /p turns the path into a Windows
+    # one), never on a command line, where process listings and logs would see them.
+    export TAURI_SIGNING_PRIVATE_KEY="$HOME/.amberpc/updater.key"
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat "$HOME/.amberpc/updater.password")"
+    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+    export WSLENV="${WSLENV:+$WSLENV:}TAURI_SIGNING_PRIVATE_KEY/p:TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+    CMD="npm run tauri build" ;;
   dev) CMD="npm run app" ;;
   *) CMD="$*" ;;
 esac

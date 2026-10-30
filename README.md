@@ -114,9 +114,11 @@ every start, handed over in `%APPDATA%\app.amber.pc\streamdeck.json`.
 **Muted in Discord while dictating** (Microphone page; any dictation, not only the Stream
 Deck): while Amber listens it presses Discord's own microphone switch - found through UI
 Automation, pressed with a click sent to Discord's window as a message, which cannot take
-the focus from the game or program in front - and presses it again at the stop. Only if the
-microphone was on, and only if the user did not switch it themselves meanwhile. Nothing to
-set up in Discord; with Discord minimized it does nothing.
+the focus from the game or program in front - and presses it again at the stop. Amber only
+takes back its own mute: not one the user set, not while they are deafened; an unmute that
+does not take (Discord minimized, closed) is tried again until it does. Nothing to set up
+in Discord. Not while Discord is minimized or in the tray, not for dictations into Discord
+itself, and only with Discord in English or German (the switch is found by its name).
 
 ```bash
 cd streamdeck && npm run setup && npm test && npm run pack   # -> dist/

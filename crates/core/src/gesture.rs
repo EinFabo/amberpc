@@ -91,18 +91,17 @@ impl Gesture {
 
     /// The bubble moved before the button came up: a dictation this press began is
     /// discarded, one that was already running keeps going, and the release does nothing.
-    pub fn drag(&mut self, recording: bool) -> Action {
-        if self.pressed_at.is_none() {
-            return Action::Nothing;
+    /// None: no drag at all - the press has been talking for a while (hold to talk), and the
+    /// mouse only slipped; the bubble stays and the release stops as usual.
+    pub fn drag(&mut self, now_ms: u64, recording: bool) -> Option<Action> {
+        let Some(at) = self.pressed_at else { return Some(Action::Nothing) };
+        if self.started_by_press && recording && self.mode != Mode::Toggle && now_ms.saturating_sub(at) >= HOLD_MS {
+            return None;
         }
         let started = std::mem::take(&mut self.started_by_press);
         self.stop_pending = false;
         self.pressed_at = None;
-        if started && recording {
-            Action::Cancel
-        } else {
-            Action::Nothing
-        }
+        Some(if started && recording { Action::Cancel } else { Action::Nothing })
     }
 
     /// Forget a press, e.g. when the hotkey changes mid-press.
@@ -170,7 +169,7 @@ mod tests {
     fn drag_cancels_only_what_the_press_started() {
         let mut g = Gesture::new(Mode::Both);
         assert_eq!(g.press(0, false), Start);
-        assert_eq!(g.drag(true), Cancel);
+        assert_eq!(g.drag(100, true), Some(Cancel));
         assert_eq!(g.release(900, false), Nothing);
 
         // Already dictating (tapped on): the bubble stops on release, so a drag keeps it going.
@@ -178,10 +177,24 @@ mod tests {
         assert_eq!(g.press(0, false), Start);
         assert_eq!(g.release(50, true), Nothing);
         assert_eq!(g.press(1_000, true), Nothing);
-        assert_eq!(g.drag(true), Nothing);
+        assert_eq!(g.drag(1_100, true), Some(Nothing));
         assert_eq!(g.release(1_400, true), Nothing);
         // Without a drag the release stops it.
         assert_eq!(g.press(2_000, true), Nothing);
         assert_eq!(g.release(2_080, true), Stop);
+    }
+
+    #[test]
+    fn a_slip_of_the_mouse_while_holding_to_talk_is_no_drag() {
+        for mode in [Mode::Hold, Mode::Both] {
+            let mut g = Gesture::for_pointer(mode);
+            assert_eq!(g.press(0, false), Start);
+            assert_eq!(g.drag(30_000, true), None, "30 s of talking are not thrown away");
+            assert_eq!(g.release(31_000, true), Stop, "{mode:?}: the release still stops");
+        }
+        // Toggle has no holding: a drag right after the press still discards.
+        let mut g = Gesture::for_pointer(Mode::Toggle);
+        assert_eq!(g.press(0, false), Start);
+        assert_eq!(g.drag(2_000, true), Some(Cancel));
     }
 }

@@ -67,6 +67,8 @@ pub async fn install(app: &AppHandle, quiet: bool) -> Result<bool, String> {
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
     crate::diag::info(format!("installing update {}", update.version));
+    // The installer ends Amber without the usual exit: Discord is unmuted first.
+    crate::mute::release_now();
     update.install(bytes).map_err(|e| e.to_string())?;
     app.restart();
 }

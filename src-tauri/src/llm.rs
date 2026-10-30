@@ -285,7 +285,8 @@ pub fn cleaner(app: &AppHandle, s: &Settings, wait: bool) -> Result<ChatCleaner,
 pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str, profile: Option<&Profile>) -> (String, Option<String>) {
     // A snippet's phrase on its own: its saved text, exactly as saved.
     if let Some(snippet) = amber_core::snippets::find(&s.snippets, recognized) {
-        crate::diag::info(format!("snippet \"{}\"", snippet.trigger));
+        // The trigger is what was just said: logged only where dictated text is.
+        crate::diag::info(if s.log_text { format!("snippet \"{}\"", snippet.trigger) } else { "snippet inserted".to_string() });
         return (snippet.text.clone(), None);
     }
     let text = by_rule(s, recognized);

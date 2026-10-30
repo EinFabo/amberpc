@@ -81,12 +81,18 @@ impl Dictation {
 }
 
 fn announce(app: &AppHandle, phase: Phase, message: Option<String>) {
-    // Muted in Discord exactly while Amber listens - stop, cancel and a failed microphone alike.
-    if phase == Phase::Recording {
-        crate::mute::hold(&app.state::<Core>().settings().discord);
-    } else {
-        crate::mute::release();
+    let core = app.state::<Core>();
+    // Only what is still true: an Idle from a dictation that just ended must not arrive after
+    // the next one's Recording - the bubble would show idle, Discord would be unmuted.
+    let (current, program) = {
+        let inner = core.dictation.inner.lock().unwrap();
+        (inner.phase, inner.program.clone())
+    };
+    if current != phase {
+        return;
     }
+    // Muted in Discord exactly while Amber listens - stop, cancel and a failed microphone alike.
+    crate::mute::follow(&core.settings().discord, program.as_deref(), || core.dictation.phase() == Phase::Recording);
     let _ = app.emit("dictation-state", StateEvent { state: phase, message, expected_ms: None });
     crate::bubble::sync_visibility(app, !matches!(phase, Phase::Idle));
 }
@@ -182,7 +188,11 @@ pub fn start(app: &AppHandle) {
         if settings.engine == EngineKind::Local && !core.whisper.is_ready() {
             let app = app.clone();
             std::thread::spawn(move || {
-                let _ = app.state::<Core>().whisper.ensure(&app);
+                let core = app.state::<Core>();
+                // Not if the engine was switched to a server meanwhile.
+                if core.settings().engine == EngineKind::Local {
+                    let _ = core.whisper.ensure(&app);
+                }
             });
         }
 
@@ -399,8 +409,9 @@ pub fn recognize_again(app: &AppHandle) -> Result<String, String> {
     let (raw, engine, _) = match recognize(app, &settings, &failed.wav, &options, failed.spoken_ms, true) {
         Ok(r) => r,
         Err(e) => {
-            // Still there for another try (another engine, the key fixed).
-            core.memory.keep_failed(failed.wav, failed.spoken_ms, failed.program);
+            // Still there for another try (another engine, the key fixed) - unless a newer
+            // dictation failed meanwhile; that one is the one to keep.
+            core.memory.return_failed(failed);
             return Err(e);
         }
     };
@@ -540,7 +551,8 @@ fn recognize(
     let mut result = picked.transcriber.transcribe(wav, options);
 
     if let Err(e) = &result {
-        if settings.engine == EngineKind::Local && e.kind == ErrorKind::Unreachable {
+        // Not when the engine was switched to a server meanwhile - that stopped the local one.
+        if settings.engine == EngineKind::Local && e.kind == ErrorKind::Unreachable && core.settings().engine == EngineKind::Local {
             // Restarted for another model, or crashed.
             crate::diag::warn("local engine went away during the request, trying again");
             picked = transcriber(app, settings)?;

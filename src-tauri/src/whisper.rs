@@ -34,13 +34,16 @@ struct Key {
 
 struct Running {
     child: Child,
-    port: u16,
+    /// "http://127.0.0.1:<port>/<secret>": whisper-server has no key of its own, and any
+    /// program or other account on this PC - or a web page - could otherwise use it, or make
+    /// it load a file of their choosing. The random path prefix keeps them out.
+    base: String,
     key: Key,
 }
 
 impl Running {
     fn served(&self) -> Served {
-        Served { url: format!("http://127.0.0.1:{}", self.port), runtime: self.key.runtime.clone(), model: self.key.model.clone() }
+        Served { url: self.base.clone(), runtime: self.key.runtime.clone(), model: self.key.model.clone() }
     }
 }
 
@@ -158,16 +161,18 @@ impl Whisper {
         // characters would arrive mangled. So it runs in the models folder and gets only the
         // file name - its DLLs still load from the exe's own folder.
         let model_path = layout.model_path(model);
+        let path = format!("/{}", amber_core::api::new_key());
         cmd.current_dir(model_path.parent().unwrap_or(&layout.root))
             .args(["--model", model.file])
-            .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--threads", &threads.to_string()]);
+            .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--threads", &threads.to_string()])
+            .args(["--request-path", &path]);
         let child = process::spawn(cmd, &self.output).map_err(|e| format!("The local engine could not be started: {e}"))?;
 
         // Not the open port: this whisper-server opens it before the model has loaded and
         // answers 503 until then.
-        let base = format!("http://127.0.0.1:{port}");
+        let base = format!("http://127.0.0.1:{port}{path}");
         let deadline = Instant::now() + START_TIMEOUT;
-        let mut running = Running { child, port, key: key.clone() };
+        let mut running = Running { child, base: base.clone(), key: key.clone() };
         loop {
             if let Ok(Some(status)) = running.child.try_wait() {
                 return Err(format!("The local engine stopped while loading ({status}). {}", self.explain()));
