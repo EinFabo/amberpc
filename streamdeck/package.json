@@ -2,7 +2,7 @@
   "name": "amber-streamdeck",
   "private": true,
   "license": "UNLICENSED",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "description": "Stream Deck plugin for Amber for Windows: hold a key to dictate",
   "type": "module",
   "scripts": {

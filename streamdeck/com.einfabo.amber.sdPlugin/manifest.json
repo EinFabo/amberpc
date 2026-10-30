@@ -2,7 +2,7 @@
   "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
   "UUID": "com.einfabo.amber",
   "Name": "Amber",
-  "Version": "0.3.0.0",
+  "Version": "0.4.1.0",
   "Author": "EinFabo",
   "URL": "https://github.com/EinFabo/amberpc",
   "Description": "Dictate into any window with Amber for Windows: hold the key while you speak, or tap it to start and stop.",
