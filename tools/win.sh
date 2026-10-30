@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds and runs Amber on the Windows side. The sources live in WSL; Windows tools work
-# badly on \\wsl$ paths, so the tree is mirrored to C:\Users\fabia\build\amberpc first.
+# badly on \\wsl$ paths, so the tree is mirrored to %USERPROFILE%\build\amberpc first
+# (AMBER_WIN_BUILD=<Windows path> picks another folder).
 #
 #   tools/win.sh install     npm ci
 #   tools/win.sh check       cargo check (Windows target)
@@ -18,8 +19,8 @@ if [ -z "${AMBER_BUILD_LOCKED:-}" ]; then
   exec 9>"${TMPDIR:-/tmp}/amberpc-build.lock"
   flock -n 9 || { echo "waiting for another Amber build to finish..."; flock 9; }
 fi
-WIN_DIR='C:\Users\fabia\build\amberpc'
-DEST="/mnt/c/Users/fabia/build/amberpc"
+WIN_DIR="${AMBER_WIN_BUILD:-$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')\build\amberpc}"
+DEST="$(wslpath -u "$WIN_DIR")"
 mkdir -p "$DEST"
 rsync -a --delete \
   --exclude .git --exclude node_modules --exclude target --exclude dist \

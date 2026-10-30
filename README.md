@@ -175,7 +175,7 @@ crates/core/   pure Rust: audio maths, engines, cleanup, settings, downloads, ge
 streamdeck/    the Stream Deck plugin (TypeScript, Elgato SDK v2)
 src-tauri/     the Windows app: capture, dictation, insertion, whisper process, bubble
 src/           web UI: settings window (React), bubble (canvas)
-tools/win.sh   mirrors the tree to C:\Users\fabia\build\amberpc and builds there
+tools/win.sh   mirrors the tree to %USERPROFILE%\build\amberpc and builds there
 ```
 
 Same rule as Amber on Android: **whatever can go wrong without a platform API belongs in

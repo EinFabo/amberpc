@@ -35,7 +35,8 @@ export WIN_SRC="$EXPORT"
 echo "== tests"
 ( cd "$EXPORT" && CARGO_TARGET_DIR="$REPO_DIR/target" cargo test -p amber-core --quiet )
 tools/win.sh test > /dev/null || { echo "Windows tests failed - run tools/win.sh test"; exit 1; }
-BUNDLE="/mnt/c/Users/fabia/build/amberpc/target/release/bundle/nsis"
+WIN_BUILD="${AMBER_WIN_BUILD:-$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')\build\amberpc}"
+BUNDLE="$(wslpath -u "$WIN_BUILD")/target/release/bundle/nsis"
 SETUP="Amber_${VERSION}_x64-setup.exe"
 echo "== build $TAG"
 # An installer left over from an earlier build must never go out under this tag.

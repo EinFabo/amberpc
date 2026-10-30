@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn the_whole_dictation_names_the_snippet() {
-        let all = vec![snip("meine Adresse", "Musterstraße 1\n12345 Berlin"), snip("Signatur", "Viele Grüße\nFabi")];
+        let all = vec![snip("meine Adresse", "Musterstraße 1\n12345 Berlin"), snip("Signatur", "Viele Grüße\nAnna")];
         assert_eq!(find(&all, "Meine Adresse.").unwrap().text, "Musterstraße 1\n12345 Berlin");
         assert_eq!(find(&all, "Snippet Signatur!").unwrap().trigger, "Signatur");
         assert_eq!(find(&all, "Baustein, meine Adresse").unwrap().trigger, "meine Adresse");

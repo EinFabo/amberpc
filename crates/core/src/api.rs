@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn tunnel_hostname_and_token() {
         assert_eq!(public_host(" https://Amber.Example.com/abc/v1 "), "amber.example.com");
-        assert_eq!(public_host("amber.h-network.org"), "amber.h-network.org");
+        assert_eq!(public_host("amber.my-domain.org"), "amber.my-domain.org");
         assert_eq!(public_host("amber.example.com:443"), "amber.example.com");
         assert_eq!(public_host("localhost"), "", "a public name has a dot");
         assert_eq!(public_host("amber example.com"), "");

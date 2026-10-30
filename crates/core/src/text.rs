@@ -193,7 +193,7 @@ mod tests {
     fn the_whole_chain_keeps_line_breaks_and_spoken_commas() {
         let all = Rules { fillers: true, spoken_punctuation: true, german_commas: true, language: None };
         assert_eq!(by_rule("Hallo Anna neue Zeile wie geht es dir", all), "Hallo Anna\nWie geht es dir");
-        assert_eq!(by_rule("Danke Punkt neue Zeile Gruß Fabi", all), "Danke.\nGruß Fabi");
+        assert_eq!(by_rule("Danke Punkt neue Zeile Gruß Anna", all), "Danke.\nGruß Anna");
         assert_eq!(by_rule("Das ist ähm Komma gut so", all), "Das ist, gut so");
         assert_eq!(
             by_rule("Ähm ich glaube dass er kommt neuer Absatz Bis morgen weil es spät ist", all),

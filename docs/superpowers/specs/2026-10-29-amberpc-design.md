@@ -48,7 +48,7 @@ amberPC/
   crates/core/   amber-core: pure Rust, no Tauri, no Windows API -> unit-tested in WSL
   src-tauri/     the Windows app: capture, hotkeys, bubble, insertion, whisper process
   src/           web UI (React + TS): settings.html, bubble.html
-  tools/win.sh   syncs the tree to C:\Users\fabia\build\amberpc and runs npm/cargo there
+  tools/win.sh   syncs the tree to %USERPROFILE%\build\amberpc and runs npm/cargo there
 ```
 
 Same ground rule as Amber: **everything that can go wrong without a platform API belongs
