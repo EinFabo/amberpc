@@ -150,7 +150,7 @@ impl ChatCleaner {
         if text.trim().is_empty() {
             return Ok(text.to_string());
         }
-        let mut body = json!({
+        let body = json!({
             "model": self.model,
             "temperature": 0,
             // About as long as the dictation; bounds the bill if a model runs on.
@@ -160,23 +160,8 @@ impl ChatCleaner {
                 { "role": "user", "content": format!("<dictation>\n{text}\n</dictation>") },
             ],
         });
-        if let (Some(Value::Object(extra)), Value::Object(map)) = (&self.extra, &mut body) {
-            for (k, v) in extra {
-                map.insert(k.clone(), v.clone());
-            }
-        }
-        let mut req = self.http.post(&self.url).json(&body);
-        if !self.api_key.is_empty() {
-            req = req.bearer_auth(&self.api_key);
-        }
-        let resp = req.send().map_err(crate::engine::network_error)?;
-        let status = resp.status().as_u16();
-        let raw = resp.text().map_err(crate::engine::network_error)?;
-        if !(200..300).contains(&status) {
-            return Err(status_error(status, &raw));
-        }
-        let reply: Value = serde_json::from_str(&raw).map_err(|e| fail("The cleanup answer could not be read.", &format!("{e}")))?;
-        let choice = reply.pointer("/choices/0").ok_or_else(|| fail("The cleanup answer was empty.", &raw))?;
+        let reply = self.post(body)?;
+        let choice = reply.pointer("/choices/0").ok_or_else(|| fail("The cleanup answer was empty.", ""))?;
         // A reply cut off at max_tokens has lost the end of the dictation; losing text is
         // worse than not cleaning it.
         let finish = choice.get("finish_reason").and_then(Value::as_str);
@@ -195,6 +180,47 @@ impl ChatCleaner {
             ));
         }
         Ok(cleaned)
+    }
+}
+
+impl ChatCleaner {
+    /// A chat request from elsewhere - the phone's own cleanup, sent to the PC - answered with
+    /// this cleaner's model. The caller's messages, temperature and length are kept; the model
+    /// name and its extra fields are this side's: the caller's were meant for its own model.
+    pub fn forward(&self, request: &Value) -> Result<Value, SttError> {
+        let messages = request
+            .get("messages")
+            .filter(|m| m.as_array().is_some_and(|a| !a.is_empty()))
+            .ok_or_else(|| fail("The request has no messages.", ""))?;
+        let mut body = json!({
+            "model": self.model,
+            "messages": messages,
+            "temperature": request.get("temperature").filter(|t| t.is_number()).cloned().unwrap_or(json!(0)),
+        });
+        if let Some(n) = request.get("max_tokens").and_then(Value::as_u64) {
+            body["max_tokens"] = json!(n.min(16_384));
+        }
+        self.post(body)
+    }
+
+    /// Sends [body] with this side's extra fields; the parsed answer.
+    fn post(&self, mut body: Value) -> Result<Value, SttError> {
+        if let (Some(Value::Object(extra)), Value::Object(map)) = (&self.extra, &mut body) {
+            for (k, v) in extra {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        let mut req = self.http.post(&self.url).json(&body);
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+        let resp = req.send().map_err(crate::engine::network_error)?;
+        let status = resp.status().as_u16();
+        let raw = resp.text().map_err(crate::engine::network_error)?;
+        if !(200..300).contains(&status) {
+            return Err(status_error(status, &raw));
+        }
+        serde_json::from_str(&raw).map_err(|e| fail("The cleanup answer could not be read.", &format!("{e}")))
     }
 }
 
@@ -232,6 +258,30 @@ mod tests {
         assert!(system.contains("chat message"), "the program's style");
         assert!(system.contains("duze alle") && system.contains("Fabi, Tauri"), "instruction and vocabulary");
         assert_eq!(body["messages"][1]["content"], "<dictation>\nlass uns um drei uhr treffen nee stopp um vier uhr\n</dictation>");
+    }
+
+    #[test]
+    fn a_forwarded_request_runs_on_this_sides_model() {
+        let (url, rx) = serve(vec![reply("Hallo.", "stop")]);
+        let c = ChatCleaner::new(&url, "gsk-test", "openai/gpt-oss-20b", Some(json!({ "reasoning_effort": "low" })));
+        let phone = json!({
+            "model": "whatever-the-phone-typed",
+            "temperature": 0,
+            "max_tokens": 99_999,
+            "chat_template_kwargs": { "enable_thinking": false },
+            "messages": [{ "role": "system", "content": "Tidy up." }, { "role": "user", "content": "<dictation>\nhallo\n</dictation>" }],
+        });
+        let answer = c.forward(&phone).unwrap();
+        assert_eq!(answer["choices"][0]["message"]["content"], "Hallo.", "the answer as the engine gave it");
+
+        let body: Value = serde_json::from_slice(&rx.recv().unwrap().body).unwrap();
+        assert_eq!(body["model"], "openai/gpt-oss-20b");
+        assert_eq!(body["reasoning_effort"], "low", "this side's extra fields");
+        assert!(body.get("chat_template_kwargs").is_none(), "not the phone's, meant for its own model");
+        assert_eq!(body["max_tokens"], 16_384);
+        assert_eq!(body["messages"], phone["messages"]);
+
+        assert_eq!(c.forward(&json!({ "messages": [] })).unwrap_err().kind, ErrorKind::BadResponse);
     }
 
     #[test]
