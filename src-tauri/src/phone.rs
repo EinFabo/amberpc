@@ -21,6 +21,13 @@ pub struct PhoneApi {
     error: Mutex<Option<String>>,
 }
 
+impl PhoneApi {
+    /// The port Amber's own server listens on right now - the tunnel forwards only to it.
+    pub fn running_port(&self) -> Option<u16> {
+        self.running.lock().unwrap().as_ref().map(|(_, port)| *port)
+    }
+}
+
 /// Starts, restarts or stops the server to match the settings. Reads the settings under the
 /// lock, so of two quick changes the later one always wins. Stopping only closes the port
 /// (answers in progress finish on their own threads), so this never waits long.
@@ -57,7 +64,9 @@ pub fn sync(app: &AppHandle) {
             let settings = t.state::<Core>().settings();
             if settings.phone.cleanup {
                 // The phone app has its own styles per app; here only the PC's general cleanup.
-                crate::llm::tidy(&t, &settings, &text, None).0
+                // Without snippets: a phrase must not hand the PC's saved texts (an address, a
+                // signature) to whoever holds the phone's address.
+                crate::llm::tidy(&t, &settings, &text, None, false).0
             } else {
                 text
             }

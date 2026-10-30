@@ -35,7 +35,8 @@ pub struct Status {
 
 #[derive(Default)]
 pub struct Tunnel {
-    child: Mutex<Option<Child>>,
+    /// cloudflared, and the port it forwards to.
+    child: Mutex<Option<(Child, u16)>>,
     output: Output,
     status: Mutex<Option<Status>>,
     /// Bumped with every start and stop: the watcher of an older run lets go.
@@ -54,7 +55,7 @@ impl Tunnel {
     /// Ends cloudflared, e.g. before its file is deleted.
     pub fn stop(&self) {
         self.run.fetch_add(1, Ordering::SeqCst);
-        if let Some(mut c) = self.child.lock().unwrap().take() {
+        if let Some((mut c, _)) = self.child.lock().unwrap().take() {
             process::stop(&mut c);
             crate::diag::info("tunnel stopped");
         }
@@ -70,13 +71,16 @@ pub fn sync(app: &AppHandle) {
     let token = core.key(TOKEN_ID);
     let exe = core.paths.layout.cloudflared_exe();
     let wanted = s.enabled && s.tunnel;
-    let ready = wanted && token.is_some() && exe.is_file();
+    // Only to Amber's own server: with the port taken by another program, cloudflared would
+    // put that one on the internet.
+    let serving = core.phone.running_port() == Some(s.port);
+    let ready = wanted && serving && token.is_some() && exe.is_file();
 
     let mut child = t.child.lock().unwrap();
-    if ready && child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None))) {
+    if ready && child.as_mut().is_some_and(|(c, port)| *port == s.port && matches!(c.try_wait(), Ok(None))) {
         return;
     }
-    if let Some(mut c) = child.take() {
+    if let Some((mut c, _)) = child.take() {
         process::stop(&mut c);
         crate::diag::info("tunnel stopped");
     }
@@ -84,6 +88,8 @@ pub fn sync(app: &AppHandle) {
     if !ready {
         let missing = if !wanted {
             None
+        } else if !serving {
+            Some("The phone API is not running - see above.")
         } else if !exe.is_file() {
             Some("cloudflared is not downloaded yet.")
         } else {
@@ -92,14 +98,15 @@ pub fn sync(app: &AppHandle) {
         t.set(if missing.is_some() { "setup" } else { "off" }, missing.map(str::to_string));
         return;
     }
-    // --url: where a tunnel created on the command line sends its requests. A tunnel set up in
-    // Cloudflare's dashboard brings its own routing from there, which takes precedence.
-    let origin = format!("http://localhost:{}", s.port);
+    // --url: where a tunnel created on the command line sends its requests (127.0.0.1, not
+    // "localhost", which may be another program on ::1). A tunnel set up in Cloudflare's
+    // dashboard brings its own routing from there, which takes precedence.
+    let origin = format!("http://127.0.0.1:{}", s.port);
     let mut cmd = Command::new(&exe);
     cmd.args(["tunnel", "--no-autoupdate", "--url", &origin, "run"]).env("TUNNEL_TOKEN", token.unwrap_or_default());
     match process::spawn(cmd, &t.output) {
         Ok(c) => {
-            *child = Some(c);
+            *child = Some((c, s.port));
             t.set("starting", None);
             crate::diag::info("tunnel starting");
             watch(app, run);
@@ -119,7 +126,7 @@ fn watch(app: &AppHandle, run: u64) {
         if t.run.load(Ordering::SeqCst) != run {
             return;
         }
-        let ended = t.child.lock().unwrap().as_mut().is_none_or(|c| !matches!(c.try_wait(), Ok(None)));
+        let ended = t.child.lock().unwrap().as_mut().is_none_or(|(c, _)| !matches!(c.try_wait(), Ok(None)));
         if ended {
             let last = process::last_lines(&t.output, 3);
             crate::diag::warn(format!("tunnel ended: {last}"));

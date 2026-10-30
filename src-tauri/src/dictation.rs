@@ -336,7 +336,7 @@ fn run(
         }
     };
     let profile = program.as_deref().and_then(|p| amber_core::profiles::find(&settings.profiles, p));
-    let (cleaned, _skipped) = crate::llm::tidy(app, &settings, &text::clean(&raw), profile);
+    let (cleaned, _skipped) = crate::llm::tidy(app, &settings, &text::clean(&raw), profile, true);
     if cleaned.is_empty() {
         crate::diag::info(format!("{} ms of audio, nothing recognized", prepared.spoken_ms));
         return fail(app, session, "Nothing recognized.".into(), false);
@@ -416,7 +416,7 @@ pub fn recognize_again(app: &AppHandle) -> Result<String, String> {
         }
     };
     let profile = failed.program.as_deref().and_then(|p| amber_core::profiles::find(&settings.profiles, p));
-    let (text, _) = crate::llm::tidy(app, &settings, &text::clean(&raw), profile);
+    let (text, _) = crate::llm::tidy(app, &settings, &text::clean(&raw), profile, true);
     if text.is_empty() {
         return Err("Nothing recognized.".into());
     }

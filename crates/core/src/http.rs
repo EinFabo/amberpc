@@ -34,6 +34,10 @@ pub struct Limits {
     pub max_connections: usize,
     /// From one address at a time: one device on the network cannot take every slot.
     pub max_per_peer: usize,
+    /// The same for loopback - through a tunnel every sender is 127.0.0.1, and the phone must
+    /// not share three slots with the internet. Senders behind it are told apart by the
+    /// caller once the head is read.
+    pub max_per_loopback: usize,
 }
 
 impl Default for Limits {
@@ -46,6 +50,7 @@ impl Default for Limits {
             head_deadline: Duration::from_secs(10),
             max_connections: 8,
             max_per_peer: 3,
+            max_per_loopback: 8,
         }
     }
 }
@@ -176,7 +181,8 @@ impl Slot {
     fn take(shared: &Arc<Shared>, peer: IpAddr) -> Option<Slot> {
         let mut per_peer = shared.per_peer.lock().unwrap();
         let mine = per_peer.entry(peer).or_insert(0);
-        if *mine >= shared.limits.max_per_peer {
+        let cap = if peer.is_loopback() { shared.limits.max_per_loopback } else { shared.limits.max_per_peer };
+        if *mine >= cap {
             return None;
         }
         if shared.active.fetch_add(1, Ordering::SeqCst) >= shared.limits.max_connections {

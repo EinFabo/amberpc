@@ -4,12 +4,14 @@
 //! The phone's own-server engine has no API key field, so the access key travels in the
 //! path: the phone gets `http://<pc>:<port>/<key>/v1` as its address and appends
 //! `/audio/transcriptions` itself. A Bearer header with the key works too, for other clients.
-//! Requests from outside the private network are refused, whatever key they carry.
+//! Requests from outside the private network are refused, whatever key they carry - except
+//! through the user's own Cloudflare tunnel, which arrives from 127.0.0.1. Wrong keys earn a
+//! pause, and the key's holder has a request budget.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::audio;
 use crate::engine::{ErrorKind, TranscribeOptions, Transcriber};
@@ -239,36 +241,128 @@ pub fn start(addr: SocketAddr, hooks: Hooks) -> std::io::Result<Server> {
 pub fn start_with(addr: SocketAddr, hooks: Hooks, limits: Limits) -> std::io::Result<Server> {
     let hooks = Arc::new(hooks);
     let busy = Arc::new(Mutex::new(()));
-    Server::start(addr, limits, is_local_peer, Arc::new(move |req: &mut Request| handle(req, &hooks, &busy)))
+    let guard = Arc::new(Mutex::new(Guard::default()));
+    Server::start(addr, limits, is_local_peer, Arc::new(move |req: &mut Request| handle(req, &hooks, &busy, &guard)))
+}
+
+/// Wrong keys in a row from one sender before it is turned away for a while.
+const STRIKES: u32 = 10;
+const STRIKE_WINDOW: Duration = Duration::from_secs(10 * 60);
+const PAUSE: Duration = Duration::from_secs(15 * 60);
+/// What the key's holder may ask for: a dictation with its cleanup is two requests.
+const PER_TEN_MINUTES: usize = 120;
+const PER_DAY: usize = 2_000;
+/// A cleanup request is a dictation and a prompt, not a document.
+const MAX_CHAT_BODY: usize = 256 << 10;
+
+/// Who keeps sending wrong keys gets a pause, and the key's holder a budget: the API may be
+/// reachable from the internet (the tunnel), and an address can leak (a screenshot, a backup)
+/// - it must not run up a paid provider's bill without end.
+#[derive(Default)]
+pub struct Guard {
+    /// Per sender: wrong keys since the first one counted.
+    strikes: HashMap<String, (u32, Instant)>,
+    paused: HashMap<String, Instant>,
+    /// Requests with the key over the last day.
+    spent: std::collections::VecDeque<Instant>,
+    /// When running out of budget was last logged.
+    said: Option<Instant>,
+    /// When a refusal was last logged, and how many went unlogged since.
+    refusals: Option<(Instant, u32)>,
+}
+
+impl Guard {
+    pub fn paused(&mut self, sender: &str, now: Instant) -> bool {
+        self.paused.retain(|_, until| *until > now);
+        self.paused.contains_key(sender)
+    }
+
+    /// A wrong key from [sender]; true if that earned it a pause.
+    pub fn strike(&mut self, sender: &str, now: Instant) -> bool {
+        if self.strikes.len() > 10_000 {
+            self.strikes.retain(|_, (_, first)| now.duration_since(*first) < STRIKE_WINDOW);
+        }
+        let entry = self.strikes.entry(sender.to_string()).or_insert((0, now));
+        if now.duration_since(entry.1) >= STRIKE_WINDOW {
+            *entry = (0, now);
+        }
+        entry.0 += 1;
+        if entry.0 >= STRIKES {
+            self.strikes.remove(sender);
+            self.paused.insert(sender.to_string(), now + PAUSE);
+            return true;
+        }
+        false
+    }
+
+    /// One request with the key; false once the budget is used up.
+    pub fn spend(&mut self, now: Instant) -> bool {
+        while self.spent.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(24 * 3600)) {
+            self.spent.pop_front();
+        }
+        let last_ten = self.spent.iter().filter(|t| now.duration_since(**t) < Duration::from_secs(600)).count();
+        if last_ten >= PER_TEN_MINUTES || self.spent.len() >= PER_DAY {
+            return false;
+        }
+        self.spent.push_back(now);
+        true
+    }
+
+    /// Whether running out of budget should be logged now - once per ten minutes.
+    fn say(&mut self, now: Instant) -> bool {
+        let due = self.said.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(600));
+        if due {
+            self.said = Some(now);
+        }
+        due
+    }
 }
 
 /// Refusals go to the log at most every 10 s, with a count of the rest - an address reachable
 /// from the internet (the tunnel) draws scanners.
-fn note_refused(hooks: &Hooks, peer: &str) {
-    static LAST: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
-    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-    match last.as_mut() {
-        Some((at, quiet)) if at.elapsed() < std::time::Duration::from_secs(10) => *quiet += 1,
+fn note_refused(hooks: &Hooks, guard: &Mutex<Guard>, peer: &str) {
+    let mut g = guard.lock().unwrap_or_else(|e| e.into_inner());
+    match g.refusals.as_mut() {
+        Some((at, quiet)) if at.elapsed() < Duration::from_secs(10) => *quiet += 1,
         _ => {
-            let quiet = last.map_or(0, |(_, n)| n);
+            let quiet = g.refusals.map_or(0, |(_, n)| n);
             let more = if quiet > 0 { format!(", {quiet} more before") } else { String::new() };
             (hooks.log)(format!("phone API: refused {peer} (wrong key{more})"));
-            *last = Some((Instant::now(), 0));
+            g.refusals = Some((Instant::now(), 0));
         }
     }
 }
 
-fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>) -> (u16, serde_json::Value) {
+fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>, guard: &Mutex<Guard>) -> (u16, serde_json::Value) {
     // Through the tunnel every request comes from 127.0.0.1; Cloudflare names the real sender.
-    let peer = match req.header("CF-Connecting-IP").filter(|_| req.peer.is_loopback()) {
-        Some(real) => format!("{} via the tunnel", real.trim()),
-        None => req.peer.to_string(),
+    let (sender, peer) = match req.header("CF-Connecting-IP").filter(|_| req.peer.is_loopback()) {
+        Some(real) => (real.trim().to_string(), format!("{} via the tunnel", real.trim())),
+        None => (req.peer.to_string(), req.peer.to_string()),
     };
+    let now = Instant::now();
+    if guard.lock().unwrap_or_else(|e| e.into_inner()).paused(&sender, now) {
+        return (429, error_body("Too many wrong keys - try again in a few minutes.", "rate_limit_exceeded"));
+    }
     let bearer = req.header("Authorization").and_then(|v| v.strip_prefix("Bearer ")).map(|v| v.trim().to_string());
-    match route(&req.method, &req.target, bearer.as_deref(), &(hooks.key)()) {
+    let routed = route(&req.method, &req.target, bearer.as_deref(), &(hooks.key)());
+    if let Ok(r) = routed {
+        if r != Route::Health {
+            let mut g = guard.lock().unwrap_or_else(|e| e.into_inner());
+            if !g.spend(now) {
+                if g.say(now) {
+                    (hooks.log)(format!("phone API: request budget used up ({PER_TEN_MINUTES} per 10 min, {PER_DAY} a day) - {peer} turned away"));
+                }
+                return (429, error_body("Too many requests - try again later.", "rate_limit_exceeded"));
+            }
+        }
+    }
+    match routed {
         Err((status, message)) => {
             if status == 401 {
-                note_refused(hooks, &peer);
+                note_refused(hooks, guard, &peer);
+                if guard.lock().unwrap_or_else(|e| e.into_inner()).strike(&sender, now) {
+                    (hooks.log)(format!("phone API: {peer} paused for {} min after {STRIKES} wrong keys", PAUSE.as_secs() / 60));
+                }
             }
             (status, error_body(message, if status == 401 { "invalid_api_key" } else { "not_found" }))
         }
@@ -282,6 +376,9 @@ fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>) -> (u16, serde_jso
         ),
         Ok(Route::Chat) => {
             let started = Instant::now();
+            if req.header("Content-Length").and_then(|v| v.parse::<usize>().ok()).is_some_and(|n| n > MAX_CHAT_BODY) {
+                return (413, error_body("A cleanup request is at most 256 KB.", "invalid_request_error"));
+            }
             let body = match req.body() {
                 Ok(b) => b,
                 Err((status, message)) => return (status, error_body(message, "invalid_request_error")),
@@ -714,7 +811,8 @@ mod tests {
 
     #[test]
     fn one_address_cannot_take_every_slot() {
-        let limits = Limits { max_per_peer: 2, ..Limits::default() };
+        // Every test client is 127.0.0.1, the loopback limit is the one tested.
+        let limits = Limits { max_per_peer: 2, max_per_loopback: 2, ..Limits::default() };
         let (srv, _, _) = server_with(Ok(String::new()), limits);
         let _a = TcpStream::connect(srv.addr).unwrap();
         let _b = TcpStream::connect(srv.addr).unwrap();
@@ -724,6 +822,41 @@ mod tests {
         let mut answer = String::new();
         let _ = third.read_to_string(&mut answer);
         assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
+    }
+
+    #[test]
+    fn wrong_keys_earn_a_pause_and_the_key_a_budget() {
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        for _ in 0..STRIKES - 1 {
+            assert!(!g.strike("203.0.113.5", t0));
+        }
+        assert!(g.strike("203.0.113.5", t0), "the tenth wrong key");
+        assert!(g.paused("203.0.113.5", t0) && !g.paused("198.51.100.7", t0), "only that sender");
+        assert!(!g.paused("203.0.113.5", t0 + PAUSE), "the pause ends");
+        // Strikes spread out over time do not add up.
+        let mut g = Guard::default();
+        for i in 0..20u64 {
+            assert!(!g.strike("203.0.113.5", t0 + STRIKE_WINDOW * i as u32 / 5));
+        }
+        // The budget: 120 in ten minutes, then a wait.
+        let mut g = Guard::default();
+        assert!((0..PER_TEN_MINUTES).all(|_| g.spend(t0)));
+        assert!(!g.spend(t0));
+        assert!(g.spend(t0 + Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn a_paused_sender_is_turned_away_even_with_the_key() {
+        let (srv, _, _) = server(Ok(String::new()));
+        for _ in 0..STRIKES {
+            assert_eq!(raw(srv.addr, b"GET /nope/v1/models HTTP/1.1\r\n\r\n"), "HTTP/1.1 401 Unauthorized");
+        }
+        assert_eq!(raw(srv.addr, b"GET /testkey/v1/models HTTP/1.1\r\n\r\n"), "HTTP/1.1 429 Too Many Requests");
+        // Through the tunnel, the sender is the one Cloudflare names - others are not paused.
+        assert_eq!(raw(srv.addr, b"GET /testkey/v1/models HTTP/1.1\r\nCF-Connecting-IP: 198.51.100.7\r\n\r\n"), "HTTP/1.1 200 OK");
+        let big = format!("POST /testkey/v1/chat/completions HTTP/1.1\r\nCF-Connecting-IP: 198.51.100.7\r\nContent-Length: {}\r\n\r\n", MAX_CHAT_BODY + 1);
+        assert_eq!(raw(srv.addr, big.as_bytes()), "HTTP/1.1 413 Payload Too Large");
     }
 
     #[test]
