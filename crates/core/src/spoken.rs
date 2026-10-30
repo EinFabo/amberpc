@@ -233,7 +233,7 @@ mod tests {
         assert_eq!(apply("Hallo Anna neue Zeile wie geht es dir"), "Hallo Anna\nWie geht es dir");
         assert_eq!(apply("Erster Teil Punkt neuer Absatz zweiter Gedanke"), "Erster Teil.\n\nZweiter Gedanke");
         assert_eq!(apply("first line new line second line"), "first line\nSecond line");
-        assert_eq!(apply("Danke Punkt neue Zeile Gruß Fabi"), "Danke.\nGruß Fabi");
+        assert_eq!(apply("Danke Punkt neue Zeile Gruß Anna"), "Danke.\nGruß Anna");
         // Dictating sentence by sentence: a dictation that is only the break.
         assert_eq!(apply("Neue Zeile."), "\n");
         assert_eq!(apply("Neuer Absatz Liebe Grüße"), "\n\nLiebe Grüße");

@@ -61,7 +61,7 @@ function Vocabulary({ value, onSave }: { value: string; onSave: (v: string) => v
   return (
     <textarea
       value={text}
-      placeholder="e.g. Tauri, Groq, Kubernetes, Fabi"
+      placeholder="e.g. Tauri, Groq, Kubernetes, Anna"
       onChange={(e) => setText(e.target.value)}
       onBlur={() => text !== value && onSave(text)}
     />

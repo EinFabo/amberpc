@@ -269,7 +269,7 @@ mod tests {
     fn sends_the_dictation_as_data_and_reads_the_answer() {
         let (url, rx) = serve(vec![reply("Lass uns um vier Uhr treffen.", "stop")]);
         let c = ChatCleaner::new(&url, "gsk-test", "openai/gpt-oss-20b", Some(json!({ "reasoning_effort": "low" })));
-        let ask = Ask { style: WritingStyle::Casual, instruction: "duze alle", vocabulary: "Fabi, Tauri" };
+        let ask = Ask { style: WritingStyle::Casual, instruction: "duze alle", vocabulary: "Anna, Tauri" };
         let out = c.clean("lass uns um drei uhr treffen nee stopp um vier uhr", &ask).unwrap();
         assert_eq!(out, "Lass uns um vier Uhr treffen.");
 
@@ -283,7 +283,7 @@ mod tests {
         let system = body["messages"][0]["content"].as_str().unwrap();
         assert!(system.contains("keep only the corrected version"));
         assert!(system.contains("chat message"), "the program's style");
-        assert!(system.contains("duze alle") && system.contains("Fabi, Tauri"), "instruction and vocabulary");
+        assert!(system.contains("duze alle") && system.contains("Anna, Tauri"), "instruction and vocabulary");
         assert_eq!(body["messages"][1]["content"], "<dictation>\nlass uns um drei uhr treffen nee stopp um vier uhr\n</dictation>");
     }
 

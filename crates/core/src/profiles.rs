@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn finds_the_program_by_its_exe() {
         let all = defaults();
-        assert_eq!(find(&all, r"C:\Users\fabia\AppData\Local\Discord\app-1.0\Discord.exe").unwrap().style, WritingStyle::Casual);
+        assert_eq!(find(&all, r"C:\Users\anna\AppData\Local\Discord\app-1.0\Discord.exe").unwrap().style, WritingStyle::Casual);
         assert_eq!(find(&all, "OUTLOOK.EXE").unwrap().style, WritingStyle::Formal);
         assert!(find(&all, "code.exe").is_none(), "no profile: as spoken");
     }
