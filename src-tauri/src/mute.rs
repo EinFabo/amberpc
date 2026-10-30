@@ -102,6 +102,8 @@ mod win {
     const PROGRAMS: &[&str] = &["discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"];
     /// The microphone switch's name in Discord in English and German, muted or not.
     const LABELS: &[&str] = &["Mute", "Unmute", "Stummschalten", "Stummschaltung aufheben"];
+    /// Not in the windows crate's WindowsAndMessaging module.
+    const WM_MOUSELEAVE: u32 = 0x02A3;
     /// How long a sent click gets to show in the switch, for the log.
     const CLICK_TAKES: Duration = Duration::from_millis(600);
 
@@ -130,7 +132,9 @@ mod win {
         }
 
         /// A click into the middle of the switch, as messages to Discord's window; false if
-        /// there is nowhere to click.
+        /// there is nowhere to click. Ends with the mouse leaving: without that Discord takes
+        /// the mouse for still hovering there, ignores the next click (the unmute) and stays
+        /// awake as if in use until it is focused once.
         fn click(&self) -> bool {
             let Ok(r) = (unsafe { self.element.CurrentBoundingRectangle() }) else { return false };
             if r.right <= r.left || r.bottom <= r.top {
@@ -145,6 +149,7 @@ mod win {
                 PostMessageW(Some(self.window), WM_MOUSEMOVE, WPARAM(0), at).is_ok()
                     && PostMessageW(Some(self.window), WM_LBUTTONDOWN, WPARAM(1), at).is_ok()
                     && PostMessageW(Some(self.window), WM_LBUTTONUP, WPARAM(0), at).is_ok()
+                    && PostMessageW(Some(self.window), WM_MOUSELEAVE, WPARAM(0), LPARAM(0)).is_ok()
             }
         }
     }
