@@ -36,6 +36,8 @@ body {
 nav {
   width: 210px;
   flex-shrink: 0;
+  /* Shorter windows (a laptop at 125 %): the list scrolls, not the whole window. */
+  overflow-y: auto;
   padding: 18px 10px;
   border-right: 1px solid var(--outline);
   display: flex;
@@ -584,4 +586,14 @@ ol.steps {
   min-height: 2px;
   background: var(--primary);
   border-radius: 4px;
+}
+
+/* "all: unset" above takes the focus ring away; keyboard users get it back. */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }

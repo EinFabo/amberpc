@@ -25,6 +25,16 @@ export function MicrophonePage({ s, save, toast, phase }: PageProps) {
     };
   }, []);
 
+  // Amber ends a test by itself after a minute: the meter follows.
+  useEffect(() => {
+    if (!testing) return;
+    const t = window.setTimeout(() => {
+      setTesting(false);
+      setLevel(0);
+    }, 60_000);
+    return () => window.clearTimeout(t);
+  }, [testing]);
+
   // A dictation takes the microphone over; the meter stops with it.
   useEffect(() => {
     if (phase === "recording") {
@@ -95,7 +105,7 @@ export function MicrophonePage({ s, save, toast, phase }: PageProps) {
       <Section title="Discord">
         <Row
           label="Mute me in Discord while dictating"
-          hint="While Amber listens it switches your microphone off in Discord - the switch at the bottom left - and on again at the stop, without taking the focus from your game. Nothing to set up; if you were muted already, you stay muted. Discord must not be minimized or in the tray (behind other windows is fine), and must be in English or German."
+          hint="While Amber listens it switches your microphone off in Discord - the switch at the bottom left - and on again at the stop, without taking the focus from your game. Nothing to set up; if you were muted already, you stay muted. Not for dictations into Discord itself. Discord must not be minimized or in the tray (behind other windows is fine), and must be in English or German."
         >
           <Switch on={s.discord.muteWhileDictating} onChange={(v) => save((x) => (x.discord.muteWhileDictating = v))} />
         </Row>

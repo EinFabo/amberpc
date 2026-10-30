@@ -20,7 +20,8 @@ export function PhonePage({ s, save, toast }: PageProps) {
       if (alive) setInfo(i);
     };
     void load();
-    const timer = window.setInterval(load, 1500);
+    // Polled only while the API runs: its addresses and errors can change.
+    const timer = s.phone.enabled ? window.setInterval(load, 1500) : undefined;
     return () => {
       alive = false;
       window.clearInterval(timer);
@@ -28,8 +29,12 @@ export function PhonePage({ s, save, toast }: PageProps) {
   }, [s.phone.enabled, s.phone.port]);
 
   const copy = async (url: string) => {
-    await navigator.clipboard.writeText(url);
-    toast("Address copied.", true);
+    try {
+      await navigator.clipboard.writeText(url);
+      toast("Address copied.", true);
+    } catch (e) {
+      toast(`Could not copy: ${e}`);
+    }
   };
 
   const first = info?.addresses[0];
@@ -59,7 +64,16 @@ export function PhonePage({ s, save, toast }: PageProps) {
               style={{ width: 80 }}
               value={port}
               onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))}
-              onBlur={() => Number(port) !== s.phone.port && save((x) => (x.phone.port = Number(port) || 8765))}
+              onBlur={() => {
+                const n = Number(port);
+                if (n === s.phone.port) return;
+                if (n < 1024 || n > 65535) {
+                  toast("Pick a port from 1024 to 65535.");
+                  setPort(String(s.phone.port));
+                  return;
+                }
+                void save((x) => (x.phone.port = n));
+              }}
               title="Port"
             />
           </Row>
@@ -112,7 +126,15 @@ export function PhonePage({ s, save, toast }: PageProps) {
               label="The phone's own cleanup"
               hint="Amber on the phone can clean up per app itself: choose this PC as the server for the cleanup, with any model name, e.g. “amber-cleanup”. The PC answers with its cleanup model, as set under Cleanup - so the phone's styles per app work without a model of their own."
             />
-            <Row label="History and statistics" hint={s.history ? "The phone's dictations are kept in the PC's history and counted in its statistics, as “phone”." : "The history is off; the phone's dictations are only counted."} />
+            <Row label="History and statistics" hint={
+                s.history && s.statistics
+                  ? "The phone's dictations are kept in the PC's history and counted in its statistics, as “phone”."
+                  : s.history
+                    ? "The phone's dictations are kept in the PC's history, as “phone”."
+                    : s.statistics
+                      ? "The history is off; the phone's dictations are only counted."
+                      : "History and statistics are off: nothing of the phone's dictations is kept."
+              } />
           </Section>
           <Section title="Access">
             <Row label="Access key" hint="It is part of the address. A new key locks out every phone that has the old address.">

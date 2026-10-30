@@ -113,6 +113,9 @@ const release = (e: PointerEvent) => {
 };
 canvas.addEventListener("pointerup", release);
 canvas.addEventListener("pointercancel", release);
+// Capture lost while held (another window took the mouse): a release all the same, or hold to
+// talk would go on recording.
+canvas.addEventListener("lostpointercapture", release);
 
 canvas.addEventListener("contextmenu", (e) => {
   e.preventDefault();

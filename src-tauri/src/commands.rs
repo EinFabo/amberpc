@@ -108,7 +108,8 @@ pub fn save_settings(app: AppHandle, core: State<Core>, settings: Settings) -> R
             }
         });
     }
-    if after.cleanup != before.cleanup {
+    // Also a profile that was the only reason the local model runs ("Always"), or the first.
+    if after.cleanup != before.cleanup || crate::llm::wants_local(&after) != crate::llm::wants_local(&before) {
         // ensure() reads the settings under its lock: it loads, swaps or stops the model,
         // whichever the latest settings want.
         let app = app.clone();

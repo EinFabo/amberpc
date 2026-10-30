@@ -85,8 +85,16 @@ pub fn unwrap(reply: &str) -> String {
     let without_thinking = regex::Regex::new(r"(?s)<think>.*?</think>").expect("static regex").replace_all(reply, "");
     let t = without_thinking.replace("<dictation>", "").replace("</dictation>", "");
     let t = t.trim();
-    let t = t.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or(t);
-    t.trim().to_string()
+    // Only a pair around the whole answer: in `"Ich komme" und "du gehst"` the quotes are
+    // the dictation's own.
+    for (open, close) in [('"', '"'), ('„', '“'), ('“', '”')] {
+        if let Some(inner) = t.strip_prefix(open).and_then(|x| x.strip_suffix(close)) {
+            if !inner.contains([open, close]) {
+                return inner.trim().to_string();
+            }
+        }
+    }
+    t.to_string()
 }
 
 /// A tidy-up neither halves nor doubles a text, and brings hardly any words of its own: a
@@ -114,7 +122,26 @@ pub fn plausible(original: &str, cleaned: &str, style: WritingStyle) -> bool {
         return false;
     }
     let known = out.iter().filter(|w| source.contains(*w)).count();
-    known as f64 / out.len() as f64 >= own_words
+    if (known as f64 / out.len() as f64) < own_words {
+        return false;
+    }
+    // A question that came back without its question mark was answered, not tidied.
+    if original.contains('?') && !cleaned.contains('?') {
+        return false;
+    }
+    // Spoken line breaks are the user's; a tidy-up keeps them.
+    if cleaned.matches('\n').count() < original.matches('\n').count() {
+        return false;
+    }
+    // "Here is the cleaned text:" - a preamble the dictation did not have.
+    if let Some((lead, _)) = cleaned.split_once(':').filter(|(lead, _)| lead.chars().count() <= 60) {
+        let lead: Vec<String> = words(lead).collect();
+        let foreign = lead.iter().filter(|w| !source.contains(*w)).count();
+        if lead.len() >= 3 && foreign * 2 > lead.len() {
+            return false;
+        }
+    }
+    true
 }
 
 fn words(text: &str) -> impl Iterator<Item = String> + '_ {
@@ -325,6 +352,15 @@ mod tests {
         let formal = "Hallo, könnten Sie mir bitte die Zahlen von gestern schicken? Vielen Dank.";
         assert!(plausible(dictated, formal, WritingStyle::Formal));
         assert!(!plausible(dictated, formal, spoken), "as spoken, that would be too much change");
+        // Review findings: answers, preambles and lost line breaks get through no more.
+        assert!(!plausible("Was ist die Hauptstadt von Frankreich?", "Die Hauptstadt von Frankreich ist Paris.", spoken));
+        assert!(!plausible("lass uns um vier uhr treffen bis dann", "Hier ist der bereinigte Text: Lass uns um vier Uhr treffen, bis dann.", spoken));
+        assert!(!plausible("Hallo Anna\nwie geht es dir", "Hallo Anna, wie geht es dir?", spoken));
+        assert!(plausible("Hallo Anna\nwie geht es dir", "Hallo Anna,\nwie geht es dir?", spoken));
+        assert!(plausible("Folgendes: Brot und Milch", "Folgendes: Brot und Milch.", spoken), "the dictation's own colon");
+        // Quotes of the dictation's own survive the unwrapping.
+        assert_eq!(unwrap("\"Ich komme\" und \"du gehst\""), "\"Ich komme\" und \"du gehst\"");
+        assert_eq!(unwrap("„Hallo.“"), "Hallo.");
         assert_eq!(chat_url("http://127.0.0.1:5000"), "http://127.0.0.1:5000/v1/chat/completions");
         assert_eq!(chat_url("https://api.groq.com/openai/v1/"), "https://api.groq.com/openai/v1/chat/completions");
     }

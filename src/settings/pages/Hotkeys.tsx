@@ -19,7 +19,7 @@ export function HotkeysPage({ s, save }: PageProps) {
   return (
     <>
       <h1>Hotkeys</h1>
-      <p className="lead">Work in every app, also when Amber's windows are closed. Use at least one modifier (Ctrl, Alt, Shift or Win) so normal typing is not caught.</p>
+      <p className="lead">Work in every app, also when Amber's windows are closed. Use Ctrl, Alt or Win (Shift alone is not enough) so normal typing is not caught - or a function key.</p>
       <Section title="Dictation">
         <Row label="Hotkey">
           <HotkeyInput value={s.hotkey.dictate} onChange={(v) => save((x) => (x.hotkey.dictate = v))} />
@@ -40,6 +40,21 @@ export function HotkeysPage({ s, save }: PageProps) {
 
 const MODIFIER_CODES = new Set(["ControlLeft", "ControlRight", "ShiftLeft", "ShiftRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight", "OSLeft", "OSRight"]);
 
+/** Windows' own key codes of the letter, digit and punctuation keys, as the hotkey library
+ *  names them - it turns those names back into the same codes. Not e.code: that is the key's
+ *  place on a US keyboard, so on a German one Ctrl+Alt+Z would become Ctrl+Alt+Y. */
+const OEM: Record<number, string> = {
+  186: "Semicolon", 187: "Equal", 188: "Comma", 189: "Minus", 190: "Period", 191: "Slash",
+  192: "Backquote", 219: "BracketLeft", 220: "Backslash", 221: "BracketRight", 222: "Quote",
+};
+
+function keyName(e: KeyboardEvent): string {
+  const vk = e.keyCode;
+  if (vk >= 65 && vk <= 90) return `Key${String.fromCharCode(vk)}`;
+  if (vk >= 48 && vk <= 57) return `Digit${vk - 48}`;
+  return OEM[vk] ?? e.code;
+}
+
 /** Turns a key press into Tauri's accelerator syntax: "Ctrl+Alt+Space", "Ctrl+Shift+KeyD". */
 export function accelerator(e: KeyboardEvent): string | null {
   if (MODIFIER_CODES.has(e.code)) return null;
@@ -49,9 +64,10 @@ export function accelerator(e: KeyboardEvent): string | null {
   if (e.shiftKey) mods.push("Shift");
   if (e.metaKey) mods.push("Super");
   const fkey = /^F([1-9]|1[0-9]|2[0-4])$/.test(e.code);
-  // Function keys may stand alone; anything else needs a modifier.
-  if (mods.length === 0 && !fkey) return null;
-  return [...mods, e.code].join("+");
+  // Function keys may stand alone; anything else needs Ctrl, Alt or Win - with Shift alone,
+  // Shift+letter would swallow every capital letter typed anywhere.
+  if (!fkey && !(e.ctrlKey || e.altKey || e.metaKey)) return null;
+  return [...mods, keyName(e)].join("+");
 }
 
 export function pretty(acc: string) {
