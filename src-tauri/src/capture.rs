@@ -74,7 +74,9 @@ impl Recorder {
             })
             .map_err(|e| e.to_string())?;
 
-        match ready_rx.recv() {
+        // A driver that hangs (a Bluetooth headset switching profiles, a stuck USB device)
+        // must not leave the dictation waiting for a microphone forever.
+        match ready_rx.recv_timeout(std::time::Duration::from_secs(10)) {
             Ok(Ok((rate, device, fell_back))) => Ok(Recorder {
                 stop: stop_tx,
                 thread: Some(thread),
@@ -88,7 +90,8 @@ impl Recorder {
                 let _ = thread.join();
                 Err(e)
             }
-            Err(_) => Err("The microphone thread ended unexpectedly.".into()),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("The microphone did not open within 10 seconds.".into()),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("The microphone thread ended unexpectedly.".into()),
         }
     }
 

@@ -85,6 +85,10 @@ fn watch_foreground(app: &AppHandle) {
             let core = app.state::<Core>();
             let b = core.settings().bubble;
             let fg = win::foreground();
+            if let Some(fg) = fg {
+                // For a dictation started from the tray, whose menu puts Amber in front.
+                crate::insert::note_foreground(fg);
+            }
             let suppress = fg.is_some_and(|fg| {
                 (b.hide_fullscreen && win::is_fullscreen(fg))
                     || (!b.hidden_in.is_empty()

@@ -464,7 +464,8 @@ mod tests {
     }
 
     fn quick() -> Limits {
-        Limits { io_timeout: Duration::from_millis(300), body_deadline: Duration::from_secs(2), ..Limits::default() }
+        // Every test client is 127.0.0.1: the limit per address would be the one tested.
+        Limits { io_timeout: Duration::from_millis(300), body_deadline: Duration::from_secs(2), max_per_peer: 8, ..Limits::default() }
     }
 
     #[test]
@@ -570,6 +571,40 @@ mod tests {
         srv.stop();
         assert!(t0.elapsed() < Duration::from_secs(1), "stop waited {:?}", t0.elapsed());
         assert!(TcpListener::bind(addr).is_ok());
+    }
+
+    #[test]
+    fn a_trickling_head_cannot_hold_a_slot() {
+        // Review finding: one header byte now and then kept a connection open for days.
+        let limits = Limits { io_timeout: Duration::from_millis(300), head_deadline: Duration::from_millis(800), ..Limits::default() };
+        let (srv, _, _) = server_with(Ok(String::new()), limits);
+        let mut slow = TcpStream::connect(srv.addr).unwrap();
+        slow.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let t0 = Instant::now();
+        for b in b"POST /testkey/v1/audio" {
+            if slow.write_all(&[*b]).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let mut answer = String::new();
+        let _ = slow.read_to_string(&mut answer);
+        assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+        assert!(t0.elapsed() < Duration::from_millis(2_500), "closed after {:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn one_address_cannot_take_every_slot() {
+        let limits = Limits { max_per_peer: 2, ..Limits::default() };
+        let (srv, _, _) = server_with(Ok(String::new()), limits);
+        let _a = TcpStream::connect(srv.addr).unwrap();
+        let _b = TcpStream::connect(srv.addr).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let mut third = TcpStream::connect(srv.addr).unwrap();
+        third.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut answer = String::new();
+        let _ = third.read_to_string(&mut answer);
+        assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
     }
 
     #[test]

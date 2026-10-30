@@ -267,11 +267,13 @@ fn read_text(resp: reqwest::blocking::Response) -> Result<String, SttError> {
 
 pub fn parse_text(body: &str) -> Result<String, SttError> {
     let parsed: TextResponse = serde_json::from_str(body)
-        .map_err(|e| SttError::new(ErrorKind::BadResponse, "The engine sent an answer Amber does not understand.", format!("{e}: {}", clip(body))))?;
+        // Not the body itself in the log: from a server answering in plain text, it is the
+        // dictated text.
+        .map_err(|e| SttError::new(ErrorKind::BadResponse, "The engine sent an answer Amber does not understand.", format!("{e} ({} bytes)", body.len())))?;
     if let Some(err) = parsed.error {
         return Err(SttError::new(ErrorKind::Server, "The engine reported an error.", clip(&err.to_string())));
     }
-    parsed.text.ok_or_else(|| SttError::new(ErrorKind::BadResponse, "The engine sent no text.", clip(body)))
+    parsed.text.ok_or_else(|| SttError::new(ErrorKind::BadResponse, "The engine sent no text.", format!("{} bytes without a text field", body.len())))
 }
 
 pub fn status_error(status: u16, body: &str) -> SttError {

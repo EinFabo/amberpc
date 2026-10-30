@@ -33,7 +33,10 @@ mod win {
         KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
         VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_V,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow};
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use windows::Win32::System::DataExchange::{CountClipboardFormats, GetClipboardSequenceNumber, IsClipboardFormatAvailable};
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetForegroundWindow};
 
     /// The program file of a process, lowercase: "discord.exe".
     pub fn exe_of_pid(pid: u32) -> Option<String> {
@@ -120,17 +123,32 @@ mod win {
         out
     }
 
+    /// The last window in front that was not Amber's, as the bubble's watcher saw it.
+    static LAST_OTHER: AtomicIsize = AtomicIsize::new(0);
+
+    /// Called with the window in front every few hundred milliseconds.
+    pub fn note_foreground(hwnd: isize) {
+        if !own_window(HWND(hwnd as *mut _)) {
+            LAST_OTHER.store(hwnd, Ordering::Relaxed);
+        }
+    }
+
+    /// Amber's own window, but not the settings window - whose test field is a valid target.
+    fn own_window(hwnd: HWND) -> bool {
+        pid_of(hwnd) == unsafe { GetCurrentProcessId() } && !is_settings_window(hwnd)
+    }
+
     pub fn remember() -> Option<Target> {
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd.is_invalid() {
             return None;
         }
-        let mut pid = 0u32;
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-        // Our own windows (settings, bubble) are no target - except the settings window's test
-        // field, which is why the settings window is a valid target after all.
-        if pid == unsafe { GetCurrentProcessId() } && !is_settings_window(hwnd) {
-            return None;
+        if own_window(hwnd) {
+            // The tray menu puts Amber's hidden window in front: the text is meant for the
+            // window that was in front before.
+            let last = HWND(LAST_OTHER.load(Ordering::Relaxed) as *mut _);
+            let usable = !last.is_invalid() && unsafe { IsWindow(Some(last)).as_bool() && IsWindowVisible(last).as_bool() };
+            return usable.then_some(Target { hwnd: last.0 as isize });
         }
         Some(Target { hwnd: hwnd.0 as isize })
     }
@@ -262,20 +280,36 @@ mod win {
         cb.set().exclude_from_history().text(text.to_string()).map_err(|e| e.to_string())
     }
 
-    fn paste(text: &str, settings: &InsertSettings) -> Result<(), String> {
+    /// Something on the clipboard that is not text - an image, files - which Amber could not
+    /// put back after pasting.
+    fn clipboard_holds_more_than_text() -> bool {
+        unsafe { CountClipboardFormats() > 0 && IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32).is_err() }
+    }
+
+    fn paste(text: &str, settings: &InsertSettings) -> Result<Outcome, String> {
+        if settings.restore_clipboard && clipboard_holds_more_than_text() {
+            // Typed instead, so the image or files stay on the clipboard.
+            type_text(text);
+            return Ok(Outcome::Typed);
+        }
         let mut cb = arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
         let previous = if settings.restore_clipboard { cb.get_text().ok() } else { None };
         // Windows' own line ending, which older programs need to see a line break at all.
         set_clipboard(&mut cb, &text.replace("\r\n", "\n").replace('\n', "\r\n"))?;
+        let ours = unsafe { GetClipboardSequenceNumber() };
         std::thread::sleep(Duration::from_millis(30));
-        send(&[key(VK_CONTROL, false), key(VK_V, false), key(VK_V, true), key(VK_CONTROL, true)]);
+        if send(&[key(VK_CONTROL, false), key(VK_V, false), key(VK_V, true), key(VK_CONTROL, true)]) != 4 {
+            return Err("Windows did not take the keystrokes".into());
+        }
         if let Some(previous) = previous {
             // The target reads the clipboard asynchronously after Ctrl+V; restoring too early
-            // would paste the old content.
+            // would paste the old content. And not over something copied meanwhile.
             std::thread::sleep(Duration::from_millis(400));
-            let _ = set_clipboard(&mut cb, &previous);
+            if unsafe { GetClipboardSequenceNumber() } == ours {
+                let _ = set_clipboard(&mut cb, &previous);
+            }
         }
-        Ok(())
+        Ok(Outcome::Pasted)
     }
 
     fn type_text(text: &str) {
@@ -303,6 +337,13 @@ mod win {
     }
 
     pub fn insert(text: &str, settings: &InsertSettings, target: Option<Target>) -> Result<Outcome, String> {
+        // First: the hotkey's modifiers may still be down - or Alt for an Alt+Tab, whose
+        // switch counts for the check below.
+        wait_for_modifiers();
+        if target.is_none() && own_window(unsafe { GetForegroundWindow() }) {
+            to_clipboard(text)?;
+            return Ok(Outcome::OnClipboard("The text is on the clipboard - press Ctrl+V where you want it.".into()));
+        }
         if blocked_by_uipi(target) {
             to_clipboard(text)?;
             return Ok(Outcome::OnClipboard(
@@ -313,9 +354,8 @@ mod win {
             to_clipboard(text)?;
             return Ok(Outcome::OnClipboard("You switched to another window, so the text is on the clipboard - press Ctrl+V where you want it.".into()));
         }
-        wait_for_modifiers();
         match settings.method {
-            InsertMethod::Paste => paste(text, settings).map(|_| Outcome::Pasted),
+            InsertMethod::Paste => paste(text, settings),
             InsertMethod::Type => {
                 type_text(text);
                 Ok(Outcome::Typed)
@@ -325,7 +365,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{exe_of_pid, insert, program_of_window, remember, running_programs, to_clipboard};
+pub use win::{exe_of_pid, insert, note_foreground, program_of_window, remember, running_programs, to_clipboard};
 
 impl Target {
     /// The target's program, lowercase ("discord.exe"), for its profile.

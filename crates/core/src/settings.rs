@@ -270,7 +270,7 @@ impl Default for CleanupSettings {
     }
 }
 
-/// Discord hears silence while Amber listens: its recording is muted in Windows.
+/// Muted in Discord while Amber listens: Amber presses Discord's own microphone switch.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct DiscordSettings {
@@ -433,7 +433,6 @@ mod tests {
         assert!(s.cleanup.fillers && !s.cleanup.smart, "fillers on, the model only when asked for");
         assert_eq!(s.phone.port, 8765);
         assert!(!s.phone.enabled, "the phone API is off unless turned on");
-
         assert_eq!(s.bubble.size, 96);
         assert_eq!(s.bubble.opacity, 0.3);
         assert_eq!(s.bubble.y, BubbleSettings::default().y);
@@ -445,6 +444,5 @@ mod tests {
         let mut s = Settings::default();
         s.language = " DE ".into();
         assert_eq!(s.sanitized().language, "de");
-
     }
 }
