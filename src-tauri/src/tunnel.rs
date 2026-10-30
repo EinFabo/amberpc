@@ -92,8 +92,11 @@ pub fn sync(app: &AppHandle) {
         t.set(if missing.is_some() { "setup" } else { "off" }, missing.map(str::to_string));
         return;
     }
+    // --url: where a tunnel created on the command line sends its requests. A tunnel set up in
+    // Cloudflare's dashboard brings its own routing from there, which takes precedence.
+    let origin = format!("http://localhost:{}", s.port);
     let mut cmd = Command::new(&exe);
-    cmd.args(["tunnel", "--no-autoupdate", "run"]).env("TUNNEL_TOKEN", token.unwrap_or_default());
+    cmd.args(["tunnel", "--no-autoupdate", "--url", &origin, "run"]).env("TUNNEL_TOKEN", token.unwrap_or_default());
     match process::spawn(cmd, &t.output) {
         Ok(c) => {
             *child = Some(c);
