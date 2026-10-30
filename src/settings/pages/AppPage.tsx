@@ -27,7 +27,11 @@ export function AppPage({ s, save, ov, toast }: PageProps) {
   const install = async () => {
     setBusy("install");
     try {
-      await invoke("install_update");
+      // True: Amber restarts into the new version; false: there was none after all.
+      if (!(await invoke<boolean>("install_update"))) {
+        toast("No update available.", true);
+        setBusy(null);
+      }
     } catch (e) {
       toast(`Update failed: ${e}`);
       setBusy(null);
@@ -85,8 +89,12 @@ export function AppPage({ s, save, ov, toast }: PageProps) {
           <button
             className="btn"
             onClick={async () => {
-              await navigator.clipboard.writeText(log.map((l) => `${l.time} ${l.level} ${l.message}`).join("\n"));
-              toast("Log copied.", true);
+              try {
+                await navigator.clipboard.writeText(log.map((l) => `${l.time} ${l.level} ${l.message}`).join("\n"));
+                toast("Log copied.", true);
+              } catch (e) {
+                toast(`Could not copy: ${e}`);
+              }
             }}
           >
             Copy

@@ -509,14 +509,49 @@ fn install_archives(zips: &[&Path], dest: &Path, server_exe: &str, required: &[&
             return Err(DownloadError::Package(format!("missing {}", missing.join(", "))));
         }
         fs::write(staging.join(".installed"), marker)?;
-        let _ = fs::remove_dir_all(dest);
-        fs::rename(&staging, dest)?;
+        replace_dir(&staging, dest)?;
         Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(&staging);
     }
     result
+}
+
+/// Puts [staging] where [dest] is. The old folder is moved aside first and comes back if the
+/// new one cannot take its place - on Windows a virus scanner briefly holding the fresh DLLs
+/// makes a rename fail with "access denied", so it is tried a few times.
+fn replace_dir(staging: &Path, dest: &Path) -> std::io::Result<()> {
+    let retry = |f: &dyn Fn() -> std::io::Result<()>| {
+        let mut wait = std::time::Duration::from_millis(200);
+        for _ in 0..6 {
+            match f() {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => std::thread::sleep(wait),
+                Err(e) => return Err(e),
+            }
+            wait *= 2;
+        }
+        f()
+    };
+    let aside = dest.with_extension("old");
+    let _ = fs::remove_dir_all(&aside);
+    let had_old = dest.exists();
+    if had_old {
+        retry(&|| fs::rename(dest, &aside))?;
+    }
+    match retry(&|| fs::rename(staging, dest)) {
+        Ok(()) => {
+            let _ = fs::remove_dir_all(&aside);
+            Ok(())
+        }
+        Err(e) => {
+            if had_old {
+                let _ = fs::rename(&aside, dest);
+            }
+            Err(e)
+        }
+    }
 }
 
 /// What whisper-server's start-up output says about the GPU: `Some(true)` once it uses a

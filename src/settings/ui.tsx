@@ -1,6 +1,9 @@
 // Small building blocks for the settings pages.
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+
+/** A row's label, for the switch in it - screen readers announce what it switches. */
+const RowLabel = createContext<string | undefined>(undefined);
 
 export function Section({ title, children }: { title?: string; children: ReactNode }) {
   return (
@@ -18,13 +21,14 @@ export function Row({ label, hint, children }: { label: ReactNode; hint?: ReactN
         <div>{label}</div>
         {hint && <div className="hint">{hint}</div>}
       </div>
-      {children}
+      <RowLabel.Provider value={typeof label === "string" ? label : undefined}>{children}</RowLabel.Provider>
     </div>
   );
 }
 
 export function Switch({ on, onChange }: { on: boolean; onChange: (on: boolean) => void }) {
-  return <button className={`switch ${on ? "on" : ""}`} role="switch" aria-checked={on} onClick={() => onChange(!on)} />;
+  const label = useContext(RowLabel);
+  return <button className={`switch ${on ? "on" : ""}`} role="switch" aria-checked={on} aria-label={label} onClick={() => onChange(!on)} />;
 }
 
 export function Segmented<T extends string>({

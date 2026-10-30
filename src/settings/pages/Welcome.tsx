@@ -1,6 +1,6 @@
 // First start: one decision (local or server), the downloads it needs, and how to dictate.
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { PageProps } from "../App";
 import { Section, Row, Progress, size } from "../ui";
 import { useLocal } from "../downloads";
@@ -14,6 +14,17 @@ export function WelcomePage(p: PageProps) {
   useEffect(() => {
     if (!s.onboarded) void save((x) => (x.onboarded = true));
   }, [s.onboarded, save]);
+  const [wantLocal, setWantLocal] = useState(false);
+  const bothThere = !!info && info.runtimes.some((r) => r.id === info.recommended[0] && r.installed) && info.models.some((m) => m.id === info.recommended[1] && m.installed);
+  useEffect(() => {
+    if (!wantLocal || !bothThere || !info) return;
+    setWantLocal(false);
+    void save((x) => {
+      x.engine = "local";
+      x.local.runtime = info.recommended[0];
+      x.local.model = info.recommended[1];
+    });
+  }, [wantLocal, bothThere, info, save]);
 
   if (!info) return null;
   const [rtId, modelId] = info.recommended;
@@ -24,12 +35,10 @@ export function WelcomePage(p: PageProps) {
   const modelDl = progress[`model:${modelId}`];
   const downloading = !!(rtDl || modelDl) || info.downloads.length > 0;
 
+  // The engine changes only once both parts are there: until then, whatever works now keeps
+  // working (a server user would otherwise be left without dictation for the download).
   const setupLocal = async () => {
-    await save((x) => {
-      x.engine = "local";
-      x.local.runtime = rtId;
-      x.local.model = modelId;
-    });
+    setWantLocal(true);
     if (!rt.installed) await download("runtime", rtId, true);
     if (!model.installed) await download("model", modelId, true);
   };
@@ -84,7 +93,7 @@ export function WelcomePage(p: PageProps) {
             label={
               s.hotkey.dictate ? (
                 <>
-                  Press <b>{pretty(s.hotkey.dictate)}</b> - tap to start and stop, or hold while you speak.
+                  Press <b>{pretty(s.hotkey.dictate)}</b> - {s.hotkey.mode === "toggle" ? "once to start, again to stop" : s.hotkey.mode === "hold" ? "and hold it while you speak" : "tap to start and stop, or hold while you speak"}.
                 </>
               ) : (
                 "Set a hotkey to dictate from anywhere."

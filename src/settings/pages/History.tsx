@@ -73,8 +73,12 @@ export function HistoryPage({ s, save, toast }: PageProps) {
               <button
                 className="btn"
                 onClick={async () => {
-                  await invoke("copy_text", { text: e.text });
-                  toast("Copied.", true);
+                  try {
+                    await invoke("copy_text", { text: e.text });
+                    toast("Copied.", true);
+                  } catch (err) {
+                    toast(`Could not copy - another program holds the clipboard: ${err}`);
+                  }
                 }}
               >
                 Copy

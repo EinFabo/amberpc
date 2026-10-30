@@ -119,8 +119,16 @@ impl Whisper {
         }
 
         self.set_status(app, Status::of("starting", Some(format!("Loading {}…", model.label))));
+        // A cleanup model on the graphics card may have taken what is free there; the speech
+        // model comes first - without it dictation itself breaks - and the other one reloads
+        // after it, fitting itself into what is left.
+        let moved = rt.id != "cpu" && core.llm.make_room_on_gpu(app);
         let started = Instant::now();
-        match self.spawn(layout, rt, model, &key) {
+        let spawned = self.spawn(layout, rt, model, &key);
+        if moved {
+            core.llm.warm(app, true);
+        }
+        match spawned {
             Ok(r) => {
                 let served = r.served();
                 if model.short_context {

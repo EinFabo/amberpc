@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { DictationEvent, Overview, Phase, Settings } from "../shared/types";
 import { EnginePage } from "./pages/Engine";
 import { MicrophonePage } from "./pages/Microphone";
@@ -66,9 +67,14 @@ export function App() {
   const [page, setPage] = useState<PageId>(initialPage);
   const [toastMsg, setToast] = useState<{ text: string; ok: boolean } | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
-  // The latest settings, so two quick changes in a row build on each other.
+  // The latest settings, so two quick changes in a row build on each other - set by save()
+  // and by answers that are still current, not by every render.
   const latest = useRef<Settings | null>(null);
-  latest.current = ov?.settings ?? null;
+  // Saves in flight: an answer to an older one must not undo a newer change, and closing the
+  // window waits for them.
+  const saveSeq = useRef(0);
+  const pending = useRef(new Set<Promise<void>>());
+  if (latest.current === null && ov) latest.current = ov.settings;
 
   const refresh = useCallback(async () => {
     const o = await invoke<Overview>("get_overview");
@@ -84,11 +90,26 @@ export function App() {
   useEffect(() => {
     void refresh();
     const subs = [
-      listen<Settings>("settings-changed", (e) => setOv((o) => (o ? { ...o, settings: e.payload } : o))),
+      listen<Settings>("settings-changed", (e) => {
+        // While a save of this window is under way, its own answer is the one to take.
+        if (pending.current.size > 0) return;
+        latest.current = e.payload;
+        setOv((o) => (o ? { ...o, settings: e.payload } : o));
+      }),
       listen<string>("navigate", (e) => setPage(e.payload as PageId)),
       listen<DictationEvent>("dictation-state", (e) => setPhase(e.payload.state)),
     ];
-    return () => subs.forEach((p) => p.then((un) => un()));
+    // A field saves when it loses the focus - closing the window must not skip that: the
+    // focus is taken first, and the window closes once the saves are through.
+    const closing = getCurrentWindow().onCloseRequested(async () => {
+      (document.activeElement as HTMLElement | null)?.blur();
+      await new Promise((r) => setTimeout(r, 0));
+      await Promise.race([Promise.allSettled([...pending.current]), new Promise((r) => setTimeout(r, 2000))]);
+    });
+    return () => {
+      subs.forEach((p) => p.then((un) => un()));
+      void closing.then((un) => un());
+    };
   }, [refresh]);
 
   const save = useCallback(
@@ -98,13 +119,26 @@ export function App() {
       change(next);
       latest.current = next;
       setOv((o) => (o ? { ...o, settings: next } : o));
-      try {
-        const saved = await invoke<Settings>("save_settings", { settings: next });
-        setOv((o) => (o ? { ...o, settings: saved } : o));
-      } catch (e) {
-        toast(String(e));
-        void refresh();
-      }
+      const mine = ++saveSeq.current;
+      const run = (async () => {
+        try {
+          const saved = await invoke<Settings>("save_settings", { settings: next });
+          if (mine === saveSeq.current) {
+            latest.current = saved;
+            setOv((o) => (o ? { ...o, settings: saved } : o));
+          }
+        } catch (e) {
+          toast(String(e));
+          if (mine === saveSeq.current) {
+            const o = await invoke<Overview>("get_overview");
+            latest.current = o.settings;
+            setOv(o);
+          }
+        }
+      })();
+      pending.current.add(run);
+      await run;
+      pending.current.delete(run);
     },
     [refresh, toast],
   );

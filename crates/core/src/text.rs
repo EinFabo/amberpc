@@ -3,8 +3,15 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-/// Sound annotations such as "[Musik]", "(Lachen)", "*Applaus*", "[BLANK_AUDIO]".
-static ANNOTATION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[^\]]*]|\([^)]*\)|\*[^*]*\*|♪+").unwrap());
+/// Sound annotations such as "[Musik]", "(Lachen)", "*Applaus*", "[BLANK_AUDIO]". Square
+/// brackets and asterisks are never dictated; round ones are, "die EU (Europäische Union)",
+/// so those go only when they name a sound.
+static ANNOTATION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\[[^\]]*]|\*[^*]*\*|♪+|\([^)]*\b(musik|music|applaus|applause|beifall|lach\w*|laugh\w*|gelächter|kichert?|stille|silence|hust\w*|cough\w*|seufz\w*|sigh\w*|räusper\w*|atm\w*|breath\w*|inaudible|unverständlich|unintelligible|geräusch\w*|noise|klatsch\w*|klopf\w*|pieps?\w*|beep\w*|blank_audio)\b[^)]*\)",
+    )
+    .unwrap()
+});
 static SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]+").unwrap());
 static SPACE_BEFORE_PUNCT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" ([.,!?;:])").unwrap());
 
@@ -143,6 +150,10 @@ mod tests {
         assert_eq!(clean(" Hallo  Welt .\n"), "Hallo Welt.");
         assert_eq!(clean("[Musik] Ja, genau. (Lachen)"), "Ja, genau.");
         assert_eq!(clean(" [BLANK_AUDIO]\n"), "");
+        // Dictated brackets stay; sounds in them go.
+        assert_eq!(clean("Die Europäische Union (EU) hat entschieden."), "Die Europäische Union (EU) hat entschieden.");
+        assert_eq!(clean("Gut (leises Lachen) so."), "Gut so.");
+        assert_eq!(clean("(Applaus) Danke. (Musik spielt)"), "Danke.");
         assert_eq!(clean("Erste Zeile.\n Zweite Zeile."), "Erste Zeile. Zweite Zeile.");
         assert_eq!(clean("♪♪ *Applaus*"), "");
     }

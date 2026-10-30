@@ -221,6 +221,17 @@ impl Llm {
         self.set_status(app, Status::of("stopped", None));
     }
 
+    /// Stops the cleanup model if it sits on the graphics card - so a speech model starting
+    /// there finds the memory free. Whether it did; the caller warms it again afterwards.
+    pub fn make_room_on_gpu(&self, app: &AppHandle) -> bool {
+        let on_gpu = self.running.lock().unwrap().as_mut().is_some_and(|r| r.key.runtime != "cpu" && matches!(r.child.try_wait(), Ok(None)));
+        if on_gpu {
+            crate::diag::info("cleanup model makes room on the graphics card for the speech model");
+            self.stop(app);
+        }
+        on_gpu
+    }
+
     pub fn stop_runtime(&self, app: &AppHandle, runtime: &str) {
         let uses = self.running.lock().unwrap().as_ref().is_some_and(|r| r.key.runtime == runtime);
         if uses {

@@ -53,8 +53,14 @@ const NOUN_BEFORE: &[&str] = &[
     "springenden", "kritischer", "kritischen", "schwacher", "schwachen", "starker", "starken", "entscheidende", "entscheidenden",
     "toter", "toten", "neuer", "neuen", "meinem", "deinem", "seinem", "ihrem", "unserem", "eurem", "dieser", "dieses", "jeder",
     "jedem", "anderer", "anderen", "weiterer", "weiteren", "interessanter", "interessanten", "zentraler", "zentralen",
-    "wesentlicher", "wesentlichen", "einzelnen", "gemeinsamen", "a", "an", "the", "this", "that", "your", "my",
+    "wesentlicher", "wesentlichen", "einzelnen", "gemeinsamen", "einer", "meine", "deine", "seine", "ihre", "unsere", "eure",
+    "keine", "meiner", "deiner", "seiner", "ihrer", "unserer", "eurer", "keiner", "diese", "jede", "jene", "jener", "welche",
+    "welcher", "a", "an", "the", "this", "that", "your", "my", "our", "their", "his", "her", "its", "every", "each", "no",
 ];
+
+/// After these, a mark's name is the thing itself: "mit Komma", "ohne Punkt". Not for every
+/// command - "Kommst du mit Fragezeichen" asks.
+const WITH_OR_WITHOUT: &[&str] = &["mit", "ohne", "with", "without"];
 
 /// Number words, for "drei Komma fünf".
 const NUMBER_WORDS: &[&str] = &[
@@ -170,20 +176,26 @@ fn fires(tokens: &[&str], cores: &[String], i: usize, len: usize, mark: Mark) ->
         (Mark::Attach(_), Some(before)) => match cores[i].as_str() {
             "punkt" => {
                 // "Der 1. Punkt", "Punkt 3": a numbered point.
-                if is_number(before.trim_end_matches('.')) || after.is_some_and(is_number) {
+                if is_number(before.trim_end_matches('.')) || after.is_some_and(is_number) || WITH_OR_WITHOUT.contains(&before) {
                     return false;
                 }
-                let at_end = after.is_none();
-                let before_break = match_command(cores, i + len).is_some_and(|(_, m)| matches!(m, Mark::Break(_)));
-                // Mid-text only where Whisper put a sentence end on the spoken word itself
-                // ("weiter Punkt. Morgen") - not merely before it ("morgen. Punkt neun Uhr").
-                let whisper_ended = tokens[i + len - 1].ends_with(SENTENCE_END);
-                at_end || before_break || whisper_ended
+                at_a_sentence_end(tokens, cores, i, len)
             }
-            "komma" | "comma" => !(is_number(before) && after.is_some_and(is_number)),
+            // "colon cancer": English "colon" is a word first, like "Punkt".
+            "colon" => at_a_sentence_end(tokens, cores, i, len),
+            "komma" | "comma" => !WITH_OR_WITHOUT.contains(&before) && !(is_number(before) && after.is_some_and(is_number)),
             _ => true,
         },
     }
+}
+
+/// The command at the end of the dictation, before a spoken line break, or where Whisper
+/// put a sentence end on the spoken word itself ("weiter Punkt. Morgen") - not merely
+/// before it ("morgen. Punkt neun Uhr").
+fn at_a_sentence_end(tokens: &[&str], cores: &[String], i: usize, len: usize) -> bool {
+    let at_end = i + len >= cores.len();
+    let before_break = match_command(cores, i + len).is_some_and(|(_, m)| matches!(m, Mark::Break(_)));
+    at_end || before_break || tokens[i + len - 1].ends_with(SENTENCE_END)
 }
 
 fn match_command(cores: &[String], at: usize) -> Option<(usize, Mark)> {
@@ -264,6 +276,25 @@ mod tests {
         ] {
             assert_eq!(apply(text), text);
         }
+    }
+
+    #[test]
+    fn command_words_after_possessives_and_prepositions_stay() {
+        for text in [
+            "Beginne jede neue Zeile mit einem Strich.",
+            "Bitte keine neue Zeile einfügen",
+            "Das ist meine neue Zeile",
+            "Das schreibt man ohne Punkt.",
+            "Das schreibt man mit Komma",
+            "Their new line of shoes",
+            "He had colon cancer surgery.",
+            "Write it without comma",
+        ] {
+            assert_eq!(apply(text), text);
+        }
+        // Where they still mean the command.
+        assert_eq!(apply("Kommst du mit Fragezeichen"), "Kommst du mit?");
+        assert_eq!(apply("Notes colon"), "Notes:");
     }
 
     #[test]
