@@ -221,11 +221,15 @@ pub struct PhoneSettings {
     pub port: u16,
     /// The PC's cleanup (fillers, smart cleanup) also for what the phone dictates.
     pub cleanup: bool,
+    /// Reachable from anywhere through a Cloudflare Tunnel (cloudflared, the user's token).
+    pub tunnel: bool,
+    /// The tunnel's public hostname, "amber.example.com", as set up in Cloudflare.
+    pub public_host: String,
 }
 
 impl Default for PhoneSettings {
     fn default() -> Self {
-        PhoneSettings { enabled: false, port: crate::api::DEFAULT_PORT, cleanup: true }
+        PhoneSettings { enabled: false, port: crate::api::DEFAULT_PORT, cleanup: true, tunnel: false, public_host: String::new() }
     }
 }
 
@@ -310,6 +314,7 @@ impl Settings {
             .filter(|e| !e.is_empty() && seen.insert(e.clone()))
             .collect();
         self.vocabulary = self.vocabulary.chars().take(800).collect();
+        self.phone.public_host = crate::api::public_host(&self.phone.public_host);
         if self.phone.port < 1024 {
             self.phone.port = d.phone.port;
         }
