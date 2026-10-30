@@ -43,6 +43,9 @@ pub enum Route {
     Health,
     Models,
     Transcribe,
+    /// The phone's own cleanup (Amber for Android 0.17 and later asks for it separately),
+    /// answered by the PC's cleanup model.
+    Chat,
 }
 
 /// Which endpoint a request means, if it may use it. The key may lead the path or come as a
@@ -65,9 +68,10 @@ pub fn route(method: &str, path: &str, bearer: Option<&str>, key: &str) -> Resul
     let rest = rest.strip_prefix(&["v1"][..]).unwrap_or(rest);
     match (method, rest) {
         ("POST", ["audio", "transcriptions"]) => Ok(Route::Transcribe),
+        ("POST", ["chat", "completions"]) => Ok(Route::Chat),
         ("GET", ["models"]) => Ok(Route::Models),
         ("GET", []) => Ok(Route::Health),
-        _ => Err((404, "Amber's phone API only offers /v1/audio/transcriptions and /v1/models.")),
+        _ => Err((404, "Amber's phone API only offers /v1/audio/transcriptions, /v1/chat/completions and /v1/models.")),
     }
 }
 
@@ -187,6 +191,8 @@ pub struct Hooks {
     /// A finished phone dictation: the text, the audio length and how long it took - for the
     /// PC's history and statistics.
     pub record: Arc<dyn Fn(&str, u64, u64) + Send + Sync>,
+    /// A chat request answered by the PC's cleanup model - or the status and why not.
+    pub chat: Arc<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, (u16, String)> + Send + Sync>,
     pub log: Arc<dyn Fn(String) + Send + Sync>,
 }
 
@@ -216,8 +222,34 @@ fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>) -> (u16, serde_jso
             (status, error_body(message, if status == 401 { "invalid_api_key" } else { "not_found" }))
         }
         Ok(Route::Health) => (200, serde_json::json!({ "status": "ok", "service": "amber-pc" })),
-        Ok(Route::Models) => {
-            (200, serde_json::json!({ "object": "list", "data": [{ "id": "amber-pc", "object": "model", "owned_by": "amber" }] }))
+        Ok(Route::Models) => (
+            200,
+            serde_json::json!({ "object": "list", "data": [
+                { "id": "amber-pc", "object": "model", "owned_by": "amber" },
+                { "id": "amber-cleanup", "object": "model", "owned_by": "amber" },
+            ] }),
+        ),
+        Ok(Route::Chat) => {
+            let started = Instant::now();
+            let body = match req.body() {
+                Ok(b) => b,
+                Err((status, message)) => return (status, error_body(message, "invalid_request_error")),
+            };
+            let request = match serde_json::from_slice::<serde_json::Value>(&body) {
+                Ok(r) if r["messages"].as_array().is_some_and(|m| !m.is_empty()) => r,
+                _ => return (400, error_body("Expected a JSON chat request with messages.", "invalid_request_error")),
+            };
+            // Whatever model the phone names: the PC answers with its own cleanup model.
+            match (hooks.chat)(&request) {
+                Ok(answer) => {
+                    (hooks.log)(format!("phone API: {peer}, cleanup in {} ms", started.elapsed().as_millis()));
+                    (200, answer)
+                }
+                Err((status, message)) => {
+                    (hooks.log)(format!("phone API: cleanup failed: {message}"));
+                    (status, error_body(&message, "server_error"))
+                }
+            }
         }
         Ok(Route::Transcribe) => {
             // Only now, with the key checked, is the upload read.
@@ -318,7 +350,10 @@ mod tests {
         assert_eq!(route("POST", "/wrongkey/v1/audio/transcriptions", None, k).unwrap_err().0, 401);
         assert_eq!(route("POST", "/v1/audio/transcriptions", Some("secretkez"), k).unwrap_err().0, 401);
         assert_eq!(route("POST", "/v1/audio/transcriptions", None, k).unwrap_err().0, 401);
-        assert_eq!(route("POST", "/secretkey/v1/chat/completions", None, k).unwrap_err().0, 404);
+        assert_eq!(route("POST", "/secretkey/v1/chat/completions", None, k), Ok(Route::Chat));
+        assert_eq!(route("POST", "/v1/chat/completions", Some("secretkey"), k), Ok(Route::Chat));
+        assert_eq!(route("POST", "/wrongkey/v1/chat/completions", None, k).unwrap_err().0, 401);
+        assert_eq!(route("POST", "/secretkey/v1/completions", None, k).unwrap_err().0, 404);
         assert_eq!(route("GET", "/secretkey/v1/audio/transcriptions", None, k).unwrap_err().0, 404);
     }
 
@@ -398,6 +433,11 @@ mod tests {
             // Stands in for the PC's cleanup: drops the fillers the fake engine heard.
             tidy: Arc::new(|t| text::strip_fillers(&t)),
             record: Arc::new(|_, _, _| {}),
+            // Stands in for the PC's cleanup model: says how many messages it got.
+            chat: Arc::new(|req| match req["messages"].as_array() {
+                Some(m) => Ok(serde_json::json!({ "choices": [{ "message": { "role": "assistant", "content": format!("{} messages", m.len()) }, "finish_reason": "stop" }] })),
+                None => Err((400, "no messages".into())),
+            }),
             log: Arc::new(move |m| l.lock().unwrap().push(m)),
         };
         Ok((start_with(addr.parse().unwrap(), hooks, limits)?, fake, log))
@@ -571,6 +611,25 @@ mod tests {
         srv.stop();
         assert!(t0.elapsed() < Duration::from_secs(1), "stop waited {:?}", t0.elapsed());
         assert!(TcpListener::bind(addr).is_ok());
+    }
+
+    #[test]
+    fn the_phones_own_cleanup_is_answered_by_the_pc() {
+        let (srv, _, log) = server(Ok(String::new()));
+        let body = r#"{"model":"anything","messages":[{"role":"system","content":"x"},{"role":"user","content":"y"}]}"#;
+        let request = format!("POST /testkey/v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        let mut s = TcpStream::connect(srv.addr).unwrap();
+        s.write_all(request.as_bytes()).unwrap();
+        let mut answer = String::new();
+        s.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        assert!(answer.contains("2 messages"), "{answer}");
+        assert!(log.lock().unwrap().iter().any(|l| l.contains("cleanup in")));
+        // Not JSON, or wrong key: refused before the model is asked.
+        let bad = "POST /testkey/v1/chat/completions HTTP/1.1\r\nContent-Length: 3\r\n\r\nnah";
+        assert_eq!(raw(srv.addr, bad.as_bytes()), "HTTP/1.1 400 Bad Request");
+        let wrong = format!("POST /nope/v1/chat/completions HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        assert_eq!(raw(srv.addr, wrong.as_bytes()), "HTTP/1.1 401 Unauthorized");
     }
 
     #[test]

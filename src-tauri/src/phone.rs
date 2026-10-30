@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use amber_core::api::{self, Hooks, Server};
+use amber_core::engine::ErrorKind;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
@@ -41,7 +42,7 @@ pub fn sync(app: &AppHandle) {
     }
     key(&core);
 
-    let (k, e, t, r) = (app.clone(), app.clone(), app.clone(), app.clone());
+    let (k, e, t, r, c) = (app.clone(), app.clone(), app.clone(), app.clone(), app.clone());
     let hooks = Hooks {
         // Read per request, so a new key takes effect at once.
         key: Arc::new(move || k.state::<Core>().key(KEY_ID).unwrap_or_default()),
@@ -60,6 +61,22 @@ pub fn sync(app: &AppHandle) {
             } else {
                 text
             }
+        }),
+        // The phone's own cleanup, on the PC's cleanup model - local or a provider, as the
+        // Cleanup page says. Waits for a local model to load; the phone keeps its text if that
+        // takes longer than it waits.
+        chat: Arc::new(move |request| {
+            let settings = c.state::<Core>().settings();
+            let cleaner = crate::llm::cleaner(&c, &settings, true).map_err(|e| (503, e))?;
+            cleaner.forward(request).map_err(|e| {
+                let status = match e.kind {
+                    ErrorKind::Timeout => 504,
+                    ErrorKind::RateLimited => 429,
+                    ErrorKind::Unreachable | ErrorKind::Unavailable => 503,
+                    _ => 502,
+                };
+                (status, e.message)
+            })
         }),
         log: Arc::new(|m: String| crate::diag::info(m)),
     };

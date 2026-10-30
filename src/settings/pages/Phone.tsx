@@ -102,12 +102,16 @@ export function PhonePage({ s, save, toast }: PageProps) {
               label="Apply the PC's cleanup"
               hint={
                 s.cleanup.smart
-                  ? "Fillers out and the smart cleanup, as set under Cleanup. Leave “Chat model” empty in the phone app, or the text is cleaned twice."
+                  ? "Fillers out and the smart cleanup, as set under Cleanup, for every phone dictation. Off when the phone does its own cleanup through this PC (below), or the text is cleaned twice."
                   : "Fillers out, as set under Cleanup. Switch on the smart cleanup there and the phone gets it too."
               }
             >
               <Switch on={s.phone.cleanup} onChange={(v) => save((x) => (x.phone.cleanup = v))} />
             </Row>
+            <Row
+              label="The phone's own cleanup"
+              hint="Amber on the phone can clean up per app itself: choose this PC as the server for the cleanup, with any model name, e.g. “amber-cleanup”. The PC answers with its cleanup model, as set under Cleanup - so the phone's styles per app work without a model of their own."
+            />
             <Row label="History and statistics" hint={s.history ? "The phone's dictations are kept in the PC's history and counted in its statistics, as “phone”." : "The history is off; the phone's dictations are only counted."} />
           </Section>
           <Section title="Access">
