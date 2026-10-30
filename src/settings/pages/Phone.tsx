@@ -1,14 +1,17 @@
 // Amber on the phone uses this PC as its "own server": the address to enter there, as text
 // and as a QR code to scan with the phone's camera.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { PhoneInfo } from "../../shared/types";
+import { listen } from "@tauri-apps/api/event";
+import type { DownloadEvent, PhoneInfo } from "../../shared/types";
 import type { PageProps } from "../App";
-import { Row, Section, Switch } from "../ui";
+import { Progress, Row, Section, Switch } from "../ui";
 
-export function PhonePage({ s, save, toast }: PageProps) {
+export function PhonePage(props: PageProps) {
+  const { s, save, toast } = props;
   const [info, setInfo] = useState<PhoneInfo | null>(null);
+  const reload = useCallback(async () => setInfo(await invoke<PhoneInfo>("phone_info")), []);
   const [port, setPort] = useState(String(s.phone.port));
   useEffect(() => setPort(String(s.phone.port)), [s.phone.port]);
 
@@ -136,6 +139,7 @@ export function PhonePage({ s, save, toast }: PageProps) {
                       : "History and statistics are off: nothing of the phone's dictations is kept."
               } />
           </Section>
+          {info && <TunnelSection {...props} info={info} reload={reload} />}
           <Section title="Access">
             <Row label="Access key" hint="It is part of the address. A new key locks out every phone that has the old address.">
               <button
@@ -160,5 +164,149 @@ export function PhonePage({ s, save, toast }: PageProps) {
         </>
       )}
     </>
+  );
+}
+
+const TUNNEL_STATE: Record<PhoneInfo["tunnel"]["state"], [string, string]> = {
+  connected: ["ready", "Connected - the phone reaches this PC from anywhere"],
+  starting: ["starting", "Connecting to Cloudflare…"],
+  failed: ["failed", "Not connected"],
+  setup: ["starting", "Not set up yet"],
+  off: ["starting", "Off"],
+};
+
+/** "https://Amber.Example.com/x" -> "amber.example.com", or "" - as the PC normalizes it. */
+function hostOf(typed: string): string {
+  const host = typed.trim().replace(/^[a-z]+:\/\//i, "").split(/[/?#:]/)[0].replace(/\.$/, "").toLowerCase();
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host) ? host : "";
+}
+
+/** The phone API from anywhere: a Cloudflare Tunnel on the user's own domain. */
+function TunnelSection({ s, save, toast, info, reload }: PageProps & { info: PhoneInfo; reload: () => Promise<void> }) {
+  const [dl, setDl] = useState<DownloadEvent | null>(null);
+  const [token, setToken] = useState("");
+  const [host, setHost] = useState(s.phone.publicHost);
+  useEffect(() => setHost(s.phone.publicHost), [s.phone.publicHost]);
+
+  useEffect(() => {
+    const un = listen<DownloadEvent>("download", (e) => {
+      if (e.payload.key !== "tunnel:cloudflared") return;
+      setDl(e.payload.state === "running" ? e.payload : null);
+      if (e.payload.state === "failed") toast(`Download failed: ${e.payload.message ?? ""}`);
+      if (e.payload.state !== "running") void reload();
+    });
+    return () => void un.then((f) => f());
+  }, [reload, toast]);
+
+  const saveToken = async (value: string | null) => {
+    try {
+      await invoke("set_tunnel_token", { token: value });
+      setToken("");
+      toast(value ? "Token saved." : "Token removed.", true);
+      void reload();
+    } catch (e) {
+      toast(String(e));
+    }
+  };
+
+  const [dot, label] = TUNNEL_STATE[info.tunnel.state];
+  return (
+    <Section title="From anywhere">
+      <Row
+        label="Reach this PC from anywhere"
+        hint="Through a Cloudflare Tunnel on your own domain: an HTTPS address that works on mobile data too. The access key in it keeps everyone else out."
+      >
+        <Switch on={s.phone.tunnel} onChange={(v) => save((x) => (x.phone.tunnel = v))} />
+      </Row>
+      {s.phone.tunnel && (
+        <>
+          <div className="row">
+            <ol className="steps">
+              <li>
+                In Cloudflare: <b>Zero Trust → Networks → Tunnels → Create a tunnel</b>, type Cloudflared, name it e.g. “amber”.
+              </li>
+              <li>Copy the install command it shows for Windows - or only the token in it - and paste it below.</li>
+              <li>
+                Add a <b>public hostname</b>, e.g. <b>amber</b>.your-domain, service <b>HTTP</b>, URL <b>localhost:{s.phone.port}</b>.
+              </li>
+              <li>Enter that hostname below. The phone gets its address with the QR code.</li>
+            </ol>
+          </div>
+          <Row label="cloudflared" hint="Cloudflare's tunnel program (53 MB), checked against its known fingerprint before it runs.">
+            {info.tunnelDownloaded ? (
+              <span style={{ color: "var(--muted)" }}>Downloaded</span>
+            ) : dl ? (
+              <Progress done={dl.done} total={dl.total} />
+            ) : (
+              <button
+                className="btn primary"
+                onClick={async () => {
+                  setDl({ key: "tunnel:cloudflared", done: 0, total: null, state: "running" });
+                  try {
+                    await invoke("download", { kind: "tunnel", id: "cloudflared", select: false });
+                  } catch (e) {
+                    setDl(null);
+                    toast(String(e));
+                  }
+                }}
+              >
+                Download
+              </button>
+            )}
+          </Row>
+          <Row label="Tunnel token" hint={info.tunnelToken ? "Saved, protected like your API keys. Paste a new one to replace it." : "From step 2. It is not shown again once saved."}>
+            <input type="password" value={token} placeholder={info.tunnelToken ? "••••••••" : "eyJ…"} onChange={(e) => setToken(e.target.value)} style={{ width: 200 }} />
+            <button className="btn" disabled={!token.trim()} onClick={() => saveToken(token)}>
+              Save
+            </button>
+            {info.tunnelToken && (
+              <button className="btn" onClick={() => saveToken(null)}>
+                Remove
+              </button>
+            )}
+          </Row>
+          <Row label="Public hostname" hint="As set up in Cloudflare in step 3.">
+            <input
+              type="text"
+              value={host}
+              placeholder="amber.example.com"
+              onChange={(e) => setHost(e.target.value)}
+              onBlur={() => {
+                const h = hostOf(host);
+                if (host.trim() && !h) {
+                  toast("That is not a hostname - e.g. amber.example.com.");
+                  return;
+                }
+                if (h !== s.phone.publicHost) void save((x) => (x.phone.publicHost = h));
+              }}
+            />
+          </Row>
+          <Row
+            label={
+              <>
+                <span className={`dot ${dot}`} />
+                {label}
+              </>
+            }
+            hint={info.tunnel.message ?? undefined}
+          />
+          {info.publicUrl && (
+            <div className="row" style={{ alignItems: "flex-start", gap: 24 }}>
+              {info.publicQr && <div className="qr" dangerouslySetInnerHTML={{ __html: info.publicQr }} />}
+              <ol className="steps">
+                <li>
+                  In Amber on the phone: <b>Engine → Own server</b>.
+                </li>
+                <li>
+                  As the address, scan the code or type:
+                  <div className="url">{info.publicUrl}</div>
+                </li>
+                <li>It works at home and away. The cleanup through this PC (above) takes the same address.</li>
+              </ol>
+            </div>
+          )}
+        </>
+      )}
+    </Section>
   );
 }

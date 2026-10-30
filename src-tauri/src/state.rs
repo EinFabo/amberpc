@@ -37,6 +37,8 @@ pub struct Core {
     /// The settings window's microphone meter.
     pub mic_test: Mutex<Option<(Recorder, Instant)>>,
     pub phone: crate::phone::PhoneApi,
+    /// cloudflared, for the phone API from anywhere.
+    pub tunnel: crate::tunnel::Tunnel,
     /// The smart cleanup's local model.
     pub llm: crate::llm::Llm,
     /// How long recognition takes per engine and model on this PC.
@@ -70,6 +72,7 @@ impl Core {
             downloads: Mutex::new(HashMap::new()),
             mic_test: Mutex::new(None),
             phone: crate::phone::PhoneApi::default(),
+            tunnel: crate::tunnel::Tunnel::default(),
             llm: crate::llm::Llm::default(),
             estimates: amber_core::estimate::Estimates::load(&paths_root.join("estimates.json")),
             memory: crate::memory::Memory::load(&paths_root, &settings_snapshot),

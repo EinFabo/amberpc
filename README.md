@@ -132,7 +132,11 @@ enter in the phone's *Engine → Own server* (as text and as a QR code), e.g.
 `http://192.168.178.30:8765/<key>/v1`.
 
 - OpenAI-compatible: `POST /v1/audio/transcriptions` (multipart, WAV) answers `{"text": …}`,
-  `GET /v1/models` lists `amber-pc`. Recognition uses the engine set on the Engine page.
+  `GET /v1/models` lists `amber-pc` and `amber-cleanup`. Recognition uses the engine set on
+  the Engine page.
+- `POST /v1/chat/completions` answers the phone's own cleanup (Amber for Android 0.17 and
+  later asks for it separately, with its styles per app) with the PC's cleanup model - local
+  or the provider under Cleanup. Any model name works; the PC uses its own model and fields.
 - The phone's own-server engine has no API key field, so the access key is part of the
   path; a `Bearer` header with the key works too. A new key locks out old addresses.
 - Only devices in the private network (192.168/16, 10/8, 172.16/12, Tailscale's 100.64/10,
@@ -140,8 +144,14 @@ enter in the phone's *Engine → Own server* (as text and as a QR code), e.g.
   firewall.
 - Silence answers `{"text": ""}`, which the phone's *Test connection* counts as success.
 - The PC's cleanup applies to the phone's dictations too (switch on the Phone page): fillers
-  out, and the smart cleanup if it is on - no update of the phone app needed. Leave the
-  phone app's own "Chat model" empty, or the text is cleaned twice.
+  out, and the smart cleanup if it is on - for phone apps without their own cleanup. Off when
+  the phone cleans up through the PC itself, or the text is cleaned twice.
+- **From anywhere**: a Cloudflare Tunnel on the user's own domain. The user creates the
+  tunnel in Cloudflare (public hostname -> `http://localhost:<port>`) and pastes its token;
+  Amber downloads cloudflared (pinned, checksum-verified), keeps it running with the token in
+  its environment (never on the command line), and shows `https://<host>/<key>/v1` with a QR
+  code. Requests arrive from 127.0.0.1 through cloudflared; the access key keeps strangers
+  out, and refusals are logged at most every 10 s with the sender Cloudflare names.
 
 ## Inserting
 

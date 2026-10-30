@@ -128,6 +128,13 @@ pub struct Info {
     addresses: Vec<Address>,
     /// The first address as a QR code (SVG), to scan with the phone's camera.
     qr: Option<String>,
+    /// From anywhere: cloudflared's state, whether it is downloaded and has its token, and the
+    /// public address with its QR code.
+    tunnel: crate::tunnel::Status,
+    tunnel_downloaded: bool,
+    tunnel_token: bool,
+    public_url: Option<String>,
+    public_qr: Option<String>,
 }
 
 pub fn info(core: &Core) -> Info {
@@ -146,7 +153,19 @@ pub fn info(core: &Core) -> Info {
         Vec::new()
     };
     let qr = addresses.first().and_then(|a| qr_svg(&a.url));
-    Info { running, error, addresses, qr }
+    let public_url = (settings.tunnel && !settings.public_host.is_empty()).then(|| api::public_url(&settings.public_host, &key(core)));
+    let public_qr = public_url.as_deref().and_then(qr_svg);
+    Info {
+        running,
+        error,
+        addresses,
+        qr,
+        tunnel: core.tunnel.status(),
+        tunnel_downloaded: core.paths.layout.cloudflared_installed(),
+        tunnel_token: core.has_key(crate::tunnel::TOKEN_ID),
+        public_url,
+        public_qr,
+    }
 }
 
 fn qr_svg(text: &str) -> Option<String> {

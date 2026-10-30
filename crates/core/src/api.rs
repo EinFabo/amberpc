@@ -38,6 +38,37 @@ pub fn phone_url(ip: Ipv4Addr, port: u16, key: &str) -> String {
     format!("http://{ip}:{port}/{key}/v1")
 }
 
+/// What the user typed as the tunnel's hostname, as a bare hostname: "https://Amber.Example.com/x"
+/// -> "amber.example.com". Empty if it is none.
+pub fn public_host(typed: &str) -> String {
+    let t = typed.trim();
+    let t = t.split_once("://").map_or(t, |(_, rest)| rest);
+    let host = t.split(['/', '?', '#']).next().unwrap_or("").split(':').next().unwrap_or("").trim_end_matches('.').to_ascii_lowercase();
+    let valid = host.contains('.')
+        && host.len() <= 253
+        && host.split('.').all(|label| !label.is_empty() && label.len() <= 63 && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    if valid {
+        host
+    } else {
+        String::new()
+    }
+}
+
+/// The address the phone gets through the tunnel - HTTPS, Cloudflare holds the certificate.
+pub fn public_url(host: &str, key: &str) -> String {
+    format!("https://{host}/{key}/v1")
+}
+
+/// The tunnel token out of whatever was pasted - the token alone, or the whole install command
+/// Cloudflare shows ("cloudflared.exe service install eyJh...").
+pub fn tunnel_token(pasted: &str) -> Option<String> {
+    pasted
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c| c == '"' || c == '\''))
+        .find(|w| w.starts_with("eyJ") && w.len() >= 100 && w.chars().all(|c| c.is_ascii_alphanumeric() || "-_=+/".contains(c)))
+        .map(str::to_string)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     Health,
@@ -211,13 +242,33 @@ pub fn start_with(addr: SocketAddr, hooks: Hooks, limits: Limits) -> std::io::Re
     Server::start(addr, limits, is_local_peer, Arc::new(move |req: &mut Request| handle(req, &hooks, &busy)))
 }
 
+/// Refusals go to the log at most every 10 s, with a count of the rest - an address reachable
+/// from the internet (the tunnel) draws scanners.
+fn note_refused(hooks: &Hooks, peer: &str) {
+    static LAST: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    match last.as_mut() {
+        Some((at, quiet)) if at.elapsed() < std::time::Duration::from_secs(10) => *quiet += 1,
+        _ => {
+            let quiet = last.map_or(0, |(_, n)| n);
+            let more = if quiet > 0 { format!(", {quiet} more before") } else { String::new() };
+            (hooks.log)(format!("phone API: refused {peer} (wrong key{more})"));
+            *last = Some((Instant::now(), 0));
+        }
+    }
+}
+
 fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>) -> (u16, serde_json::Value) {
-    let peer = req.peer;
+    // Through the tunnel every request comes from 127.0.0.1; Cloudflare names the real sender.
+    let peer = match req.header("CF-Connecting-IP").filter(|_| req.peer.is_loopback()) {
+        Some(real) => format!("{} via the tunnel", real.trim()),
+        None => req.peer.to_string(),
+    };
     let bearer = req.header("Authorization").and_then(|v| v.strip_prefix("Bearer ")).map(|v| v.trim().to_string());
     match route(&req.method, &req.target, bearer.as_deref(), &(hooks.key)()) {
         Err((status, message)) => {
             if status == 401 {
-                (hooks.log)(format!("phone API: refused {peer} (wrong key)"));
+                note_refused(hooks, &peer);
             }
             (status, error_body(message, if status == 401 { "invalid_api_key" } else { "not_found" }))
         }
@@ -259,12 +310,12 @@ fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>) -> (u16, serde_jso
             };
             let content_type = req.header("Content-Type").unwrap_or("").to_string();
             let _one_at_a_time = busy.lock().unwrap_or_else(|e| e.into_inner());
-            transcribe(&content_type, &body, peer, hooks)
+            transcribe(&content_type, &body, &peer, hooks)
         }
     }
 }
 
-fn transcribe(content_type: &str, body: &[u8], peer: IpAddr, hooks: &Hooks) -> (u16, serde_json::Value) {
+fn transcribe(content_type: &str, body: &[u8], peer: &str, hooks: &Hooks) -> (u16, serde_json::Value) {
     let started = Instant::now();
     let parts = match parse_multipart(content_type, body) {
         Ok(p) => p,
@@ -673,6 +724,20 @@ mod tests {
         let mut answer = String::new();
         let _ = third.read_to_string(&mut answer);
         assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
+    }
+
+    #[test]
+    fn tunnel_hostname_and_token() {
+        assert_eq!(public_host(" https://Amber.Example.com/abc/v1 "), "amber.example.com");
+        assert_eq!(public_host("amber.h-network.org"), "amber.h-network.org");
+        assert_eq!(public_host("amber.example.com:443"), "amber.example.com");
+        assert_eq!(public_host("localhost"), "", "a public name has a dot");
+        assert_eq!(public_host("amber example.com"), "");
+        assert_eq!(public_url("amber.example.com", "k3y"), "https://amber.example.com/k3y/v1");
+        let token = format!("eyJhIjoi{}", "x".repeat(150));
+        assert_eq!(tunnel_token(&token).as_deref(), Some(token.as_str()));
+        assert_eq!(tunnel_token(&format!("cloudflared.exe service install {token}")).as_deref(), Some(token.as_str()));
+        assert_eq!(tunnel_token("hallo"), None);
     }
 
     #[test]

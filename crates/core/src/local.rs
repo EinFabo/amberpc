@@ -345,6 +345,22 @@ pub fn recommend(has_nvidia: bool, threads: u32, ram_mb: u64) -> (&'static str, 
 }
 
 /// Where downloads live: `<root>/runtime/<id>/` and `<root>/models/<file>`.
+/// cloudflared, which carries the phone API through a Cloudflare Tunnel - from GitHub,
+/// pinned like everything else Amber downloads.
+pub struct Tool {
+    pub version: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+    pub size_mb: u32,
+}
+
+pub const CLOUDFLARED: Tool = Tool {
+    version: "2026.10.0",
+    url: "https://github.com/cloudflare/cloudflared/releases/download/2026.10.0/cloudflared-windows-amd64.exe",
+    sha256: "86aee4017b26625cee8484c113558f48effa4cd47f7aa05fcf425604e5d2b23c",
+    size_mb: 53,
+};
+
 #[derive(Clone, Debug)]
 pub struct Layout {
     pub root: PathBuf,
@@ -360,6 +376,15 @@ impl Layout {
     pub fn server_exe(&self, rt: &Runtime) -> PathBuf {
         self.runtime_dir(rt).join(SERVER_EXE)
     }
+    /// Named by version: a newer one is a new download, never a half-replaced file.
+    pub fn cloudflared_exe(&self) -> PathBuf {
+        self.root.join("tools").join(format!("cloudflared-{}.exe", CLOUDFLARED.version))
+    }
+
+    pub fn cloudflared_installed(&self) -> bool {
+        self.cloudflared_exe().is_file()
+    }
+
     pub fn model_path(&self, m: &Model) -> PathBuf {
         self.root.join("models").join(m.file)
     }

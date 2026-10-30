@@ -54,7 +54,7 @@ export interface Settings {
   autoUpdate: boolean;
   logText: boolean;
   onboarded: boolean;
-  phone: { enabled: boolean; port: number; cleanup: boolean };
+  phone: { enabled: boolean; port: number; cleanup: boolean; tunnel: boolean; publicHost: string };
   profiles: Profile[];
   history: boolean;
   historyDays: number;
@@ -146,6 +146,11 @@ export interface PhoneInfo {
   error?: string | null;
   addresses: { name: string; url: string }[];
   qr?: string | null;
+  tunnel: { state: "off" | "setup" | "starting" | "connected" | "failed"; message?: string | null };
+  tunnelDownloaded: boolean;
+  tunnelToken: boolean;
+  publicUrl?: string | null;
+  publicQr?: string | null;
 }
 
 export interface CleanupPreview {

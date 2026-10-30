@@ -17,6 +17,7 @@ mod process;
 mod secrets;
 mod state;
 mod tray;
+mod tunnel;
 mod updates;
 mod whisper;
 
@@ -81,7 +82,10 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     control::start(app);
     if settings.phone.enabled {
         let app = app.clone();
-        std::thread::spawn(move || phone::sync(&app));
+        std::thread::spawn(move || {
+            phone::sync(&app);
+            tunnel::sync(&app);
+        });
     }
     updates::spawn(app);
     Ok(())
@@ -130,6 +134,7 @@ pub fn run() {
             commands::recognize_again,
             commands::stats_summary,
             commands::stats_clear,
+            commands::set_tunnel_token,
         ])
         .build(tauri::generate_context!())
         .expect("Amber failed to start")

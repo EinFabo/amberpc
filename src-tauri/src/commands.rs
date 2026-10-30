@@ -127,7 +127,10 @@ pub fn save_settings(app: AppHandle, core: State<Core>, settings: Settings) -> R
     if after.phone != before.phone {
         // Stopping may wait for a phone dictation in progress.
         let app = app.clone();
-        std::thread::spawn(move || crate::phone::sync(&app));
+        std::thread::spawn(move || {
+            crate::phone::sync(&app);
+            crate::tunnel::sync(&app);
+        });
     }
     let _ = app.emit("settings-changed", &after);
     match problem {
@@ -327,6 +330,8 @@ pub enum Kind {
     Model,
     LlmRuntime,
     LlmModel,
+    /// cloudflared, for the phone API from anywhere (id "cloudflared").
+    Tunnel,
 }
 
 impl Kind {
@@ -336,6 +341,7 @@ impl Kind {
             Kind::Model => "model",
             Kind::LlmRuntime => "llmRuntime",
             Kind::LlmModel => "llmModel",
+            Kind::Tunnel => "tunnel",
         }
     }
     fn is_llm(self) -> bool {
@@ -379,6 +385,10 @@ fn plan(core: &Core, kind: Kind, id: &str) -> Result<(Vec<Fetch>, Option<Install
         Kind::Model => {
             let m = local::model(id).ok_or("Unknown model.")?;
             (vec![Fetch { url: m.url(), sha256: m.sha256, file: layout.model_path(m), size: m.size_mb as u64 * MB }], None)
+        }
+        Kind::Tunnel => {
+            let t = &local::CLOUDFLARED;
+            (vec![Fetch { url: t.url.into(), sha256: t.sha256, file: layout.cloudflared_exe(), size: t.size_mb as u64 * MB }], None)
         }
         Kind::LlmRuntime => {
             let rt = local::llm_runtime(id).ok_or("Unknown runtime.")?;
@@ -474,12 +484,15 @@ pub fn download(app: AppHandle, core: State<Core>, kind: Kind, id: String, selec
                         Kind::Model => s.local.model = id.clone(),
                         Kind::LlmRuntime => s.cleanup.local_runtime = id.clone(),
                         Kind::LlmModel => s.cleanup.local_model = id.clone(),
+                        Kind::Tunnel => {}
                     });
                     let _ = app.emit("settings-changed", after);
                 }
                 // If this completed what the settings ask for, load it right away.
                 let s = core.settings();
-                if kind.is_llm() {
+                if kind == Kind::Tunnel {
+                    crate::tunnel::sync(&app);
+                } else if kind.is_llm() {
                     if crate::llm::wants_local(&s) {
                         let _ = core.llm.ensure(&app);
                     }
@@ -514,12 +527,14 @@ pub async fn remove_download(app: AppHandle, kind: Kind, id: String) -> Result<(
             Kind::Model => core.whisper.stop_model(&app, &id),
             Kind::LlmRuntime => core.llm.stop_runtime(&app, &id),
             Kind::LlmModel => core.llm.stop_model(&app, &id),
+            Kind::Tunnel => core.tunnel.stop(),
         }
         match kind {
             Kind::Runtime => std::fs::remove_dir_all(layout.runtime_dir(local::runtime(&id).ok_or("Unknown runtime.")?)),
             Kind::Model => std::fs::remove_file(layout.model_path(local::model(&id).ok_or("Unknown model.")?)),
             Kind::LlmRuntime => std::fs::remove_dir_all(layout.llm_runtime_dir(local::llm_runtime(&id).ok_or("Unknown runtime.")?)),
             Kind::LlmModel => std::fs::remove_file(layout.llm_model_path(local::llm_model(&id).ok_or("Unknown model.")?)),
+            Kind::Tunnel => std::fs::remove_file(layout.cloudflared_exe()),
         }
         .map_err(|e| format!("Could not delete: {e}"))
     })
@@ -616,6 +631,21 @@ pub async fn phone_new_key(app: AppHandle) -> Result<crate::phone::Info, String>
     crate::phone::new_key(&core)?;
     crate::diag::info("phone API: new key");
     Ok(crate::phone::info(&core))
+}
+
+/// The Cloudflare tunnel's token - pasted alone or as the whole install command Cloudflare
+/// shows; None removes it.
+#[tauri::command]
+pub fn set_tunnel_token(app: AppHandle, core: State<Core>, token: Option<String>) -> Result<(), String> {
+    let token = match token.filter(|t| !t.trim().is_empty()) {
+        Some(pasted) => Some(amber_core::api::tunnel_token(&pasted).ok_or(
+            "That is not a tunnel token - copy the token (it starts with \"eyJ\") or the whole install command from Cloudflare.",
+        )?),
+        None => None,
+    };
+    core.set_key(crate::tunnel::TOKEN_ID, token)?;
+    std::thread::spawn(move || crate::tunnel::sync(&app));
+    Ok(())
 }
 
 /// Loads the cleanup model now instead of on the first dictation.
