@@ -579,18 +579,27 @@ mod tests {
         let limits = Limits { io_timeout: Duration::from_millis(300), head_deadline: Duration::from_millis(800), ..Limits::default() };
         let (srv, _, _) = server_with(Ok(String::new()), limits);
         let mut slow = TcpStream::connect(srv.addr).unwrap();
-        slow.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let t0 = Instant::now();
-        for b in b"POST /testkey/v1/audio" {
-            if slow.write_all(&[*b]).is_err() {
-                break;
+        // A byte every 100 ms, well inside the 300 ms per read, for some 3.7 s.
+        let mut writer = slow.try_clone().unwrap();
+        let trickle = std::thread::spawn(move || {
+            for b in b"POST /testkey/v1/audio/transcriptions" {
+                if writer.write_all(&[*b]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
             }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let mut answer = String::new();
-        let _ = slow.read_to_string(&mut answer);
-        assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
-        assert!(t0.elapsed() < Duration::from_millis(2_500), "closed after {:?}", t0.elapsed());
+        });
+        slow.set_read_timeout(Some(Duration::from_secs(6))).unwrap();
+        let t0 = Instant::now();
+        let mut answer = Vec::new();
+        let _ = slow.read_to_end(&mut answer);
+        let closed = t0.elapsed();
+        // Windows resets a connection that is still written to after it was closed, and the
+        // answer may be lost with it - the closing in time is what counts.
+        let answer = String::from_utf8_lossy(&answer);
+        assert!(answer.is_empty() || answer.starts_with("HTTP/1.1 408"), "{answer}");
+        assert!(closed < Duration::from_millis(2_000), "closed after {closed:?}");
+        let _ = trickle.join();
     }
 
     #[test]
