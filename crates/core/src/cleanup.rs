@@ -224,9 +224,10 @@ impl ChatCleaner {
             "messages": messages,
             "temperature": request.get("temperature").filter(|t| t.is_number()).cloned().unwrap_or(json!(0)),
         });
-        if let Some(n) = request.get("max_tokens").and_then(Value::as_u64) {
-            body["max_tokens"] = json!(n.min(16_384));
-        }
+        // Bounded whether asked for or not: a cleanup is about as long as the dictation, and a
+        // stolen address must not run up the bill of a paid provider.
+        let asked = request.get("max_tokens").and_then(Value::as_u64).unwrap_or(FORWARD_TOKENS);
+        body["max_tokens"] = json!(asked.min(MAX_FORWARD_TOKENS));
         self.post(body)
     }
 
@@ -250,6 +251,10 @@ impl ChatCleaner {
         serde_json::from_str(&raw).map_err(|e| fail("The cleanup answer could not be read.", &format!("{e}")))
     }
 }
+
+/// A forwarded request's length when it names none, and the most it may ask for.
+const FORWARD_TOKENS: u64 = 2_048;
+const MAX_FORWARD_TOKENS: u64 = 4_096;
 
 fn fail(message: &str, detail: &str) -> SttError {
     SttError { kind: ErrorKind::BadResponse, message: message.into(), detail: detail.chars().take(300).collect() }
@@ -305,10 +310,17 @@ mod tests {
         assert_eq!(body["model"], "openai/gpt-oss-20b");
         assert_eq!(body["reasoning_effort"], "low", "this side's extra fields");
         assert!(body.get("chat_template_kwargs").is_none(), "not the phone's, meant for its own model");
-        assert_eq!(body["max_tokens"], 16_384);
+        assert_eq!(body["max_tokens"], 4_096);
         assert_eq!(body["messages"], phone["messages"]);
 
         assert_eq!(c.forward(&json!({ "messages": [] })).unwrap_err().kind, ErrorKind::BadResponse);
+
+        // No length asked for: a bounded one all the same.
+        let (url, rx) = serve(vec![reply("Hallo.", "stop")]);
+        let c = ChatCleaner::new(&url, "", "m", None);
+        c.forward(&json!({ "messages": [{ "role": "user", "content": "x" }] })).unwrap();
+        let body: Value = serde_json::from_slice(&rx.recv().unwrap().body).unwrap();
+        assert_eq!(body["max_tokens"], 2_048);
     }
 
     #[test]

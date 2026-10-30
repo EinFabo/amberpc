@@ -293,9 +293,9 @@ pub fn cleaner(app: &AppHandle, s: &Settings, wait: bool) -> Result<ChatCleaner,
 /// spoken punctuation, German commas), and - when the smart cleanup runs for [profile]'s program - the
 /// model's tidy-up in that program's style. A failing model leaves the text as it was: never
 /// lost, never stuck. Returns why the model was skipped, if it was.
-pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str, profile: Option<&Profile>) -> (String, Option<String>) {
+pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str, profile: Option<&Profile>, snippets: bool) -> (String, Option<String>) {
     // A snippet's phrase on its own: its saved text, exactly as saved.
-    if let Some(snippet) = amber_core::snippets::find(&s.snippets, recognized) {
+    if let Some(snippet) = amber_core::snippets::find(&s.snippets, recognized).filter(|_| snippets) {
         // The trigger is what was just said: logged only where dictated text is.
         crate::diag::info(if s.log_text { format!("snippet \"{}\"", snippet.trigger) } else { "snippet inserted".to_string() });
         return (snippet.text.clone(), None);

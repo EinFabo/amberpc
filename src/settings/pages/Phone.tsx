@@ -49,7 +49,14 @@ export function PhonePage(props: PageProps) {
         the PC as its own server.
       </p>
       <Section>
-        <Row label="Let Amber on the phone use this PC" hint="Opens a port in your home network. Only devices in your own network with the address below get in.">
+        <Row
+          label="Let Amber on the phone use this PC"
+          hint={
+            s.phone.tunnel
+              ? "Opens a port in your home network, and the tunnel below reaches it from the internet: whoever has the address with its key gets in - keep it like a password."
+              : "Opens a port in your home network. Only devices in your own network with the address below get in."
+          }
+        >
           <Switch on={s.phone.enabled} onChange={(v) => save((x) => (x.phone.enabled = v))} />
         </Row>
         {s.phone.enabled && (
@@ -227,7 +234,7 @@ function TunnelSection({ s, save, toast, info, reload }: PageProps & { info: Pho
               </li>
               <li>Copy the install command it shows for Windows - or only the token in it - and paste it below.</li>
               <li>
-                Add a <b>public hostname</b>, e.g. <b>amber</b>.your-domain, service <b>HTTP</b>, URL <b>localhost:{s.phone.port}</b>.
+                Add a <b>public hostname</b>, e.g. <b>amber</b>.your-domain, service <b>HTTP</b>, URL <b>127.0.0.1:{s.phone.port}</b>. Pick a name that is hard to guess, like amber-x7k2.
               </li>
               <li>Enter that hostname below. The phone gets its address with the QR code.</li>
             </ol>
