@@ -2,6 +2,8 @@
 //! NAS or a small Linux box, with downloadable models for recognition and cleanup.
 
 mod catalog;
+mod child;
+mod cleanup;
 mod config;
 mod cpu;
 mod paths;

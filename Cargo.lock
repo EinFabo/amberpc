@@ -101,11 +101,14 @@ dependencies = [
  "amber-core",
  "clap",
  "dirs 6.0.0",
+ "libc",
  "serde",
+ "serde_json",
  "sysinfo",
  "tempfile",
  "toml 0.8.2",
  "whisper-rs",
+ "windows 0.61.3",
 ]
 
 [[package]]
