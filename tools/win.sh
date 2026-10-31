@@ -45,4 +45,7 @@ case "${1:-check}" in
   dev) CMD="npm run app" ;;
   *) CMD="$*" ;;
 esac
-cd /mnt/c && powershell.exe -NoProfile -Command "Set-Location '$WIN_DIR'; \$env:CARGO_TERM_COLOR='never'; $CMD; exit \$LASTEXITCODE" 2>&1 | tr -d '\r'
+# libopus (the phone's compressed uploads) is built with cmake: Visual Studio's own when none
+# is on the PATH.
+FIND_CMAKE="if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { \$c = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022\*\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' -ErrorAction SilentlyContinue | Select-Object -First 1; if (\$c) { \$env:Path = \$c.DirectoryName + ';' + \$env:Path } }"
+cd /mnt/c && powershell.exe -NoProfile -Command "Set-Location '$WIN_DIR'; \$env:CARGO_TERM_COLOR='never'; $FIND_CMAKE; $CMD; exit \$LASTEXITCODE" 2>&1 | tr -d '\r'

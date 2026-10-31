@@ -207,8 +207,9 @@ pub fn decode_upload(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
     }
 }
 
-/// Ogg Opus (RFC 7845), decoded straight to 16 kHz mono; the encoder's lead-in (pre-skip) is
-/// dropped and its output gain applied.
+/// Ogg Opus (RFC 7845), decoded straight to 16 kHz mono by libopus; the encoder's lead-in
+/// (pre-skip) is dropped and its output gain applied. The length is checked from the packets'
+/// own headers before anything is decoded - a flood of tiny packets costs no decoding.
 fn decode_ogg_opus(bytes: &[u8]) -> Result<Vec<f32>, String> {
     let broken = |what: &str| format!("broken Ogg Opus: {what}");
     let mut reader = ogg::PacketReader::new(std::io::Cursor::new(bytes));
@@ -216,6 +217,10 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<Vec<f32>, String> {
     let head = next()?.ok_or_else(|| broken("empty"))?.data;
     if head.len() < 19 || &head[..8] != b"OpusHead" {
         return Err("Ogg, but not Opus - Amber reads WAV or Ogg Opus".into());
+    }
+    // Versions 0-15 share the layout read here (RFC 7845, 5.1).
+    if head[8] >> 4 != 0 {
+        return Err(broken("an OpusHead version this server does not know"));
     }
     let (channels, mapping) = (head[9], head[18]);
     if !(1..=2).contains(&channels) || mapping != 0 {
@@ -226,17 +231,24 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<Vec<f32>, String> {
     let gain = 10f32.powf(i16::from_le_bytes([head[16], head[17]]) as f32 / (20.0 * 256.0));
     next()?.filter(|tags| tags.data.starts_with(b"OpusTags")).ok_or_else(|| broken("no OpusTags"))?;
 
-    // Decoding to one channel mixes a stereo stream down.
-    let mut decoder = opus_decoder::OpusDecoder::new(TARGET_RATE, 1).map_err(|e| broken(&e.to_string()))?;
-    let max = (MAX_DECODE_SECONDS * TARGET_RATE as u64) as usize;
-    let mut frame = vec![0f32; decoder.max_frame_size_per_channel()];
-    let mut samples = Vec::new();
+    let mut packets = Vec::new();
+    let mut length = 0u64;
     while let Some(packet) = next()? {
-        let n = decoder.decode_float(&packet.data, &mut frame, false).map_err(|e| broken(&e.to_string()))?;
-        samples.extend(frame[..n].iter().map(|s| s * gain));
-        if samples.len() > max + skip {
+        // Counted at 48 kHz, as the packet headers say.
+        length += opus::packet::get_nb_samples(&packet.data, 48_000).map_err(|e| broken(&e.to_string()))? as u64;
+        if length > MAX_DECODE_SECONDS * 48_000 {
             return Err(format!("longer than {} minutes", MAX_DECODE_SECONDS / 60));
         }
+        packets.push(packet.data);
+    }
+    // Decoding to one channel mixes a stereo stream down.
+    let mut decoder = opus::Decoder::new(TARGET_RATE, opus::Channels::Mono).map_err(|e| broken(&e.to_string()))?;
+    // The longest Opus packet: 120 ms.
+    let mut frame = vec![0f32; TARGET_RATE as usize * 120 / 1000];
+    let mut samples = Vec::with_capacity((length / 3) as usize);
+    for packet in &packets {
+        let n = decoder.decode_float(packet, &mut frame, false).map_err(|e| broken(&e.to_string()))?;
+        samples.extend(frame[..n].iter().map(|s| s * gain));
     }
     if samples.len() <= skip {
         return Err(broken("no audio"));
@@ -342,6 +354,37 @@ mod tests {
     }
 
     #[test]
+    fn speech_mode_opus_is_decoded_without_bursts() {
+        // 20 s of a voice-like signal, libopus in its speech mode (SILK, 16 kbit/s, 60 ms
+        // frames). libopus' own decoder peaks at 0.76; a decoder that bursts to full scale
+        // (opus-decoder 0.1.1 did) would feed whisper noise to hallucinate on.
+        let (samples, _) = decode_upload(include_bytes!("../tests/data/silk-voice-16k-60ms.ogg")).unwrap();
+        assert!((19 * 16_000..21 * 16_000).contains(&samples.len()), "{}", samples.len());
+        let peak = samples.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(peak < 0.9, "peak {peak}");
+    }
+
+    #[test]
+    fn a_flood_of_tiny_packets_is_refused_before_decoding() {
+        // 16 minutes of 1-byte CELT packets (20 ms each) in 140 KB: refused from the packets'
+        // durations, not after minutes of decoding.
+        let mut file = Vec::new();
+        {
+            let mut w = ogg::PacketWriter::new(std::io::Cursor::new(&mut file));
+            let head = TONE_OGG.windows(8).position(|x| x == b"OpusHead").unwrap();
+            w.write_packet(TONE_OGG[head..head + 19].to_vec(), 7, ogg::PacketWriteEndInfo::EndPage, 0).unwrap();
+            w.write_packet(b"OpusTags\0\0\0\0\0\0\0\0".to_vec(), 7, ogg::PacketWriteEndInfo::EndPage, 0).unwrap();
+            for i in 0..48_000u64 {
+                w.write_packet(vec![31 << 3], 7, ogg::PacketWriteEndInfo::NormalPacket, (i + 1) * 960).unwrap();
+            }
+        }
+        let started = std::time::Instant::now();
+        let err = decode_upload(&file).unwrap_err();
+        assert!(err.contains("minutes"), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_millis(500), "{:?}", started.elapsed());
+    }
+
+    #[test]
     fn uploads_are_told_apart_by_their_first_bytes() {
         let wav = encode_wav(&[0.1; 1_600], 16_000);
         assert_eq!(decode_upload(&wav).unwrap().0.len(), 1_600);
@@ -361,6 +404,11 @@ mod tests {
             flipped[i] ^= 0x5a;
         }
         let _ = decode_upload(&flipped);
+        // A future OpusHead version this reader does not know.
+        let mut v2 = TONE_OGG.to_vec();
+        let at = v2.windows(8).position(|w| w == b"OpusHead").unwrap();
+        v2[at + 8] = 0x10;
+        assert!(decode_upload(&v2).is_err(), "version 16");
         // An Ogg file that is not Opus (Vorbis, say).
         let mut vorbis = TONE_OGG.to_vec();
         let at = vorbis.windows(8).position(|w| w == b"OpusHead").unwrap();

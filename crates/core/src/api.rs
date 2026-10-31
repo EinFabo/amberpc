@@ -470,16 +470,18 @@ fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>, guard: &Mutex<Guar
                 Ok(b) => b,
                 Err((status, message)) => return (status, error_body(message, "invalid_request_error")),
             };
-            let content_type = req.header("Content-Type").unwrap_or("").to_string();
-            let _one_at_a_time = busy.lock().unwrap_or_else(|e| e.into_inner());
             // Over the tunnel from mobile data the upload can take longer than the recognition.
+            // Measured here, before any wait for another transcription.
             let upload = format!("{} KB uploaded in {} ms", body.len() / 1024, req.accepted.elapsed().as_millis());
-            transcribe(&content_type, &body, &peer, &upload, hooks)
+            let content_type = req.header("Content-Type").unwrap_or("").to_string();
+            transcribe(&content_type, &body, &peer, &upload, hooks, busy)
         }
     }
 }
 
-fn transcribe(content_type: &str, body: &[u8], peer: &str, upload: &str, hooks: &Hooks) -> (u16, serde_json::Value) {
+/// Reads and decodes the upload, then waits its turn ([busy]) for the engine - decoding a
+/// large upload does not hold up the others.
+fn transcribe(content_type: &str, body: &[u8], peer: &str, upload: &str, hooks: &Hooks, busy: &Mutex<()>) -> (u16, serde_json::Value) {
     let started = Instant::now();
     let parts = match parse_multipart(content_type, body) {
         Ok(p) => p,
@@ -506,6 +508,7 @@ fn transcribe(content_type: &str, body: &[u8], peer: &str, upload: &str, hooks: 
     let options = TranscribeOptions::new(&field("language").unwrap_or_else(|| "auto".into()), &field("prompt").unwrap_or_default());
 
     let requested = field("model");
+    let _one_at_a_time = busy.lock().unwrap_or_else(|e| e.into_inner());
     let engine = match (hooks.engine)(requested.as_deref()) {
         Ok(e) => e,
         Err(e) => {

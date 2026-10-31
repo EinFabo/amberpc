@@ -87,7 +87,7 @@ weak uplink, and the server's log shows it (`... (640 KB uploaded in 7200 ms)`).
 - Whatever came in, the server resamples to 16 kHz mono itself - the rest of the request is
   the same.
 
-Amber for Windows from 0.4.2 and Amber Server take `"opus"` (decoded in pure Rust,
+Amber for Windows from 0.4.2 and Amber Server take `"opus"` (decoded by libopus,
 `crates/core/src/audio.rs`) and list it.
 
 ## Errors
