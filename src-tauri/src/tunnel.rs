@@ -22,6 +22,8 @@ use crate::state::Core;
 
 /// Where the token lives among the secrets.
 pub const TOKEN_ID: &str = "cloudflare-tunnel";
+/// `amber.exe --import-tunnel <file>`: tools/setup-tunnel.sh hands over token and hostname.
+pub const IMPORT_ARG: &str = "--import-tunnel";
 /// After cloudflared ended on its own: the next try.
 const RETRY: Duration = Duration::from_secs(30);
 
@@ -147,4 +149,48 @@ fn watch(app: &AppHandle, run: u64) {
             crate::diag::info("tunnel connected");
         }
     });
+}
+
+/// The file named after --import-tunnel, if the arguments have one.
+pub fn import_path(args: &[String]) -> Option<String> {
+    args.iter().position(|a| a == IMPORT_ARG).and_then(|i| args.get(i + 1)).cloned()
+}
+
+/// Takes what tools/setup-tunnel.sh prepared: the token, the hostname, and maybe a new access
+/// key. The file holds the token, so it is deleted right after reading - whatever it held.
+/// Then the phone API and the tunnel are switched on and the Phone page shows the address.
+pub fn import(app: &AppHandle, path: &str) {
+    let read = std::fs::metadata(path)
+        .map_err(|e| e.to_string())
+        .and_then(|m| if m.len() > 16 << 10 { Err("the file is too large".into()) } else { std::fs::read_to_string(path).map_err(|e| e.to_string()) });
+    let _ = std::fs::remove_file(path);
+    let result = read.and_then(|text| amber_core::api::parse_tunnel_import(&text)).and_then(|i| {
+        let core = app.state::<Core>();
+        core.set_key(TOKEN_ID, Some(i.token))?;
+        if i.new_key {
+            crate::phone::new_key(&core)?;
+        }
+        let after = core.update_settings(|s| {
+            s.phone.enabled = true;
+            s.phone.tunnel = true;
+            s.phone.public_host = i.host.clone();
+        });
+        let _ = tauri::Emitter::emit(app, "settings-changed", &after);
+        Ok(i.host)
+    });
+    match result {
+        Ok(host) => {
+            crate::diag::info(format!("tunnel set up for {host}"));
+            let app2 = app.clone();
+            std::thread::spawn(move || {
+                crate::phone::sync(&app2);
+                sync(&app2);
+            });
+            crate::bubble::open_settings(app, Some("phone"));
+        }
+        Err(e) => {
+            crate::diag::warn(format!("tunnel setup failed: {e}"));
+            crate::notify(app, "Amber", &format!("The tunnel could not be set up: {e}"));
+        }
+    }
 }
