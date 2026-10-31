@@ -118,6 +118,15 @@ enum ServiceAction {
 
 fn main() {
     let cli = Cli::parse();
+    // `amber-server url | head` ends quietly, like other command-line tools - not with a
+    // panic. Not for `run`: the server must not die when a log reader goes away.
+    #[cfg(unix)]
+    if !matches!(cli.command, Command::Run { .. }) {
+        // SAFETY: resets one signal to its default before any thread starts.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
     let result = match cli.command {
         Command::Config { action } => config_command(action),
         Command::Setup { quick } => setup_command(quick),
