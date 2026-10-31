@@ -7,6 +7,7 @@ mod cleanup;
 mod config;
 mod cpu;
 mod paths;
+mod serve;
 mod setup;
 mod speech;
 
@@ -110,6 +111,7 @@ fn main() {
     let result = match cli.command {
         Command::Config { action } => config_command(action),
         Command::Setup { quick } => setup_command(quick),
+        Command::Run => serve::serve(),
         Command::Models { action } => models_command(action),
         Command::Cleanup { action } => cleanup_command(action),
         _ => Err("not built yet".to_string()),
