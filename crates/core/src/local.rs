@@ -352,7 +352,95 @@ pub fn recommend(has_nvidia: bool, threads: u32, ram_mb: u64) -> (&'static str, 
     }
 }
 
-/// Where downloads live: `<root>/runtime/<id>/` and `<root>/models/<file>`.
+/// llama.cpp's own builds of llama-server, for Amber Server's cleanup: per system and backend,
+/// pinned to [LLAMA_CPP_BUILD] like the desktop's runtimes.
+pub struct LlamaBuild {
+    /// "linux" or "windows".
+    pub os: &'static str,
+    /// "cpu" or "vulkan".
+    pub backend: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+    pub size_mb: u32,
+    /// Where llama-server sits in the unpacked archive.
+    pub exe: &'static str,
+}
+
+pub const LLAMA_SERVER_BUILDS: [LlamaBuild; 4] = [
+    LlamaBuild {
+        os: "linux",
+        backend: "cpu",
+        url: "https://github.com/ggml-org/llama.cpp/releases/download/b11981/llama-b11981-bin-ubuntu-x64.tar.gz",
+        sha256: "78986f25ddf08ba9b2d81b53ab6a6d68ac9548ad8022c19df75920a55f6d84ac",
+        size_mb: 22,
+        exe: "llama-b11981/llama-server",
+    },
+    LlamaBuild {
+        os: "linux",
+        backend: "vulkan",
+        url: "https://github.com/ggml-org/llama.cpp/releases/download/b11981/llama-b11981-bin-ubuntu-vulkan-x64.tar.gz",
+        sha256: "5fca386f7256e496cfd1edefe63c00082267e1394c6136b6946a2d70003d3666",
+        size_mb: 34,
+        exe: "llama-b11981/llama-server",
+    },
+    LlamaBuild {
+        os: "windows",
+        backend: "cpu",
+        url: "https://github.com/ggml-org/llama.cpp/releases/download/b11981/llama-b11981-bin-win-cpu-x64.zip",
+        sha256: "626dd4136947fb9cdf755523fefcad3d414858a4beca06ce424fcd3ee0a948c9",
+        size_mb: 24,
+        exe: "llama-server.exe",
+    },
+    LlamaBuild {
+        os: "windows",
+        backend: "vulkan",
+        url: "https://github.com/ggml-org/llama.cpp/releases/download/b11981/llama-b11981-bin-win-vulkan-x64.zip",
+        sha256: "29419511baa97ccb001111a24de4a9e1d62251075749e2a8be56219b51dc21ce",
+        size_mb: 36,
+        exe: "llama-server.exe",
+    },
+];
+
+pub fn llama_build(os: &str, backend: &str) -> Option<&'static LlamaBuild> {
+    LLAMA_SERVER_BUILDS.iter().find(|b| b.os == os && b.backend == backend)
+}
+
+/// Unpacks a `.zip` or `.tar.gz` into [dest], replacing what was there only once all of it
+/// is out. Paths that would leave [dest] are refused (zip: `enclosed_name`; tar: `unpack`'s
+/// own check); a tar's links and modes are kept - llama.cpp's Linux builds need both.
+pub fn unpack(archive: &Path, dest: &Path) -> Result<(), DownloadError> {
+    let staging = dest.with_extension("new");
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging)?;
+    let result = (|| {
+        let name = archive.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+            tar::Archive::new(flate2::read::GzDecoder::new(File::open(archive)?)).unpack(&staging)?;
+        } else {
+            let mut zip = zip::ZipArchive::new(File::open(archive)?).map_err(|e| DownloadError::Package(e.to_string()))?;
+            for i in 0..zip.len() {
+                let mut entry = zip.by_index(i).map_err(|e| DownloadError::Package(e.to_string()))?;
+                let Some(path) = entry.enclosed_name() else { continue };
+                let out = staging.join(path);
+                if entry.is_dir() {
+                    fs::create_dir_all(&out)?;
+                    continue;
+                }
+                if let Some(parent) = out.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                std::io::copy(&mut entry, &mut File::create(&out)?)?;
+            }
+        }
+        replace_dir(&staging, dest)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
 /// cloudflared, which carries the phone API through a Cloudflare Tunnel - from GitHub,
 /// pinned like everything else Amber downloads.
 pub struct Tool {
@@ -369,6 +457,7 @@ pub const CLOUDFLARED: Tool = Tool {
     size_mb: 53,
 };
 
+/// Where downloads live: `<root>/runtime/<id>/` and `<root>/models/<file>`.
 #[derive(Clone, Debug)]
 pub struct Layout {
     pub root: PathBuf,
@@ -824,4 +913,59 @@ mod tests {
         assert!(matches!(install_runtime(&zip_path, &dest, &RUNTIMES[0]), Err(DownloadError::Package(_))));
         assert!(!dest.exists() && !dest.with_extension("new").exists());
     }
+    #[test]
+    fn the_llama_builds_cover_both_systems() {
+        for (os, backend) in [("linux", "cpu"), ("linux", "vulkan"), ("windows", "cpu"), ("windows", "vulkan")] {
+            let b = llama_build(os, backend).unwrap_or_else(|| panic!("{os}/{backend}"));
+            assert!(b.url.starts_with("https://github.com/ggml-org/llama.cpp/releases/download/b11981/"), "{}", b.url);
+            assert!(b.sha256.len() == 64 && b.sha256.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(b.exe.ends_with(if os == "windows" { "llama-server.exe" } else { "llama-server" }));
+        }
+        assert_eq!(LLAMA_SERVER_BUILDS.len(), 4);
+        assert!(llama_build("macos", "cpu").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tar_gz_unpacks_with_its_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("t.tar.gz");
+        {
+            let gz = flate2::write::GzEncoder::new(File::create(&archive).unwrap(), flate2::Compression::fast());
+            let mut tar = tar::Builder::new(gz);
+            let mut h = tar::Header::new_gnu();
+            h.set_size(5);
+            h.set_mode(0o755);
+            h.set_cksum();
+            tar.append_data(&mut h, "pkg/llama-server", &b"hello"[..]).unwrap();
+            let mut l = tar::Header::new_gnu();
+            l.set_entry_type(tar::EntryType::Symlink);
+            l.set_size(0);
+            l.set_cksum();
+            tar.append_link(&mut l, "pkg/libllama.so", "llama-server").unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let dest = dir.path().join("out");
+        unpack(&archive, &dest).unwrap();
+        assert_eq!(fs::read(dest.join("pkg/llama-server")).unwrap(), b"hello");
+        assert_eq!(fs::read(dest.join("pkg/libllama.so")).unwrap(), b"hello", "the link points at its file");
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(fs::metadata(dest.join("pkg/llama-server")).unwrap().permissions().mode() & 0o111, 0, "still executable");
+    }
+
+    #[test]
+    fn a_zip_unpacks_flat() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("t.zip");
+        {
+            let mut z = zip::ZipWriter::new(File::create(&archive).unwrap());
+            z.start_file("llama-server.exe", zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut z, b"exe").unwrap();
+            z.finish().unwrap();
+        }
+        let dest = dir.path().join("out");
+        unpack(&archive, &dest).unwrap();
+        assert_eq!(fs::read(dest.join("llama-server.exe")).unwrap(), b"exe");
+    }
+
 }

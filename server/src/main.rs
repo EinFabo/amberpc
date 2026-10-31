@@ -1,7 +1,9 @@
 //! Amber Server: Amber's phone API without the desktop app (docs/phone-api.md) - for a PC, a
 //! NAS or a small Linux box, with downloadable models for recognition and cleanup.
 
+mod catalog;
 mod config;
+mod cpu;
 mod paths;
 mod speech;
 
@@ -104,6 +106,8 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Config { action } => config_command(action),
+        Command::Models { action } => models_command(action),
+        Command::Cleanup { action } => cleanup_command(action),
         _ => Err("not built yet".to_string()),
     };
     if let Err(e) = result {
@@ -112,9 +116,86 @@ fn main() {
     }
 }
 
-fn config_command(action: Option<ConfigAction>) -> Result<(), String> {
+/// The config, or the defaults before `setup` ran.
+fn current() -> Result<(std::path::PathBuf, Config), String> {
     let path = Config::path();
-    let mut config = if path.exists() { Config::load(&path)? } else { Config::default() };
+    let config = if path.exists() { Config::load(&path)? } else { Config::default() };
+    Ok((path, config))
+}
+
+fn models_command(action: Option<ModelAction>) -> Result<(), String> {
+    let (path, mut config) = current()?;
+    match action {
+        None => println!("{}", catalog::list_speech(&config, catalog::machine(&config))),
+        Some(ModelAction::Add { id }) => {
+            catalog::download_speech(&id)?;
+            println!("{id} is downloaded. Make it the default: amber-server models default {id}");
+        }
+        Some(ModelAction::Remove { id }) => {
+            let m = catalog::speech_model(&id)?;
+            catalog::removable(Some(&config.speech), &id, "models")?;
+            let file = paths::speech_dir().join(m.file);
+            if file.exists() {
+                std::fs::remove_file(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            }
+            println!("{id} removed.");
+        }
+        Some(ModelAction::Default { id }) => {
+            let m = catalog::speech_model(&id)?;
+            if !paths::model_ready(&paths::speech_dir(), m) {
+                return Err(format!("{id} is not downloaded - amber-server models add {id}"));
+            }
+            config.speech = id.clone();
+            config.save(&path)?;
+            println!("{id} is the default now (a running server picks it up on restart).");
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_command(action: Option<CleanupAction>) -> Result<(), String> {
+    let (path, mut config) = current()?;
+    match action {
+        None => println!("{}", catalog::list_cleanup(&config)),
+        Some(CleanupAction::Add { id }) => {
+            catalog::download_cleanup(&id, catalog::machine(&config).gpu)?;
+            if config.cleanup.is_none() {
+                config.cleanup = Some(id.clone());
+                config.save(&path)?;
+                println!("{id} is downloaded and the cleanup's default.");
+            } else {
+                println!("{id} is downloaded. Make it the default: amber-server cleanup default {id}");
+            }
+        }
+        Some(CleanupAction::Remove { id }) => {
+            let m = catalog::cleanup_model(&id)?;
+            catalog::removable(config.cleanup.as_deref(), &id, "cleanup")?;
+            let file = paths::cleanup_dir().join(m.file);
+            if file.exists() {
+                std::fs::remove_file(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            }
+            println!("{id} removed.");
+        }
+        Some(CleanupAction::Default { id }) => {
+            let m = catalog::cleanup_model(&id)?;
+            if !paths::llm_ready(&paths::cleanup_dir(), m) {
+                return Err(format!("{id} is not downloaded - amber-server cleanup add {id}"));
+            }
+            config.cleanup = Some(id.clone());
+            config.save(&path)?;
+            println!("{id} is the cleanup's default now.");
+        }
+        Some(CleanupAction::Off) => {
+            config.cleanup = None;
+            config.save(&path)?;
+            println!("The cleanup is off. Downloaded models stay; amber-server cleanup default <id> turns it back on.");
+        }
+    }
+    Ok(())
+}
+
+fn config_command(action: Option<ConfigAction>) -> Result<(), String> {
+    let (path, mut config) = current()?;
     match action {
         None => {
             println!("{}", path.display());
