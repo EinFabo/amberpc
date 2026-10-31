@@ -35,6 +35,8 @@ pub struct Cleanup {
     launcher: Box<dyn Launcher>,
     catalog: &'static [LlmModel],
     ready_within: Duration,
+    /// How long a request waits while another loads or answers - the phone gives up at 12 s.
+    lock_wait: Duration,
     /// Held for a whole request: llama-server answers one at a time anyway, and a switch must
     /// not pull the model out from under a request.
     state: Mutex<State>,
@@ -60,13 +62,13 @@ impl Cleanup {
     }
 
     pub fn with(dir: PathBuf, launcher: Box<dyn Launcher>, catalog: &'static [LlmModel], ready_within: Duration) -> Cleanup {
-        Cleanup { dir, launcher, catalog, ready_within, state: Mutex::new(State::default()) }
+        Cleanup { dir, launcher, catalog, ready_within, lock_wait: Duration::from_secs(10), state: Mutex::new(State::default()) }
     }
 
     /// A chat request answered by [request]'s `model` if it is downloaded, else by [default].
     pub fn answer(&self, request: &Value, default: &str) -> Result<Value, (u16, String)> {
         let id = self.chosen(request["model"].as_str(), default)?;
-        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.lock_within(self.lock_wait)?;
         self.ensure(&mut st, &id)?;
         let r = st.running.as_ref().expect("started above");
         ChatCleaner::new(&r.url, &r.key, &r.id, None).forward(request).map_err(|e| {
@@ -82,9 +84,25 @@ impl Cleanup {
 
     /// Loads [id] now, so the first request does not wait for it (`run` does this for the
     /// default). A failure is remembered as for a request.
-    pub fn warm(&self, id: &str) {
+    pub fn warm(&self, id: &str) -> Result<(), String> {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = self.ensure(&mut st, id);
+        self.ensure(&mut st, id).map_err(|(_, why)| why)
+    }
+
+    /// The state - or 503 once [wait] is over, so a waiting request does not hold one of the
+    /// phone's connection slots through a whole model load.
+    fn lock_within(&self, wait: Duration) -> Result<std::sync::MutexGuard<'_, State>, (u16, String)> {
+        let until = Instant::now() + wait;
+        loop {
+            match self.state.try_lock() {
+                Ok(st) => return Ok(st),
+                Err(std::sync::TryLockError::Poisoned(e)) => return Ok(e.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < until => std::thread::sleep(Duration::from_millis(50)),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err((503, "the cleanup model is loading or busy - try again in a moment".into()))
+                }
+            }
+        }
     }
 
     /// [id] running - started, or restarted for it - unless it failed a moment ago.
@@ -297,7 +315,7 @@ mod tests {
     #[test]
     fn the_default_can_be_loaded_ahead() {
         let (_d, c, launches) = setup(false, &["a.gguf"]);
-        c.warm("a");
+        c.warm("a").unwrap();
         assert_eq!(launches.lock().unwrap().len(), 1);
         assert_eq!(content(&c.answer(&ask("a"), "a").unwrap()), "a.gguf");
         assert_eq!(launches.lock().unwrap().len(), 1, "no second start");
@@ -313,6 +331,19 @@ mod tests {
             cmd.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
         assert!(envs.contains(&("LLAMA_API_KEY".into(), Some("s3cret".into()))));
         assert!(!envs.iter().any(|(k, _)| k == "LD_LIBRARY_PATH"), "the user's own value stays");
+    }
+
+    #[test]
+    fn a_long_load_answers_503_instead_of_holding_the_line() {
+        let (_d, mut c, _) = setup(false, &["a.gguf"]);
+        c.lock_wait = Duration::from_millis(200);
+        let c = Arc::new(c);
+        let _loading = c.state.lock().unwrap();
+        let t = Instant::now();
+        let err = std::thread::scope(|s| s.spawn(|| c.answer(&ask("a"), "a")).join().unwrap()).unwrap_err();
+        assert_eq!(err.0, 503);
+        assert!(err.1.contains("loading"), "{}", err.1);
+        assert!(t.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

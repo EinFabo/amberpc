@@ -46,7 +46,8 @@ pub fn serve() -> ! {
 
 fn start() -> Result<(), (i32, String)> {
     let setup = |m: String| (EX_CONFIG, m);
-    crate::cpu::cpu_check().map_err(|e| (1, e))?;
+    // The wrong build for this CPU: restarting would not help.
+    crate::cpu::cpu_check().map_err(setup)?;
     let path = Config::path();
     if !path.exists() {
         return Err(setup("not set up yet - run: amber-server setup".into()));
@@ -61,29 +62,44 @@ fn start() -> Result<(), (i32, String)> {
         return Err(setup(format!("the speech model {} is not downloaded - run: amber-server setup", config.speech)));
     }
     let gpu = crate::catalog::machine(&config).gpu;
-    let cleanup = match config.cleanup.as_deref().and_then(local::llm_model) {
-        Some(m) if llm_ready(&dirs.cleanup, m) => {
-            let exe = crate::catalog::ensure_llama(&dirs.data, gpu).map_err(|e| (1, e))?;
-            let c = Arc::new(Cleanup::new(dirs.cleanup.clone(), exe, config.threads));
-            // Loaded now: the phone gives up on a cleanup after 12 s, a load can take longer.
-            let (warm, id) = (c.clone(), m.id);
-            std::thread::spawn(move || warm.warm(id));
-            Some(c)
-        }
-        _ => None,
-    };
-    let hooks = hooks(&config, &dirs, cleanup);
+    let cleanup = cleanup_for(&config, &dirs, || crate::catalog::ensure_llama(&dirs.data, gpu));
+    let hooks = hooks(&config, &dirs, cleanup.clone());
     match api::start_with(SocketAddr::from(([0, 0, 0, 0], config.port)), hooks, Limits::default()) {
         Ok(_server) => {
             // The server runs on its own threads for as long as the process lives.
             std::mem::forget(_server);
             log(format!("Amber Server {} listening on port {} - the phone's address: amber-server url", env!("CARGO_PKG_VERSION"), config.port));
+            if let (Some(c), Some(id)) = (cleanup, config.cleanup.clone()) {
+                // Loaded now: the phone gives up on a cleanup after 12 s, a load can take longer.
+                std::thread::spawn(move || match c.warm(&id) {
+                    Ok(()) => log(format!("cleanup model {id} ready")),
+                    Err(e) => log(format!("cleanup model {id} did not start: {e}")),
+                });
+            }
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             Err((1, format!("port {} is in use - pick another: amber-server config set port <number>", config.port)))
         }
         Err(e) => Err((1, format!("the API could not start: {e}"))),
+    }
+}
+
+/// The cleanup, when a downloaded model is configured and llama-server is there or could be
+/// fetched. Without it the server still transcribes - a failed download (no network yet at
+/// boot) must not take the speech down with it.
+pub fn cleanup_for(config: &Config, dirs: &Dirs, ensure_llama: impl FnOnce() -> Result<PathBuf, String>) -> Option<Arc<Cleanup>> {
+    let id = config.cleanup.as_deref()?;
+    if !local::llm_model(id).is_some_and(|m| llm_ready(&dirs.cleanup, m)) {
+        log(format!("cleanup off: {id} is not downloaded - amber-server cleanup add {id}"));
+        return None;
+    }
+    match ensure_llama() {
+        Ok(exe) => Some(Arc::new(Cleanup::new(dirs.cleanup.clone(), exe, config.threads))),
+        Err(e) => {
+            log(format!("cleanup off until the next start: llama-server is missing and could not be fetched ({e})"));
+            None
+        }
     }
 }
 
@@ -94,7 +110,7 @@ pub fn hooks(config: &Config, dirs: &Dirs, cleanup: Option<Arc<Cleanup>>) -> Hoo
     let (language, vocabulary) = (config.language.clone(), config.vocabulary.clone());
     let rules = config.rules;
     let rules_language = (config.language != "auto").then(|| config.language.clone());
-    let list = model_list(config, dirs, gpu);
+    let list = model_list(config, dirs, gpu, cleanup.is_some());
     Hooks {
         service: "amber-server",
         version: env!("CARGO_PKG_VERSION"),
@@ -124,8 +140,9 @@ pub fn hooks(config: &Config, dirs: &Dirs, cleanup: Option<Arc<Cleanup>>) -> Hoo
     }
 }
 
-/// What the phone's choice shows: every downloaded model, the defaults marked.
-pub fn model_list(config: &Config, dirs: &Dirs, gpu: bool) -> Vec<ModelInfo> {
+/// What the phone's choice shows: every downloaded model, the defaults marked - cleanup models
+/// only while the cleanup runs ([cleanup_on]), else the phone would offer what answers 503.
+pub fn model_list(config: &Config, dirs: &Dirs, gpu: bool, cleanup_on: bool) -> Vec<ModelInfo> {
     let on = if gpu { "GPU" } else { "CPU" };
     let speech = local::MODELS.iter().filter(|m| model_ready(&dirs.speech, m)).map(|m| ModelInfo {
         id: m.id.into(),
@@ -134,7 +151,7 @@ pub fn model_list(config: &Config, dirs: &Dirs, gpu: bool) -> Vec<ModelInfo> {
         note: format!("{} MB · {on}", m.size_mb),
         default: config.speech == m.id,
     });
-    let cleanup = local::LLM_MODELS.iter().filter(|m| llm_ready(&dirs.cleanup, m)).map(|m| ModelInfo {
+    let cleanup = local::LLM_MODELS.iter().filter(|m| cleanup_on && llm_ready(&dirs.cleanup, m)).map(|m| ModelInfo {
         id: m.id.into(),
         kind: ModelKind::Cleanup,
         label: m.label.into(),
@@ -206,12 +223,31 @@ mod tests {
     fn the_model_list_holds_what_is_downloaded() {
         let (_t, d) = dirs_with(&["futo-multilingual-74", "futo-multilingual-244"], &["qwen3-4b-instruct-2507-q4km"]);
         let config = Config { speech: "futo-multilingual-244".into(), cleanup: Some("qwen3-4b-instruct-2507-q4km".into()), ..Config::default() };
-        let list = model_list(&config, &d, false);
+        let list = model_list(&config, &d, false, true);
         assert_eq!(list.len(), 3);
         assert_eq!(list.iter().filter(|m| m.kind == ModelKind::Speech).count(), 2);
         let defaults: Vec<&str> = list.iter().filter(|m| m.default).map(|m| m.id.as_str()).collect();
         assert_eq!(defaults, ["futo-multilingual-244", "qwen3-4b-instruct-2507-q4km"]);
         assert!(list[0].note.contains("MB") && list[0].note.contains("CPU"), "{}", list[0].note);
+    }
+
+    #[test]
+    fn cleanup_models_are_listed_only_while_the_cleanup_is_on() {
+        let (_t, d) = dirs_with(&["futo-multilingual-74"], &["qwen3-4b-instruct-2507-q4km"]);
+        // `cleanup off` keeps the file; the phone must not offer it then.
+        let config = Config { speech: "futo-multilingual-74".into(), cleanup: None, ..Config::default() };
+        assert!(model_list(&config, &d, false, false).iter().all(|m| m.kind == ModelKind::Speech));
+        let h = hooks(&Config { cleanup: Some("qwen3-4b-instruct-2507-q4km".into()), ..config }, &d, None);
+        assert!((h.models)().iter().all(|m| m.kind == ModelKind::Speech), "configured, but not running");
+    }
+
+    #[test]
+    fn a_failed_llama_download_leaves_the_speech_running() {
+        let (_t, d) = dirs_with(&["futo-multilingual-74"], &["qwen3-4b-instruct-2507-q4km"]);
+        let config = Config { cleanup: Some("qwen3-4b-instruct-2507-q4km".into()), ..Config::default() };
+        assert!(cleanup_for(&config, &d, || Err("network down".into())).is_none());
+        assert!(cleanup_for(&config, &d, || Ok("/opt/llama-server".into())).is_some());
+        assert!(cleanup_for(&Config::default(), &d, || panic!("no cleanup configured")).is_none());
     }
 
     #[test]

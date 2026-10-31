@@ -48,11 +48,19 @@ fn existing(path: &Path) -> Result<Config, String> {
     }
 }
 
-/// The recommended speech model, a key, no new cleanup.
+/// The recommended speech model, a key, no new cleanup. Run again (the installer does on
+/// every update) it keeps the model chosen before.
 pub fn quick_with(path: &Path, machine: Machine, fetch: &dyn Fetch) -> Result<Config, String> {
     let mut config = existing(path)?;
-    config.speech = recommended_speech(machine.gpu, machine.threads, machine.ram_mb).to_string();
+    if !set_up(&config) {
+        config.speech = recommended_speech(machine.gpu, machine.threads, machine.ram_mb).to_string();
+    }
     finish(path, config, fetch)
+}
+
+/// Whether setup ran before: only it makes the key (`config set` before it leaves it empty).
+fn set_up(config: &Config) -> bool {
+    !config.key.trim().is_empty()
 }
 
 /// Asks for the speech model, the cleanup, the language and the port; Enter takes the default.
@@ -62,7 +70,9 @@ pub fn ask_with(path: &Path, machine: Machine, fetch: &dyn Fetch, input: &mut dy
 
     let speech: Vec<_> = local::MODELS.iter().filter(|m| !m.replaced).collect();
     let recommended = recommended_speech(machine.gpu, machine.threads, machine.ram_mb);
-    let default = speech.iter().position(|m| m.id == recommended).unwrap_or(0);
+    // Enter keeps what was chosen before.
+    let current = if set_up(&config) { config.speech.as_str() } else { recommended };
+    let default = speech.iter().position(|m| m.id == current).unwrap_or(0);
     writeln!(out, "Speech model:").map_err(w)?;
     for (i, m) in speech.iter().enumerate() {
         writeln!(out, "  {}  {:<24} {:>5} MB  {}", i + 1, m.label, m.size_mb, fit(m, machine.gpu, machine.threads, machine.ram_mb)).map_err(w)?;
@@ -107,7 +117,10 @@ pub fn ask_with(path: &Path, machine: Machine, fetch: &dyn Fetch, input: &mut dy
 fn finish(path: &Path, mut config: Config, fetch: &dyn Fetch) -> Result<Config, String> {
     fetch.speech(&config.speech)?;
     if let Some(id) = &config.cleanup {
-        fetch.cleanup(id)?;
+        // The speech works without it; the choice stays for a later `cleanup add`.
+        if let Err(e) = fetch.cleanup(id) {
+            eprintln!("The cleanup model {id} could not be downloaded ({e}) - try again later: amber-server cleanup add {id}");
+        }
     }
     // A config written by `config set` before setup has an empty key.
     if config.key.trim().is_empty() {
@@ -148,6 +161,16 @@ mod tests {
     struct Stub {
         speech: RefCell<Vec<String>>,
         cleanup: RefCell<Vec<String>>,
+    }
+
+    struct FailingCleanup;
+    impl Fetch for FailingCleanup {
+        fn speech(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn cleanup(&self, _: &str) -> Result<(), String> {
+            Err("network down".into())
+        }
     }
 
     impl Fetch for Stub {
@@ -207,6 +230,30 @@ mod tests {
         let c = ask_with(&p, OFFICE_PC, &Stub::default(), &mut "0\n9\nx\n1\n\nxx\nen\n\n".as_bytes(), &mut out).unwrap();
         assert_eq!((c.speech.as_str(), c.language.as_str()), ("futo-multilingual-74", "en"));
         assert!(String::from_utf8(out).unwrap().contains("a number from the list"));
+    }
+
+    #[test]
+    fn running_setup_again_keeps_the_chosen_model() {
+        // The installer runs setup --quick on every update.
+        let (_d, p) = path();
+        let big = Machine { gpu: true, threads: 16, ram_mb: 32_000 };
+        Config { key: "k".repeat(20), speech: "futo-multilingual-74".into(), ..Config::default() }.save(&p).unwrap();
+        assert_eq!(quick_with(&p, big, &Stub::default()).unwrap().speech, "futo-multilingual-74");
+        let asked = ask_with(&p, big, &Stub::default(), &mut "\n\n\n\n".as_bytes(), &mut Vec::new()).unwrap();
+        assert_eq!(asked.speech, "futo-multilingual-74", "Enter keeps it");
+        // Settings made before the first setup do not count as a choice.
+        let (_d2, p2) = path();
+        Config { port: 9000, ..Config::default() }.save(&p2).unwrap();
+        assert_eq!(quick_with(&p2, big, &Stub::default()).unwrap().speech, recommended_speech(true, 16, 32_000));
+    }
+
+    #[test]
+    fn a_failed_cleanup_download_does_not_stop_setup() {
+        let (_d, p) = path();
+        Config { key: "k".repeat(20), cleanup: Some("qwen3-4b-instruct-2507-q4km".into()), ..Config::default() }.save(&p).unwrap();
+        let c = quick_with(&p, OFFICE_PC, &FailingCleanup).unwrap();
+        assert_eq!(c.cleanup.as_deref(), Some("qwen3-4b-instruct-2507-q4km"), "kept, to retry with cleanup add");
+        assert!(Config::load(&p).is_ok());
     }
 
     #[test]

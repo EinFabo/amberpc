@@ -36,10 +36,12 @@ pub struct Child {
     /// not push that out of the last lines.
     out: Arc<Mutex<VecDeque<String>>>,
     err: Arc<Mutex<VecDeque<String>>>,
-    readers: Vec<std::thread::JoinHandle<()>>,
+    /// One message per reader that reached the end of its pipe.
+    done: mpsc::Receiver<()>,
+    readers: usize,
 }
 
-fn keep(buffer: Arc<Mutex<VecDeque<String>>>, pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<()> {
+fn keep(buffer: Arc<Mutex<VecDeque<String>>>, pipe: impl Read + Send + 'static, done: mpsc::Sender<()>) {
     std::thread::spawn(move || {
         for line in BufReader::new(pipe).lines().map_while(Result::ok) {
             let mut b = buffer.lock().unwrap_or_else(|e| e.into_inner());
@@ -48,7 +50,8 @@ fn keep(buffer: Arc<Mutex<VecDeque<String>>>, pipe: impl Read + Send + 'static) 
             }
             b.push_back(line);
         }
-    })
+        let _ = done.send(());
+    });
 }
 
 fn last(buffer: &Mutex<VecDeque<String>>, n: usize) -> Vec<String> {
@@ -85,22 +88,32 @@ impl Child {
         #[cfg(windows)]
         job::attach(&child);
         let (out, err) = (Arc::new(Mutex::new(VecDeque::new())), Arc::new(Mutex::new(VecDeque::new())));
-        let mut readers = Vec::new();
+        let (tx, done) = mpsc::channel();
+        let mut readers = 0;
         if let Some(pipe) = child.stdout.take() {
-            readers.push(keep(out.clone(), pipe));
+            keep(out.clone(), pipe, tx.clone());
+            readers += 1;
         }
         if let Some(pipe) = child.stderr.take() {
-            readers.push(keep(err.clone(), pipe));
+            keep(err.clone(), pipe, tx);
+            readers += 1;
         }
-        Ok(Child { child, out, err, readers })
+        Ok(Child { child, out, err, done, readers })
     }
 
     pub fn alive(&mut self) -> bool {
         let running = matches!(self.child.try_wait(), Ok(None));
         if !running {
-            // Ended: its pipes are closed, the readers finish with what is left.
-            for r in self.readers.drain(..) {
-                let _ = r.join();
+            // Ended: the readers finish with what is left - unless something it started holds
+            // the pipe open, so not longer than a second.
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while self.readers > 0 {
+                let left = until.saturating_duration_since(std::time::Instant::now());
+                if self.done.recv_timeout(left).is_err() {
+                    self.readers = 0;
+                    break;
+                }
+                self.readers -= 1;
             }
         }
         running
@@ -174,6 +187,19 @@ mod job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_grandchild_holding_the_pipe_does_not_hang_the_check() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 5 & echo started; exit 0"]);
+        let mut child = Child::spawn(cmd).unwrap();
+        let t = std::time::Instant::now();
+        while child.alive() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(t.elapsed() < std::time::Duration::from_secs(3), "waited for the grandchild: {:?}", t.elapsed());
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
