@@ -25,7 +25,7 @@ pub struct Config {
     pub language: String,
     /// Names and terms the recognition should expect.
     pub vocabulary: String,
-    /// 0: all cores.
+    /// 0: half the logical cores, 2 to 8 (more slows whisper.cpp down).
     pub threads: u32,
     pub gpu: Gpu,
     pub rules: RulesConfig,
@@ -35,6 +35,7 @@ pub struct Config {
 #[serde(rename_all = "lowercase")]
 pub enum Gpu {
     /// The GPU if this build and the machine have one.
+    #[serde(alias = "on")]
     Auto,
     Off,
 }
@@ -76,7 +77,9 @@ impl Config {
 
     pub fn load(path: &Path) -> Result<Config, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let config: Config = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let config: Config = toml::from_str(&text).map_err(|e| {
+            format!("{}: {e}\nFix that line - or delete the file and run: amber-server setup", path.display())
+        })?;
         Ok(config.sanitized())
     }
 
@@ -86,12 +89,15 @@ impl Config {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
         let temp = path.with_extension("toml.new");
-        std::fs::write(&temp, text).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(&temp);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Private from the first byte: it holds the access key.
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
-        }
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&temp).map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut file, text.as_bytes()).map_err(|e| e.to_string())?;
+        drop(file);
         std::fs::rename(&temp, path).map_err(|e| e.to_string())
     }
 
@@ -108,6 +114,7 @@ impl Config {
             self.cleanup = None;
         }
         self.language = language(&self.language).unwrap_or(d.language);
+        self.threads = self.threads.min(MAX_THREADS);
         self.vocabulary = self.vocabulary.trim().to_string();
         self
     }
@@ -130,9 +137,12 @@ impl Config {
         let v = value.trim();
         match key {
             "port" => self.port = v.parse::<u16>().ok().filter(|p| *p >= 1024).ok_or("port: a number from 1024 to 65535")?,
-            "language" => self.language = language(v).ok_or("language: auto, or a two-letter code such as de or en")?,
+            "language" => self.language = language(v).ok_or("language: auto, or a code whisper knows, such as de or en")?,
             "vocabulary" => self.vocabulary = v.to_string(),
-            "threads" => self.threads = v.parse().map_err(|_| "threads: a number, 0 for all cores")?,
+            "threads" => {
+                self.threads =
+                    v.parse().ok().filter(|t| *t <= MAX_THREADS).ok_or("threads: a number up to 256, 0 for half the cores (2 to 8)")?
+            }
             "gpu" => {
                 self.gpu = match v.to_ascii_lowercase().as_str() {
                     "auto" | "on" => Gpu::Auto,
@@ -161,11 +171,15 @@ fn switch(key: &str, value: &str) -> Result<bool, String> {
     }
 }
 
-/// "auto", or a two-letter code in lower case.
+/// "auto", or a code whisper knows, in lower case.
 fn language(value: &str) -> Option<String> {
-    let v = value.trim().to_ascii_lowercase();
-    (v == "auto" || (v.len() == 2 && v.chars().all(|c| c.is_ascii_lowercase()))).then_some(v)
+    if value.trim().eq_ignore_ascii_case("auto") {
+        return Some("auto".into());
+    }
+    crate::speech::whisper_language(value)
 }
+
+const MAX_THREADS: u32 = 256;
 
 #[cfg(test)]
 mod tests {
@@ -182,6 +196,18 @@ mod tests {
         assert_eq!(bad.port, 8765);
         assert_eq!(bad.speech, "futo-multilingual-244");
         assert_eq!(bad.cleanup, None);
+    }
+
+    #[test]
+    fn a_hand_edited_config_with_gpu_on_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("amber-server.toml");
+        std::fs::write(&path, "gpu = \"on\"\nport = 9000\n").unwrap();
+        let c = Config::load(&path).unwrap();
+        assert_eq!((c.gpu, c.port), (Gpu::Auto, 9000));
+        std::fs::write(&path, "port = \"nine\"\n").unwrap();
+        let err = Config::load(&path).unwrap_err();
+        assert!(err.contains("amber-server.toml") && err.contains("amber-server setup"), "says where and what to do: {err}");
     }
 
     #[cfg(unix)]
@@ -204,6 +230,10 @@ mod tests {
         c.set("language", "de").unwrap();
         assert_eq!(c.get("language").unwrap(), "de");
         assert!(c.set("port", "70000").is_err());
+        assert!(c.set("threads", "100000").is_err(), "more than any machine has");
+        assert!(c.set("language", "xx").is_err(), "not a language whisper knows");
+        c.set("language", "DE").unwrap();
+        assert_eq!(c.language, "de");
         let unknown = c.set("nope", "1").unwrap_err();
         assert!(unknown.contains("rules.german_commas") && unknown.contains("port"), "{unknown}");
     }
