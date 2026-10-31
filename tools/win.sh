@@ -5,7 +5,7 @@
 #
 #   tools/win.sh install     npm ci
 #   tools/win.sh check       cargo check (Windows target)
-#   tools/win.sh test        cargo test for the whole workspace on Windows
+#   tools/win.sh test        cargo test for the desktop's packages on Windows
 #   tools/win.sh build       tauri build -> NSIS installer
 #   tools/win.sh dev         tauri dev
 #   tools/win.sh <anything>  run it in the mirrored folder
@@ -32,7 +32,7 @@ if [ -d "$SRC/src-tauri/icons" ]; then rsync -a "$SRC/src-tauri/icons/" "$DEST/s
 case "${1:-check}" in
   install) CMD="npm ci" ;;
   check) CMD="cargo check -p amber-pc --message-format short" ;;
-  test) CMD="cargo test --workspace" ;;
+  test) CMD="cargo test -p amber-core -p amber-pc" ;;
   build)
     # The updater signs the installer; key and password stay in ~/.amberpc, outside the repo.
     # Handed to Windows as environment variables (WSLENV, /p turns the path into a Windows

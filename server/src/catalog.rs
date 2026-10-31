@@ -20,18 +20,34 @@ pub struct Machine {
 }
 
 pub fn machine(config: &Config) -> Machine {
-    // Unknown memory counts as 4 GB: rather a smaller model than one that does not fit.
-    let ram_mb = sysinfo::System::new()
-        .map(|mut sys| {
-            sys.refresh_memory();
-            sys.total_memory() / (1024 * 1024)
-        })
-        .unwrap_or(4_096);
     Machine {
         gpu: cfg!(feature = "vulkan") && config.gpu == Gpu::Auto,
         threads: std::thread::available_parallelism().map_or(4, |n| n.get() as u32),
-        ram_mb,
+        ram_mb: total_ram_mb(),
     }
+}
+
+/// The machine's memory in MB; unknown counts as 4 GB - rather a smaller model than one that
+/// does not fit.
+pub fn total_ram_mb() -> u64 {
+    #[cfg(target_os = "linux")]
+    let mb = std::fs::read_to_string("/proc/meminfo").ok().and_then(|t| meminfo_mb(&t));
+    #[cfg(windows)]
+    let mb = {
+        use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+        unsafe { GlobalMemoryStatusEx(&mut status) }.ok().map(|_| status.ullTotalPhys / (1024 * 1024))
+    };
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let mb: Option<u64> = None;
+    mb.unwrap_or(4_096)
+}
+
+/// `MemTotal` of /proc/meminfo, in MB.
+fn meminfo_mb(text: &str) -> Option<u64> {
+    let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024)
 }
 
 pub fn recommended_speech(gpu: bool, threads: u32, ram_mb: u64) -> &'static str {
@@ -166,6 +182,13 @@ mod tests {
         assert_eq!(fit(turbo, true, 16, 32_000), "recommended");
         assert_eq!(fit(turbo, false, 16, 32_000), "slow here", "a GPU model on a CPU");
         assert_eq!(fit(amber_core::local::model("futo-multilingual-244").unwrap(), true, 16, 32_000), "fits");
+    }
+
+    #[test]
+    fn memory_is_read_from_proc_meminfo() {
+        assert_eq!(meminfo_mb("MemTotal:       16314368 kB\nMemFree:  1 kB\n"), Some(15_932));
+        assert_eq!(meminfo_mb("garbage"), None);
+        assert!(total_ram_mb() > 0);
     }
 
     #[test]

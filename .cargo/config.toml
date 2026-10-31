@@ -1,4 +1,0 @@
-[env]
-# whisper-rs-sys: use the bindings it ships instead of generating them - no libclang needed to
-# build Amber Server, on a dev machine or in CI.
-WHISPER_DONT_GENERATE_BINDINGS = "1"
