@@ -1,0 +1,20 @@
+[package]
+name = "amber-server"
+version.workspace = true
+edition.workspace = true
+description = "Amber Server: Amber's phone API without the desktop app, for Linux and Windows"
+license-file = "../LICENSE"
+
+[[bin]]
+name = "amber-server"
+path = "src/main.rs"
+
+[dependencies]
+amber-core = { path = "../crates/core" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"
