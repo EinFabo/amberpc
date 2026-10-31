@@ -19,13 +19,20 @@ pub fn describe(config: &Config, interfaces: &[(String, IpAddr)]) -> String {
     for (name, ip) in &addresses {
         out += &format!("  {name:<12} {}\n", api::phone_url(*ip, config.port, &config.key));
     }
-    let url = api::phone_url(*first, config.port, &config.key);
-    if let Ok(code) = qrcode::QrCode::new(url.as_bytes()) {
-        out += "\n";
-        out += &code.render::<qrcode::render::unicode::Dense1x2>().quiet_zone(true).build();
-        out += "\n";
-    }
+    use std::io::IsTerminal;
+    out += "\n";
+    out += &qr(&api::phone_url(*first, config.port, &config.key), std::io::stdout().is_terminal());
     out
+}
+
+/// [text] as a QR code in block characters - [colored]: black on white whatever the
+/// terminal's colours (blank for light modules reads inverted on a dark terminal).
+pub fn qr(text: &str, colored: bool) -> String {
+    let Ok(code) = qrcode::QrCode::new(text.as_bytes()) else { return String::new() };
+    let plain = code.render::<qrcode::render::unicode::Dense1x2>().quiet_zone(true).build();
+    let lines: Vec<String> =
+        plain.lines().map(|l| if colored { format!("\x1b[30;47m{l}\x1b[0m") } else { l.to_string() }).collect();
+    lines.join("\n") + "\n"
 }
 
 /// This machine's network addresses.
@@ -89,11 +96,18 @@ pub fn logs() -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let status = std::process::Command::new("journalctl")
+        let out = std::process::Command::new("journalctl")
             .args(["--user", "-u", "amber-server", "-n", "50", "--no-pager"])
-            .status()
+            .output()
             .map_err(|e| format!("journalctl: {e}"))?;
-        if status.success() { Ok(()) } else { Err("journalctl found no log - is the service installed? amber-server service install".into()) }
+        let text = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() || text.trim().is_empty() || text.trim() == "-- No entries --" {
+            return Err("no log lines - is the service installed (amber-server service install)? \
+                        Some systems keep the user's log only for members of the systemd-journal group."
+                .into());
+        }
+        print!("{text}");
+        Ok(())
     }
 }
 
@@ -110,6 +124,16 @@ mod tests {
         assert!(out.contains('▀') || out.contains('▄') || out.contains('█'), "a QR code in block characters");
         let none = describe(&c, &[]);
         assert!(none.contains("no address"), "{none}");
+    }
+
+    #[test]
+    fn the_code_is_dark_on_light_in_any_terminal() {
+        // Spaces for light modules read inverted on a dark terminal, and scanners refuse that.
+        let colored = qr("http://192.168.1.20:8765/abc/v1", true);
+        let lines: Vec<&str> = colored.lines().filter(|l| !l.is_empty()).collect();
+        assert!(lines.len() > 10);
+        assert!(lines.iter().all(|l| l.starts_with("\x1b[30;47m") && l.ends_with("\x1b[0m")), "{colored:?}");
+        assert!(!qr("http://192.168.1.20:8765/abc/v1", false).contains('\x1b'), "no escapes into a file or pipe");
     }
 
     #[test]

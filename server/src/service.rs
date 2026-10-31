@@ -1,17 +1,20 @@
-//! The background service: a systemd user unit on Linux, a scheduled task at log-on on Windows.
+//! The background service: a systemd user unit on Linux; on Windows the user's own Run entry,
+//! which starts it at log-on (like the desktop app's autostart, no admin rights needed).
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The task's name on Windows.
+/// The Run entry's name on Windows.
 #[cfg_attr(not(windows), allow(dead_code))]
-const TASK: &str = "Amber Server";
+const NAME: &str = "Amber Server";
+#[cfg_attr(not(windows), allow(dead_code))]
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
 /// A log file above this starts over (the previous one is kept as `.old`).
 const MAX_LOG: u64 = 5 << 20;
 
-/// Where the Windows task's output goes.
+/// Where the Windows server's output goes.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn log_file() -> PathBuf {
     crate::paths::data_dir().join("amber-server.log")
@@ -19,8 +22,8 @@ pub fn log_file() -> PathBuf {
 
 /// The systemd user unit. It restarts after a crash, not after exit 78 ("set it up first").
 pub fn systemd_unit(exe: &Path) -> String {
-    // systemd reads % as a specifier and \ and " as escapes inside quotes.
-    let exe = exe.display().to_string().replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%");
+    // systemd reads % as a specifier, $ as a variable, and \ and " as escapes inside quotes.
+    let exe = exe.display().to_string().replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%").replace('$', "$$");
     format!(
         "[Unit]\n\
          Description=Amber Server - speech to text for Amber on the phone\n\
@@ -36,13 +39,22 @@ pub fn systemd_unit(exe: &Path) -> String {
     )
 }
 
-/// `schtasks` arguments for a task at log-on with the user's own rights. `run --log` writes
-/// to the file and lets go of its console - a console window at every log-on would end the
-/// server when someone closes it.
+/// Whether the user's systemd can run the service, from `systemctl --user is-system-running`'s
+/// output: "degraded" (some other unit failed) and "starting" can.
+pub fn systemd_usable(state: &str) -> bool {
+    !matches!(state.trim(), "" | "offline" | "unknown")
+}
+
+/// The command line Windows runs at log-on. `run --log` writes to the file and lets go of the
+/// console window Windows opens for it.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn schtasks_args(exe: &Path, log: &Path) -> Vec<String> {
-    let action = format!("\"{}\" run --log \"{}\"", exe.display(), log.display());
-    ["/create", "/tn", TASK, "/tr", &action, "/sc", "onlogon", "/rl", "limited", "/f"].map(String::from).to_vec()
+pub fn run_value(exe: &Path, log: &Path) -> String {
+    format!("\"{}\" run --log \"{}\"", exe.display(), log.display())
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn reg_add_args(value: &str) -> Vec<String> {
+    ["add", RUN_KEY, "/v", NAME, "/t", "REG_SZ", "/d", value, "/f"].map(String::from).to_vec()
 }
 
 /// The log file, appended to - or started over when it got big.
@@ -108,24 +120,62 @@ fn run(program: &str, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Ends every other running amber-server (the service's, after an update the old one).
+#[cfg(windows)]
+fn stop_running() {
+    let others = format!("PID ne {}", std::process::id());
+    let _ = run("taskkill", &["/f", "/fi", "IMAGENAME eq amber-server.exe", "/fi", &others]);
+}
+
+/// Starts the server in the background, without a window, as log-on will.
+#[cfg(windows)]
+fn start_detached(exe: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    Command::new(exe)
+        .arg("run")
+        .arg("--log")
+        .arg(log_file())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("the server could not start: {e}"))
+}
+
+#[cfg(windows)]
+fn installed() -> bool {
+    run("reg", &["query", RUN_KEY, "/v", NAME]).is_ok()
+}
+
+#[cfg(not(windows))]
+fn installed() -> bool {
+    unit_path().exists()
+}
+
 /// Installs and starts the service; again after an update, it restarts with the new binary.
 pub fn install() -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     #[cfg(windows)]
     {
-        let args = schtasks_args(&exe, &log_file());
+        let args = reg_add_args(&run_value(&exe, &log_file()));
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        run("schtasks", &args)?;
-        let _ = run("schtasks", &["/end", "/tn", TASK]);
-        run("schtasks", &["/run", "/tn", TASK])?;
+        run("reg", &args)?;
+        stop_running();
+        start_detached(&exe)?;
         Ok(format!("Amber Server runs now and starts whenever you log on. Its log: {}", log_file().display()))
     }
     #[cfg(not(windows))]
     {
-        let no_systemd = |e: String| {
-            format!("{e}\nsystemd does not run for this user here - start the server yourself instead: amber-server run")
-        };
-        run("systemctl", &["--user", "is-system-running"]).or_else(|e| if e.contains("degraded") { Ok(String::new()) } else { Err(e) }).map_err(no_systemd)?;
+        // is-system-running exits non-zero for "degraded" too; its output says what it is.
+        let state = Command::new("systemctl").args(["--user", "is-system-running"]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        if !state.as_deref().is_ok_and(systemd_usable) {
+            return Err("systemd does not run for this user here - start the server yourself instead: amber-server run".into());
+        }
         let path = unit_path();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -145,19 +195,36 @@ pub fn install() -> Result<String, String> {
     }
 }
 
-pub fn uninstall() -> Result<String, String> {
+/// Restarts an installed service, so it takes a new key. None when there is none.
+pub fn restart_if_installed() -> Option<Result<(), String>> {
+    if !installed() {
+        return None;
+    }
     #[cfg(windows)]
     {
-        let _ = run("schtasks", &["/end", "/tn", TASK]);
-        run("schtasks", &["/delete", "/tn", TASK, "/f"]).map_err(|_| "the service is not installed".to_string())?;
+        stop_running();
+        let exe = std::env::current_exe().map_err(|e| e.to_string());
+        Some(exe.and_then(|exe| start_detached(&exe)))
+    }
+    #[cfg(not(windows))]
+    {
+        Some(run("systemctl", &["--user", "try-restart", "amber-server"]).map(|_| ()))
+    }
+}
+
+pub fn uninstall() -> Result<String, String> {
+    if !installed() {
+        return Err("the service is not installed".into());
+    }
+    #[cfg(windows)]
+    {
+        run("reg", &["delete", RUN_KEY, "/v", NAME, "/f"])?;
+        stop_running();
         Ok("Amber Server stopped and no longer starts at log-on. Models and settings are kept.".into())
     }
     #[cfg(not(windows))]
     {
         let path = unit_path();
-        if !path.exists() {
-            return Err("the service is not installed".into());
-        }
         let _ = run("systemctl", &["--user", "disable", "--now", "amber-server"]);
         std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let _ = run("systemctl", &["--user", "daemon-reload"]);
@@ -167,19 +234,15 @@ pub fn uninstall() -> Result<String, String> {
 
 /// "active", "failed", "not installed" ...
 pub fn state() -> String {
-    const NOT: &str = "not installed - amber-server service install";
+    if !installed() {
+        return "not installed - amber-server service install".into();
+    }
     #[cfg(windows)]
     {
-        match run("schtasks", &["/query", "/tn", TASK]) {
-            Ok(_) => "installed (starts at log-on)".into(),
-            Err(_) => NOT.into(),
-        }
+        "installed (starts at log-on)".into()
     }
     #[cfg(not(windows))]
     {
-        if !unit_path().exists() {
-            return NOT.into();
-        }
         // is-active fails for anything but "active" and still prints the state.
         let out = Command::new("systemctl").args(["--user", "is-active", "amber-server"]).output();
         match out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()) {
@@ -203,20 +266,31 @@ mod tests {
         assert!(unit.contains("RestartPreventExitStatus=78\n"));
         assert!(unit.contains("WantedBy=default.target\n"));
         // systemd reads % as a specifier and \ as an escape.
-        let odd = systemd_unit(Path::new("/opt/my apps/50%/amber-server"));
-        assert!(odd.contains("ExecStart=\"/opt/my apps/50%%/amber-server\" run\n"), "{odd}");
+        let odd = systemd_unit(Path::new("/opt/my apps/50%/$HOME/amber-server"));
+        assert!(odd.contains("ExecStart=\"/opt/my apps/50%%/$$HOME/amber-server\" run\n"), "{odd}");
     }
 
     #[test]
-    fn the_task_starts_at_logon_without_admin_rights() {
-        let args = schtasks_args(Path::new(r"C:\Users\A B\AppData\Local\Programs\amber-server\amber-server.exe"), Path::new(r"C:\Users\A B\AppData\Local\amber-server\amber-server.log"));
+    fn windows_starts_it_at_logon_without_admin_rights() {
+        let exe = Path::new(r"C:\Users\A B\AppData\Local\Programs\amber-server\amber-server.exe");
+        let log = Path::new(r"C:\Users\A B\AppData\Local\amber-server\amber-server.log");
+        let value = run_value(exe, log);
+        assert_eq!(value, r#""C:\Users\A B\AppData\Local\Programs\amber-server\amber-server.exe" run --log "C:\Users\A B\AppData\Local\amber-server\amber-server.log""#);
+        let args = reg_add_args(&value);
         let has = |pair: [&str; 2]| args.windows(2).any(|w| w == pair);
-        assert!(has(["/sc", "onlogon"]) && has(["/rl", "limited"]) && has(["/tn", "Amber Server"]), "{args:?}");
-        assert!(args.contains(&"/f".to_string()));
-        assert!(has([
-            "/tr",
-            r#""C:\Users\A B\AppData\Local\Programs\amber-server\amber-server.exe" run --log "C:\Users\A B\AppData\Local\amber-server\amber-server.log""#
-        ]), "the output goes to the log file, without a console window: {args:?}");
+        assert!(has(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"]), "the user's own Run key: {args:?}");
+        assert!(has(["/v", "Amber Server"]) && has(["/d", value.as_str()]) && args.contains(&"/f".to_string()));
+    }
+
+    #[test]
+    fn a_degraded_user_manager_still_runs_services() {
+        // One failed unit of the user's own makes the manager "degraded".
+        for ok in ["running\n", "degraded\n", "starting\n", "initializing\n"] {
+            assert!(systemd_usable(ok), "{ok}");
+        }
+        for not in ["offline\n", "", "unknown\n"] {
+            assert!(!systemd_usable(not), "{not}");
+        }
     }
 
     #[test]

@@ -190,7 +190,11 @@ fn key_command(new: bool) -> Result<(), String> {
     }
     config.key = amber_core::api::new_key();
     config.save(&path)?;
-    println!("New key - every phone with the old address is locked out. A running server picks it up on restart.\n");
+    match service::restart_if_installed() {
+        Some(Ok(())) => println!("New key - the service restarted with it; phones with the old address are locked out.\n"),
+        Some(Err(e)) => println!("New key - but the service did not restart ({e}); it takes the key when it does.\n"),
+        None => println!("New key - a server running by hand takes it when you restart it.\n"),
+    }
     print!("{}", info::describe(&config, &info::interfaces()));
     Ok(())
 }
