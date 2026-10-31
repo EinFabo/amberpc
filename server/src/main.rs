@@ -7,6 +7,7 @@ mod cleanup;
 mod config;
 mod cpu;
 mod paths;
+mod setup;
 mod speech;
 
 use clap::{Parser, Subcommand};
@@ -108,6 +109,7 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Config { action } => config_command(action),
+        Command::Setup { quick } => setup_command(quick),
         Command::Models { action } => models_command(action),
         Command::Cleanup { action } => cleanup_command(action),
         _ => Err("not built yet".to_string()),
@@ -116,6 +118,22 @@ fn main() {
         eprintln!("amber-server: {e}");
         std::process::exit(1);
     }
+}
+
+fn setup_command(quick: bool) -> Result<(), String> {
+    let path = Config::path();
+    let config = if quick {
+        setup::quick(&path)?
+    } else {
+        setup::ask(&path, &mut std::io::stdin().lock(), &mut std::io::stdout())?
+    };
+    println!("\nReady: speech model {}, cleanup {}.", config.speech, config.cleanup.as_deref().unwrap_or("off"));
+    println!("Start it in the background: amber-server service install");
+    println!("The phone's address:        amber-server url");
+    if config.cleanup.is_none() {
+        println!("A cleanup model:            amber-server cleanup");
+    }
+    Ok(())
 }
 
 /// The config, or the defaults before `setup` ran.
