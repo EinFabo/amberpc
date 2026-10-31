@@ -6,8 +6,10 @@ mod child;
 mod cleanup;
 mod config;
 mod cpu;
+mod info;
 mod paths;
 mod serve;
+mod service;
 mod setup;
 mod speech;
 
@@ -112,6 +114,13 @@ fn main() {
         Command::Config { action } => config_command(action),
         Command::Setup { quick } => setup_command(quick),
         Command::Run => serve::serve(),
+        Command::Url => url_command(),
+        Command::Key { new } => key_command(new),
+        Command::Status => {
+            print!("{}", info::status(&Config::path()));
+            Ok(())
+        }
+        Command::Logs => info::logs(),
         Command::Models { action } => models_command(action),
         Command::Cleanup { action } => cleanup_command(action),
         _ => Err("not built yet".to_string()),
@@ -135,6 +144,34 @@ fn setup_command(quick: bool) -> Result<(), String> {
     if config.cleanup.is_none() {
         println!("A cleanup model:            amber-server cleanup");
     }
+    Ok(())
+}
+
+/// The config of a set-up server - or the hint to run setup.
+fn set_up() -> Result<(std::path::PathBuf, Config), String> {
+    let (path, config) = current()?;
+    if config.key.trim().is_empty() {
+        return Err("not set up yet - run: amber-server setup".into());
+    }
+    Ok((path, config))
+}
+
+fn url_command() -> Result<(), String> {
+    let (_, config) = set_up()?;
+    print!("{}", info::describe(&config, &info::interfaces()));
+    Ok(())
+}
+
+fn key_command(new: bool) -> Result<(), String> {
+    let (path, mut config) = set_up()?;
+    if !new {
+        println!("The key is part of the phone's address: amber-server url. A new one: amber-server key --new");
+        return Ok(());
+    }
+    config.key = amber_core::api::new_key();
+    config.save(&path)?;
+    println!("New key - every phone with the old address is locked out. A running server picks it up on restart.\n");
+    print!("{}", info::describe(&config, &info::interfaces()));
     Ok(())
 }
 
@@ -219,12 +256,7 @@ fn cleanup_command(action: Option<CleanupAction>) -> Result<(), String> {
 fn config_command(action: Option<ConfigAction>) -> Result<(), String> {
     let (path, mut config) = current()?;
     match action {
-        None => {
-            println!("{}", path.display());
-            for key in config::KEYS {
-                println!("  {key} = {}", config.get(key)?);
-            }
-        }
+        None => print!("{}", info::listing(&config, &path)),
         Some(ConfigAction::Get { key }) => println!("{}", config.get(&key)?),
         Some(ConfigAction::Set { key, value }) => {
             config.set(&key, &value)?;

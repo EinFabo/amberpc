@@ -249,6 +249,8 @@ fn param(header: &str, key: &str) -> Option<String> {
 /// out - a phone can never reach them.
 pub fn phone_addresses(interfaces: &[(String, IpAddr)]) -> Vec<(String, Ipv4Addr)> {
     const VIRTUAL: [&str; 7] = ["vethernet", "wsl", "hyper-v", "virtualbox", "vmware", "loopback", "docker"];
+    // Linux names: containers', VMs' and the loopback's (WSL puts a 10.x address on it).
+    const LINUX: [&str; 7] = ["veth", "br-", "virbr", "vboxnet", "cni", "podman", "flannel"];
     let mut found: Vec<(String, Ipv4Addr)> = interfaces
         .iter()
         .filter_map(|(name, ip)| match ip {
@@ -257,7 +259,7 @@ pub fn phone_addresses(interfaces: &[(String, IpAddr)]) -> Vec<(String, Ipv4Addr
         })
         .filter(|(name, _)| {
             let lower = name.to_lowercase();
-            !VIRTUAL.iter().any(|v| lower.contains(v))
+            lower != "lo" && !VIRTUAL.iter().any(|v| lower.contains(v)) && !LINUX.iter().any(|v| lower.starts_with(v))
         })
         .collect();
     found.sort_by_key(|(_, ip)| match ip.octets() {
@@ -604,6 +606,27 @@ mod tests {
         ];
         let got: Vec<String> = phone_addresses(&ifs).iter().map(|(n, ip)| format!("{n} {ip}")).collect();
         assert_eq!(got, ["Ethernet 192.168.178.30", "WLAN 10.0.0.7", "Tailscale 100.80.1.2"]);
+    }
+
+    #[test]
+    fn linux_bridges_and_loopback_are_not_for_the_phone() {
+        let ifs: Vec<(String, IpAddr)> = [
+            ("lo", "10.255.255.254"),
+            ("docker0", "172.17.0.1"),
+            ("br-3f2a9c", "172.18.0.1"),
+            ("veth1a2b3c", "10.1.0.5"),
+            ("virbr0", "192.168.122.1"),
+            ("vboxnet0", "192.168.56.1"),
+            ("cni0", "10.42.0.1"),
+            ("podman0", "10.88.0.1"),
+            ("enp3s0", "192.168.1.20"),
+            ("wlp2s0", "10.0.0.9"),
+        ]
+        .iter()
+        .map(|(n, ip)| (n.to_string(), ip.parse().unwrap()))
+        .collect();
+        let got: Vec<String> = phone_addresses(&ifs).iter().map(|(n, ip)| format!("{n} {ip}")).collect();
+        assert_eq!(got, ["enp3s0 192.168.1.20", "wlp2s0 10.0.0.9"]);
     }
 
     /// Stands in for the engine; remembers what it was given.
