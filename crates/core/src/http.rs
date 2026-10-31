@@ -60,6 +60,8 @@ pub struct Request<'a> {
     pub method: String,
     pub target: String,
     pub peer: IpAddr,
+    /// When the connection came in: with [Request::body] read, how long the upload took.
+    pub accepted: Instant,
     headers: Vec<(String, String)>,
     /// Bytes read past the head: the start of the body.
     rest: Vec<u8>,
@@ -241,7 +243,7 @@ fn serve(stream: &mut TcpStream, peer: IpAddr, shared: &Shared, accepted: Instan
         Err((status, message)) => return respond(stream, status, &error_body(message, "invalid_request_error")),
     };
     let _ = stream.set_read_timeout(Some(limits.io_timeout));
-    let mut request = Request { method, target, peer, headers, rest, stream, limits: shared.limits };
+    let mut request = Request { method, target, peer, accepted, headers, rest, stream, limits: shared.limits };
     let (status, body) = (shared.handler)(&mut request);
     respond(request.stream, status, &body);
 }

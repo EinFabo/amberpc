@@ -471,12 +471,14 @@ fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>, guard: &Mutex<Guar
             };
             let content_type = req.header("Content-Type").unwrap_or("").to_string();
             let _one_at_a_time = busy.lock().unwrap_or_else(|e| e.into_inner());
-            transcribe(&content_type, &body, &peer, hooks)
+            // Over the tunnel from mobile data the upload can take longer than the recognition.
+            let upload = format!("{} KB uploaded in {} ms", body.len() / 1024, req.accepted.elapsed().as_millis());
+            transcribe(&content_type, &body, &peer, &upload, hooks)
         }
     }
 }
 
-fn transcribe(content_type: &str, body: &[u8], peer: &str, hooks: &Hooks) -> (u16, serde_json::Value) {
+fn transcribe(content_type: &str, body: &[u8], peer: &str, upload: &str, hooks: &Hooks) -> (u16, serde_json::Value) {
     let started = Instant::now();
     let parts = match parse_multipart(content_type, body) {
         Ok(p) => p,
@@ -496,7 +498,7 @@ fn transcribe(content_type: &str, body: &[u8], peer: &str, hooks: &Hooks) -> (u1
     // Silence is a valid question with an empty answer - the phone's connection test sends a
     // quiet tone and counts "nothing recognized" as success.
     if !audio::has_speech(&mono16k, audio::TARGET_RATE) {
-        (hooks.log)(format!("phone API: {peer}, {} ms of audio, nothing heard", audio::duration_ms(mono16k.len(), audio::TARGET_RATE)));
+        (hooks.log)(format!("phone API: {peer}, {} ms of audio, nothing heard ({upload})", audio::duration_ms(mono16k.len(), audio::TARGET_RATE)));
         return (200, serde_json::json!({ "text": "" }));
     }
     let wav = audio::encode_wav(&audio::pad_for_engine(&mono16k, audio::TARGET_RATE), audio::TARGET_RATE);
@@ -515,7 +517,7 @@ fn transcribe(content_type: &str, body: &[u8], peer: &str, hooks: &Hooks) -> (u1
             let cleaned = (hooks.tidy)(text::clean(&raw));
             (hooks.record)(&cleaned, audio::duration_ms(mono16k.len(), audio::TARGET_RATE), started.elapsed().as_millis() as u64);
             (hooks.log)(format!(
-                "phone API: {peer}, {} words from {} ms of audio in {} ms",
+                "phone API: {peer}, {} words from {} ms of audio in {} ms ({upload})",
                 text::words(&cleaned),
                 audio::duration_ms(mono16k.len(), audio::TARGET_RATE),
                 started.elapsed().as_millis()
@@ -704,6 +706,37 @@ mod tests {
         assert!(log.lock().unwrap()[0].contains("3 words"));
         // "Test connection" on the phone: GET models works too.
         assert!(client.check().is_ok());
+    }
+
+    /// Over the tunnel from a phone on mobile data, the upload can take longer than the
+    /// recognition - the log says how long it took, and how big it was.
+    #[test]
+    fn the_log_tells_how_long_the_upload_took() {
+        let (srv, _, log) = server(Ok("hallo".into()));
+        let wav = speech();
+        let mut body = b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"d.wav\"\r\nContent-Type: audio/wav\r\n\r\n".to_vec();
+        body.extend_from_slice(&wav);
+        body.extend_from_slice(b"\r\n--b--\r\n");
+        let head = format!(
+            "POST /testkey/v1/audio/transcriptions HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut s = TcpStream::connect(srv.addr).unwrap();
+        s.write_all(head.as_bytes()).unwrap();
+        s.write_all(&body[..body.len() / 2]).unwrap();
+        // A slow uplink.
+        std::thread::sleep(Duration::from_millis(400));
+        s.write_all(&body[body.len() / 2..]).unwrap();
+        let mut answer = String::new();
+        let _ = s.read_to_string(&mut answer);
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        let line = log.lock().unwrap().last().cloned().unwrap();
+        let kb = body.len() / 1024;
+        assert!(line.contains(&format!("{kb} KB uploaded in ")), "{line}");
+        let ms: u64 = line.split(" KB uploaded in ").nth(1).unwrap().split(" ms").next().unwrap().parse().unwrap();
+        // Counted from when the server took the connection, which its accept loop does up to
+        // ~50 ms late.
+        assert!((300..3_000).contains(&ms), "the upload's time, the pause included: {line}");
     }
 
     #[test]
