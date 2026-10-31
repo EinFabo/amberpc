@@ -87,14 +87,21 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             tunnel::sync(&app);
         });
     }
+    if let Some(path) = tunnel::import_path(&std::env::args().collect::<Vec<_>>()) {
+        tunnel::import(app, &path);
+    }
     updates::spawn(app);
     Ok(())
 }
 
 pub fn run() {
     tauri::Builder::default()
-        // First: a second start only brings the running Amber forward.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| bubble::open_settings(app, None)))
+        // First: a second start only brings the running Amber forward - or hands it a tunnel
+        // setup (tools/setup-tunnel.sh).
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| match tunnel::import_path(&args) {
+            Some(path) => tunnel::import(app, &path),
+            None => bubble::open_settings(app, None),
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())

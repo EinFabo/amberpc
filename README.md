@@ -152,6 +152,10 @@ enter in the phone's *Engine → Own server* (as text and as a QR code), e.g.
   its environment (never on the command line), and shows `https://<host>/<key>/v1` with a QR
   code. Requests arrive from 127.0.0.1 through cloudflared; the access key keeps strangers
   out, and refusals are logged at most every 10 s with the sender Cloudflare names.
+  One command does all of it from WSL: `tools/setup-tunnel.sh amber-x7k2.example.com` logs
+  in to Cloudflare (browser, once), creates the tunnel, routes the hostname, and hands token
+  and hostname to Amber (`amber.exe --import-tunnel <file>`, the file deleted on reading)
+  with a new access key.
 
 ## Inserting
 

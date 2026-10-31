@@ -71,6 +71,32 @@ pub fn tunnel_token(pasted: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// What tools/setup-tunnel.sh hands over: the tunnel's token and hostname, and whether the
+/// phone gets a new access key with its new address.
+#[derive(Debug, PartialEq)]
+pub struct TunnelImport {
+    pub token: String,
+    pub host: String,
+    pub new_key: bool,
+}
+
+pub fn parse_tunnel_import(json: &str) -> Result<TunnelImport, String> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        token: String,
+        host: String,
+        #[serde(default, rename = "newKey")]
+        new_key: bool,
+    }
+    let raw: Raw = serde_json::from_str(json).map_err(|e| format!("not a tunnel setup file ({e})"))?;
+    let token = tunnel_token(&raw.token).ok_or("the tunnel token is not valid")?;
+    let host = public_host(&raw.host);
+    if host.is_empty() {
+        return Err(format!("\"{}\" is not a hostname", raw.host));
+    }
+    Ok(TunnelImport { token, host, new_key: raw.new_key })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     Health,
@@ -871,6 +897,17 @@ mod tests {
         assert_eq!(tunnel_token(&token).as_deref(), Some(token.as_str()));
         assert_eq!(tunnel_token(&format!("cloudflared.exe service install {token}")).as_deref(), Some(token.as_str()));
         assert_eq!(tunnel_token("hallo"), None);
+    }
+
+    #[test]
+    fn reads_what_the_setup_script_hands_over() {
+        let token = format!("eyJhIjoi{}", "x".repeat(150));
+        let i = parse_tunnel_import(&format!(r#"{{"token":"{token}","host":"Amber-X7.Example.com","newKey":true}}"#)).unwrap();
+        assert_eq!(i, TunnelImport { token: token.clone(), host: "amber-x7.example.com".into(), new_key: true });
+        assert!(!parse_tunnel_import(&format!(r#"{{"token":"{token}","host":"a.example.com"}}"#)).unwrap().new_key);
+        assert!(parse_tunnel_import(&format!(r#"{{"token":"nope","host":"a.example.com"}}"#)).is_err());
+        assert!(parse_tunnel_import(&format!(r#"{{"token":"{token}","host":"localhost"}}"#)).is_err());
+        assert!(parse_tunnel_import("garbage").is_err());
     }
 
     #[test]
