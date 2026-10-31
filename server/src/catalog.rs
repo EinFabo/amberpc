@@ -44,6 +44,7 @@ pub fn total_ram_mb() -> u64 {
 }
 
 /// `MemTotal` of /proc/meminfo, in MB.
+#[cfg_attr(windows, allow(dead_code))]
 fn meminfo_mb(text: &str) -> Option<u64> {
     let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
     let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;

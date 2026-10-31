@@ -12,7 +12,7 @@ pub fn cpu_check() -> Result<(), String> {
 fn check(build: Option<&str>, has_avx2: bool) -> Result<(), String> {
     if matches!(build, Some("cpu" | "vulkan")) && !has_avx2 {
         return Err("this CPU has no AVX2, which this build needs - install the cpu-compat build: \
-                    https://github.com/EinFabo/amberpc/releases (amber-server-*-cpu-compat)"
+                    https://github.com/EinFabo/amberpc/releases/tag/server-latest (amber-server-*-cpu-compat)"
             .into());
     }
     Ok(())

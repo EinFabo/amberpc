@@ -1,0 +1,131 @@
+# Amber Server: six binaries (Linux and Windows x CPU, older CPU, Vulkan GPU) on a server-v* tag,
+# released with their SHA256SUMS and the two installers.
+#
+# A server release is never GitHub's "latest" release: the desktop app's updater reads
+# releases/latest/download/latest.json. The installers fetch from the release `server-latest`,
+# which every server release refreshes.
+#
+# Run by hand (workflow_dispatch) it only builds, for a look at the artifacts.
+name: Amber Server release
+
+on:
+  push:
+    tags: ["server-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VULKAN_VERSION: 1.4.313.0
+  CARGO_TERM_COLOR: never
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+        build: [cpu, cpu-compat, vulkan]
+    runs-on: ${{ matrix.os }}
+    env:
+      AMBER_SERVER_BUILD: ${{ matrix.build }}
+      # whisper-rs-sys hands GGML_* to whisper.cpp's cmake. Never -march=native: the runner's
+      # CPU is not the user's.
+      GGML_NATIVE: "OFF"
+      GGML_AVX: "ON"
+      GGML_AVX2: ${{ matrix.build == 'cpu-compat' && 'OFF' || 'ON' }}
+      GGML_FMA: ${{ matrix.build == 'cpu-compat' && 'OFF' || 'ON' }}
+      GGML_F16C: ${{ matrix.build == 'cpu-compat' && 'OFF' || 'ON' }}
+      GGML_BMI2: ${{ matrix.build == 'cpu-compat' && 'OFF' || 'ON' }}
+      GGML_AVX512: "OFF"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Vulkan SDK (Linux)
+        if: matrix.build == 'vulkan' && runner.os == 'Linux'
+        run: |
+          curl -fsSL "https://sdk.lunarg.com/sdk/download/$VULKAN_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_VERSION.tar.xz" -o "$RUNNER_TEMP/vulkan.tar.xz"
+          mkdir -p "$RUNNER_TEMP/vulkan" && tar -xJf "$RUNNER_TEMP/vulkan.tar.xz" -C "$RUNNER_TEMP/vulkan"
+          sdk="$RUNNER_TEMP/vulkan/$VULKAN_VERSION/x86_64"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "$sdk/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$sdk/lib" >> "$GITHUB_ENV"
+
+      - name: Vulkan SDK (Windows)
+        if: matrix.build == 'vulkan' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkan.exe'
+          curl.exe -fsSL -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          & $installer --root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install
+          "VULKAN_SDK=C:\VulkanSDK" >> $env:GITHUB_ENV
+          "C:\VulkanSDK\Bin" >> $env:GITHUB_PATH
+
+      - name: libclang for the bindings (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV'
+
+      - name: Build
+        shell: bash
+        run: cargo build -p amber-server --release --locked ${{ matrix.build == 'vulkan' && '--features vulkan' || '' }}
+
+      - name: Name it
+        shell: bash
+        run: |
+          os=${{ runner.os == 'Windows' && 'windows' || 'linux' }}
+          ext=${{ runner.os == 'Windows' && '.exe' || '' }}
+          mkdir out
+          cp "target/release/amber-server$ext" "out/amber-server-$os-x64-${{ matrix.build }}$ext"
+          "out/amber-server-$os-x64-${{ matrix.build }}$ext" --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amber-server-${{ matrix.os }}-${{ matrix.build }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/server-v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag matches the version
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          [ "${GITHUB_REF_NAME}" = "server-v$version" ] || { echo "tag ${GITHUB_REF_NAME} but Cargo.toml says $version"; exit 1; }
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums and installers
+        run: |
+          cp server/install-server.sh server/install-server.ps1 artifacts/
+          cd artifacts
+          set -- amber-server-*
+          [ "$#" -eq 6 ] || { echo "expected six binaries, got: $*"; exit 1; }
+          sha256sum amber-server-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Release
+        run: |
+          notes="Amber Server ${GITHUB_REF_NAME#server-v}. Install: curl -fsSL https://github.com/${GH_REPO}/releases/download/server-latest/install-server.sh | sh  -  Windows: irm https://github.com/${GH_REPO}/releases/download/server-latest/install-server.ps1 | iex"
+          gh release create "$GITHUB_REF_NAME" artifacts/* --latest=false --title "Amber Server ${GITHUB_REF_NAME#server-v}" --notes "$notes"
+          # The installers' fixed address.
+          if gh release view server-latest > /dev/null 2>&1; then
+            gh release upload server-latest artifacts/* --clobber
+            gh release edit server-latest --latest=false --notes "Always the newest Amber Server - now ${GITHUB_REF_NAME#server-v}. $notes"
+          else
+            gh release create server-latest artifacts/* --latest=false --target "$GITHUB_SHA" --title "Amber Server (newest)" --notes "Always the newest Amber Server - now ${GITHUB_REF_NAME#server-v}. $notes"
+          fi

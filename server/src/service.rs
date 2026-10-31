@@ -20,6 +20,7 @@ pub fn log_file() -> PathBuf {
     crate::paths::data_dir().join("amber-server.log")
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 /// The systemd user unit. It restarts after a crash, not after exit 78 ("set it up first").
 pub fn systemd_unit(exe: &Path) -> String {
     // systemd reads % as a specifier, $ as a variable, and \ and " as escapes inside quotes.
@@ -39,6 +40,7 @@ pub fn systemd_unit(exe: &Path) -> String {
     )
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 /// Whether the user's systemd can run the service, from `systemctl --user is-system-running`'s
 /// output: "degraded" (some other unit failed) and "starting" can.
 pub fn systemd_usable(state: &str) -> bool {
