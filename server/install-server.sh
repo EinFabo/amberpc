@@ -11,6 +11,9 @@
 # AMBER_SERVER_FORCE_BUILD=cpu|cpu-compat|vulkan picks the build yourself.
 set -eu
 
+# Everything inside main, called on the last line: a download cut off half-way runs nothing.
+main() {
+
 BASE="${AMBER_SERVER_BASE:-https://github.com/EinFabo/amberpc/releases/download/server-latest}"
 DEST="$HOME/.local/bin"
 BIN="$DEST/amber-server"
@@ -26,9 +29,18 @@ case "$(uname -s)-$(uname -m)" in
     *) fail "this installer is for Linux on x86-64 (this is $(uname -s) $(uname -m)); Windows: install-server.ps1" ;;
 esac
 
+CPUINFO="${AMBER_SERVER_CPUINFO:-/proc/cpuinfo}"
+cpu_has() { grep -qw "$1" "$CPUINFO" 2> /dev/null; }
+
+# Every build needs AVX; many NAS and mini-PC processors have none.
+if [ -z "${AMBER_SERVER_FORCE_BUILD:-}" ] && ! cpu_has avx; then
+    fail "this CPU has no AVX, which Amber Server needs - it cannot run on this machine"
+fi
+
 # A GPU the Vulkan build can use: the Vulkan loader and a real GPU.
 vulkan_gpu() {
-    { ldconfig -p 2>/dev/null || true; } | grep -q 'libvulkan\.so\.1' || return 1
+    # Debian keeps ldconfig in /sbin, off a normal user's PATH.
+    { ldconfig -p 2> /dev/null || /sbin/ldconfig -p 2> /dev/null || true; } | grep -q 'libvulkan\.so\.1' || return 1
     if command -v vulkaninfo > /dev/null 2>&1; then
         vulkaninfo --summary 2>/dev/null | grep -q 'PHYSICAL_DEVICE_TYPE_DISCRETE_GPU'
     else
@@ -37,14 +49,15 @@ vulkan_gpu() {
     fi
 }
 
+cpu_build=cpu-compat
+cpu_has avx2 && cpu_build=cpu
 build="${AMBER_SERVER_FORCE_BUILD:-}"
 if [ -z "$build" ]; then
-    if vulkan_gpu; then
+    # The Vulkan build is built for AVX2 too.
+    if [ "$cpu_build" = cpu ] && vulkan_gpu; then
         build=vulkan
-    elif grep -qw avx2 /proc/cpuinfo 2>/dev/null; then
-        build=cpu
     else
-        build=cpu-compat
+        build=$cpu_build
     fi
 fi
 case "$build" in
@@ -77,11 +90,10 @@ download() {
 }
 
 download "$build"
-# The Vulkan build needs a working driver; without one, the CPU build.
-if [ "$build" = vulkan ] && ! "$tmp/amber-server-linux-x64-vulkan" --version > /dev/null 2>&1; then
-    say "The GPU build does not start here - taking the CPU build."
-    build=cpu
-    grep -qw avx2 /proc/cpuinfo 2>/dev/null || build=cpu-compat
+# The Vulkan build needs a working driver: it says whether it sees a GPU.
+if [ "$build" = vulkan ] && ! "$tmp/amber-server-linux-x64-vulkan" gpu-check > /dev/null 2>&1; then
+    say "The GPU build sees no usable GPU here (driver?) - taking the CPU build."
+    build=$cpu_build
     download "$build"
 fi
 
@@ -94,7 +106,20 @@ say ""
 
 "$BIN" setup --quick
 say ""
-if ! "$BIN" service install; then
+if "$BIN" service install; then
+    # Up and answering? Loading the model takes a moment.
+    waited=0
+    until "$BIN" status 2> /dev/null | grep -q "answers on port"; do
+        if [ "$waited" -ge "${AMBER_SERVER_WAIT:-20}" ]; then
+            say ""
+            say "The server was installed but does not answer. Its last lines:"
+            "$BIN" logs 2>&1 | tail -n 5
+            fail "see above - amber-server status and amber-server logs tell more"
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+else
     say ""
     say "The background service could not be set up - start the server yourself: $BIN run"
 fi
@@ -106,3 +131,6 @@ case ":$PATH:" in
     *":$DEST:"*) ;;
     *) say "To type amber-server anywhere, add $DEST to your PATH: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.profile" ;;
 esac
+}
+
+main "$@"

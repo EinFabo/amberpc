@@ -24,16 +24,27 @@ function Install-AmberServer {
         throw 'Amber Server needs 64-bit Windows.'
     }
 
-    Add-Type -Namespace AmberInstall -Name Cpu -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool IsProcessorFeaturePresent(uint feature);'
-    $avx2 = [AmberInstall.Cpu]::IsProcessorFeaturePresent(40) # PF_AVX2_INSTRUCTIONS_AVAILABLE
+    if ($null -ne $env:AMBER_SERVER_CPU_FLAGS) {
+        # For the installer's own test: the CPU's flags, e.g. 'avx avx2'.
+        $flags = $env:AMBER_SERVER_CPU_FLAGS -split '\s+'
+        $avx = $flags -contains 'avx'
+        $avx2 = $flags -contains 'avx2'
+    } else {
+        Add-Type -Namespace AmberInstall -Name Cpu -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool IsProcessorFeaturePresent(uint feature);'
+        $avx = [AmberInstall.Cpu]::IsProcessorFeaturePresent(39) # PF_AVX_INSTRUCTIONS_AVAILABLE
+        $avx2 = [AmberInstall.Cpu]::IsProcessorFeaturePresent(40) # PF_AVX2_INSTRUCTIONS_AVAILABLE
+    }
+    $build = $env:AMBER_SERVER_FORCE_BUILD
+    if (-not $build -and -not $avx) {
+        throw 'This CPU has no AVX, which Amber Server needs - it cannot run on this PC.'
+    }
     $cpuBuild = if ($avx2) { 'cpu' } else { 'cpu-compat' }
 
-    $build = $env:AMBER_SERVER_FORCE_BUILD
     if (-not $build) {
-        # The Vulkan loader and a GPU from NVIDIA or AMD.
+        # The Vulkan loader and a GPU from NVIDIA or AMD - and AVX2, which the Vulkan build is built for.
         $loader = Test-Path (Join-Path $env:SystemRoot 'System32\vulkan-1.dll')
         $gpu = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'NVIDIA|AMD|Radeon' }
-        $build = if ($loader -and $gpu) { 'vulkan' } else { $cpuBuild }
+        $build = if ($avx2 -and $loader -and $gpu) { 'vulkan' } else { $cpuBuild }
     }
     if ($build -notin 'cpu', 'cpu-compat', 'vulkan') {
         throw "Unknown build '$build' - cpu, cpu-compat or vulkan."
@@ -68,10 +79,10 @@ function Install-AmberServer {
 
         $file = Get-Build $build
         if ($build -eq 'vulkan') {
-            # The Vulkan build needs a working driver; without one, the CPU build.
-            & $file --version *> $null
+            # The Vulkan build needs a working driver: it says whether it sees a GPU.
+            & $file gpu-check *> $null
             if ($LASTEXITCODE -ne 0) {
-                Write-Host 'The GPU build does not start here - taking the CPU build.'
+                Write-Host 'The GPU build sees no usable GPU here (driver?) - taking the CPU build.'
                 $build = $cpuBuild
                 $file = Get-Build $build
             }
@@ -103,7 +114,21 @@ function Install-AmberServer {
     Write-Host ''
     Write-Host 'If Windows asks about the firewall: allow private networks, so the phone can reach this PC.'
     & $bin service install
-    if ($LASTEXITCODE -ne 0) {
+    if ($LASTEXITCODE -eq 0) {
+        # Up and answering? Loading the model takes a moment.
+        $wait = if ($env:AMBER_SERVER_WAIT) { [int]$env:AMBER_SERVER_WAIT } else { 20 }
+        $waited = 0
+        while (-not ((& $bin status 2>$null) -match 'answers on port')) {
+            if ($waited -ge $wait) {
+                Write-Host ''
+                Write-Host 'The server was installed but does not answer. Its last lines:'
+                & $bin logs 2>&1 | Select-Object -Last 5 | ForEach-Object { Write-Host $_ }
+                throw 'See above - amber-server status and amber-server logs tell more.'
+            }
+            Start-Sleep -Seconds 1
+            $waited++
+        }
+    } else {
         Write-Host ''
         Write-Host "The background task could not be set up - start the server yourself: $bin run"
     }

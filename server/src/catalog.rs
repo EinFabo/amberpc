@@ -21,7 +21,8 @@ pub struct Machine {
 
 pub fn machine(config: &Config) -> Machine {
     Machine {
-        gpu: cfg!(feature = "vulkan") && config.gpu == Gpu::Auto,
+        // The Vulkan build on a machine without a working driver runs on the CPU.
+        gpu: cfg!(feature = "vulkan") && config.gpu == Gpu::Auto && !crate::gpu::vulkan_devices().is_empty(),
         threads: std::thread::available_parallelism().map_or(4, |n| n.get() as u32),
         ram_mb: total_ram_mb(),
     }

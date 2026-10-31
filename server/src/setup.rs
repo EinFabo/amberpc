@@ -54,16 +54,16 @@ pub fn quick_with(path: &Path, machine: Machine, fetch: &dyn Fetch) -> Result<Co
     let mut config = existing(path)?;
     if !set_up(&config) {
         config.speech = recommended_speech(machine.gpu, machine.threads, machine.ram_mb).to_string();
-        // Amber for Windows on the same PC holds 8765: the next free one.
-        if !port_free(config.port) {
-            config.port = (config.port.saturating_add(1)..=u16::MAX).find(|p| port_free(*p)).unwrap_or(config.port);
-        }
+        config.port = free_from(config.port);
     }
     finish(path, config, fetch)
 }
 
-fn port_free(port: u16) -> bool {
-    std::net::TcpListener::bind(("0.0.0.0", port)).is_ok()
+/// [port], or the next free one when something holds it - Amber for Windows on the same PC
+/// has 8765. Only for a first setup: once set up, the server itself holds its port.
+fn free_from(port: u16) -> u16 {
+    let free = |p: u16| std::net::TcpListener::bind(("0.0.0.0", p)).is_ok();
+    if free(port) { port } else { (port.saturating_add(1)..=u16::MAX).find(|p| free(*p)).unwrap_or(port) }
 }
 
 /// Whether setup ran before: only it makes the key (`config set` before it leaves it empty).
@@ -107,6 +107,9 @@ pub fn ask_with(path: &Path, machine: Machine, fetch: &dyn Fetch, input: &mut dy
             Ok(()) => break,
             Err(e) => writeln!(out, "  {e}").map_err(w)?,
         }
+    }
+    if !set_up(&config) {
+        config.port = free_from(config.port);
     }
     loop {
         let answer = line(input, out, &format!("Port [{}]", config.port))?;
@@ -210,7 +213,9 @@ mod tests {
         let quick = quick_with(&p2, OFFICE_PC, &Stub::default()).unwrap();
         assert_eq!(asked.speech, quick.speech);
         assert_eq!(asked.speech, "futo-multilingual-74", "the office PC's recommendation");
-        assert_eq!((asked.cleanup.as_deref(), asked.port), (None, 8765));
+        // 8765, or the next free port where Amber for Windows holds it.
+        assert_eq!((asked.cleanup.as_deref(), asked.port), (None, quick.port));
+        assert!(asked.port >= 8765);
         assert_eq!(*stub.speech.borrow(), ["futo-multilingual-74"]);
         assert!(stub.cleanup.borrow().is_empty());
         assert_eq!(asked.key.len(), 20, "a key was made");
@@ -277,6 +282,16 @@ mod tests {
         // Set up before: the port is the user's choice, even while something holds it.
         Config { key: "k".repeat(20), port, ..Config::default() }.save(&p).unwrap();
         assert_eq!(quick_with(&p, OFFICE_PC, &Stub::default()).unwrap().port, port);
+    }
+
+    #[test]
+    fn asking_offers_a_free_port() {
+        let taken = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let (_d, p) = path();
+        Config { port, ..Config::default() }.save(&p).unwrap();
+        let c = ask_with(&p, OFFICE_PC, &Stub::default(), &mut "\n\n\n\n".as_bytes(), &mut Vec::new()).unwrap();
+        assert_ne!(c.port, port, "Enter must not take a port the server cannot get");
     }
 
     #[test]

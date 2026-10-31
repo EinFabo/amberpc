@@ -6,6 +6,7 @@ mod child;
 mod cleanup;
 mod config;
 mod cpu;
+mod gpu;
 mod info;
 mod paths;
 mod serve;
@@ -70,6 +71,9 @@ enum Command {
     Status,
     /// The service's last log lines
     Logs,
+    /// Whether this build sees a usable GPU (the installers ask; exit 1 without one)
+    #[command(hide = true)]
+    GpuCheck,
 }
 
 #[derive(Subcommand)]
@@ -128,6 +132,13 @@ fn main() {
             Ok(())
         }
         Command::Logs => info::logs(),
+        Command::GpuCheck => match gpu::vulkan_devices() {
+            [] => Err("no usable GPU for the Vulkan build here".into()),
+            devices => {
+                println!("{}", devices.join("\n"));
+                Ok(())
+            }
+        },
         Command::Models { action } => models_command(action),
         Command::Cleanup { action } => cleanup_command(action),
         Command::Service { action } => service_command(action),
