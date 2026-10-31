@@ -48,7 +48,11 @@ enum Command {
         action: Option<ConfigAction>,
     },
     /// Serve the API (what the background service runs)
-    Run,
+    Run {
+        /// Write the output to this file (what the Windows task does).
+        #[arg(long, hide = true)]
+        log: Option<std::path::PathBuf>,
+    },
     /// The phone's address, with a QR code
     Url,
     /// The access key
@@ -113,7 +117,10 @@ fn main() {
     let result = match cli.command {
         Command::Config { action } => config_command(action),
         Command::Setup { quick } => setup_command(quick),
-        Command::Run => serve::serve(),
+        Command::Run { log } => match log.map(|l| service::redirect_output(&l)).transpose() {
+            Ok(_) => serve::serve(),
+            Err(e) => Err(e),
+        },
         Command::Url => url_command(),
         Command::Key { new } => key_command(new),
         Command::Status => {
@@ -123,7 +130,7 @@ fn main() {
         Command::Logs => info::logs(),
         Command::Models { action } => models_command(action),
         Command::Cleanup { action } => cleanup_command(action),
-        _ => Err("not built yet".to_string()),
+        Command::Service { action } => service_command(action),
     };
     if let Err(e) = result {
         eprintln!("amber-server: {e}");
@@ -154,6 +161,19 @@ fn set_up() -> Result<(std::path::PathBuf, Config), String> {
         return Err("not set up yet - run: amber-server setup".into());
     }
     Ok((path, config))
+}
+
+fn service_command(action: ServiceAction) -> Result<(), String> {
+    match action {
+        ServiceAction::Install => {
+            // The service would only exit with "set it up first".
+            set_up()?;
+            println!("{}", service::install()?);
+        }
+        ServiceAction::Uninstall => println!("{}", service::uninstall()?),
+        ServiceAction::Status => println!("{}", service::state()),
+    }
+    Ok(())
 }
 
 fn url_command() -> Result<(), String> {
