@@ -35,7 +35,7 @@ Amber for Android shows the models it offers as a choice (`~/projects/amethyst/d
 - **Model list** (`/v1/models`): every downloaded model of both kinds with label and note
   (size, speed on this machine, CPU or GPU), the defaults marked.
 - Phone address and QR code in the terminal; per-user background service (systemd user unit
-  with linger; a scheduled task at log-on on Windows).
+  with linger; on Windows the user's own Run entry, started at log-on - no admin rights).
 
 ## Commands
 
@@ -57,11 +57,15 @@ Amber for Android shows the models it offers as a choice (`~/projects/amethyst/d
 ## Install
 
 ```sh
-curl -fsSL https://github.com/EinFabo/amberpc/releases/latest/download/install-server.sh | sh
+curl -fsSL https://github.com/EinFabo/amberpc/releases/download/server-latest/install-server.sh | sh
 ```
 ```powershell
-irm https://github.com/EinFabo/amberpc/releases/latest/download/install-server.ps1 | iex
+irm https://github.com/EinFabo/amberpc/releases/download/server-latest/install-server.ps1 | iex
 ```
+
+Server releases (`server-v*` tags) never become GitHub's "latest" release - the desktop app's
+updater reads `releases/latest/download/latest.json` - so the installers come from the release
+`server-latest`, which every server release refreshes.
 
 The script picks the build for the machine, checks it against `SHA256SUMS` from the same
 release, installs it (`~/.local/bin`, `%LOCALAPPDATA%\Programs\amber-server`), runs

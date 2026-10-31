@@ -157,6 +157,19 @@ enter in the phone's *Engine → Own server* (as text and as a QR code), e.g.
   and hostname to Amber (`amber.exe --import-tunnel <file>`, the file deleted on reading)
   with a new access key.
 
+## Amber Server
+
+The same phone API without the desktop app, for a PC, a NAS or a small Linux box: one
+command installs it (Linux or Windows, CPU or Vulkan GPU), sets it up with the model that
+suits the machine and starts it as a service; every setting and model has a command, and the
+phone chooses among the models it has downloaded.
+
+```sh
+curl -fsSL https://github.com/EinFabo/amberpc/releases/download/server-latest/install-server.sh | sh
+```
+
+See [server/README.md](server/README.md).
+
 ## Inserting
 
 The text goes into the window the dictation started in. If another program is in front by
