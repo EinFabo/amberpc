@@ -30,9 +30,29 @@ CF="$(ls "$LOCAL"/app.amber.pc/tools/cloudflared-*.exe 2>/dev/null | sort -V | t
 [ -x "$AMBER" ] || { echo "Amber is not installed on this PC."; exit 1; }
 [ -n "$CF" ] || { echo "cloudflared is missing: in Amber, Phone -> From anywhere -> switch on -> Download."; exit 1; }
 
-if [ ! -f "$PROFILE/.cloudflared/cert.pem" ]; then
-  echo "== Cloudflare login: a browser window opens - pick your domain and authorize."
-  "$CF" tunnel login
+CERT="$PROFILE/.cloudflared/cert.pem"
+DOWNLOADED="$PROFILE/Downloads/cert.pem"
+DOMAIN="${HOST#*.}"
+# When cloudflared cannot fetch the login certificate itself, the browser downloads it instead.
+take_downloaded() {
+  [ -f "$DOWNLOADED" ] || return 1
+  mkdir -p "$(dirname "$CERT")"
+  mv "$DOWNLOADED" "$CERT"
+  echo "== Took the login certificate from Downloads."
+}
+if [ ! -f "$CERT" ] && ! take_downloaded; then
+  echo "== Cloudflare login. In the browser window: sign in, click $DOMAIN in the list, then Authorize."
+  echo "   (No window? Open the link below yourself. $DOMAIN not in the list? It is not on this Cloudflare account.)"
+  set +e
+  "$CF" tunnel login 2>&1 | while IFS= read -r line; do
+    echo "$line"
+    case "$line" in https://dash.cloudflare.com/*) explorer.exe "$line" >/dev/null 2>&1 ;; esac
+  done
+  set -e
+  if [ ! -f "$CERT" ] && ! take_downloaded; then
+    echo "The login was not completed. Run this again and authorize $DOMAIN in the browser."
+    exit 1
+  fi
 fi
 if "$CF" tunnel info "$NAME" >/dev/null 2>&1; then
   echo "== Tunnel \"$NAME\" is there already."
