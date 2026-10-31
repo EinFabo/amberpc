@@ -64,7 +64,11 @@ fn start() -> Result<(), (i32, String)> {
     let cleanup = match config.cleanup.as_deref().and_then(local::llm_model) {
         Some(m) if llm_ready(&dirs.cleanup, m) => {
             let exe = crate::catalog::ensure_llama(&dirs.data, gpu).map_err(|e| (1, e))?;
-            Some(Arc::new(Cleanup::new(dirs.cleanup.clone(), exe, config.threads)))
+            let c = Arc::new(Cleanup::new(dirs.cleanup.clone(), exe, config.threads));
+            // Loaded now: the phone gives up on a cleanup after 12 s, a load can take longer.
+            let (warm, id) = (c.clone(), m.id);
+            std::thread::spawn(move || warm.warm(id));
+            Some(c)
         }
         _ => None,
     };

@@ -67,26 +67,7 @@ impl Cleanup {
     pub fn answer(&self, request: &Value, default: &str) -> Result<Value, (u16, String)> {
         let id = self.chosen(request["model"].as_str(), default)?;
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((failed, at, why)) = &st.failed {
-            if *failed == id && at.elapsed() < RETRY {
-                return Err((503, why.clone()));
-            }
-        }
-        if !st.running.as_mut().is_some_and(|r| r.id == id && r.handle.alive()) {
-            if let Some(mut old) = st.running.take() {
-                old.handle.stop();
-            }
-            match self.start(&id) {
-                Ok(r) => {
-                    st.failed = None;
-                    st.running = Some(r);
-                }
-                Err(why) => {
-                    st.failed = Some((id, Instant::now(), why.clone()));
-                    return Err((503, why));
-                }
-            }
-        }
+        self.ensure(&mut st, &id)?;
         let r = st.running.as_ref().expect("started above");
         ChatCleaner::new(&r.url, &r.key, &r.id, None).forward(request).map_err(|e| {
             let status = match e.kind {
@@ -97,6 +78,39 @@ impl Cleanup {
             };
             (status, e.message)
         })
+    }
+
+    /// Loads [id] now, so the first request does not wait for it (`run` does this for the
+    /// default). A failure is remembered as for a request.
+    pub fn warm(&self, id: &str) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self.ensure(&mut st, id);
+    }
+
+    /// [id] running - started, or restarted for it - unless it failed a moment ago.
+    fn ensure(&self, st: &mut State, id: &str) -> Result<(), (u16, String)> {
+        if let Some((failed, at, why)) = &st.failed {
+            if failed == id && at.elapsed() < RETRY {
+                return Err((503, why.clone()));
+            }
+        }
+        if st.running.as_mut().is_some_and(|r| r.id == id && r.handle.alive()) {
+            return Ok(());
+        }
+        if let Some(mut old) = st.running.take() {
+            old.handle.stop();
+        }
+        match self.start(id) {
+            Ok(r) => {
+                st.failed = None;
+                st.running = Some(r);
+                Ok(())
+            }
+            Err(why) => {
+                st.failed = Some((id.to_string(), Instant::now(), why.clone()));
+                Err((503, why))
+            }
+        }
     }
 
     fn chosen(&self, requested: Option<&str>, default: &str) -> Result<String, (u16, String)> {
@@ -118,8 +132,9 @@ impl Cleanup {
             if !handle.alive() {
                 return Err(format!("the cleanup model {id} did not start: {}", handle.output()));
             }
-            // llama-server answers 503 while it loads, 200 once ready.
-            if amber_core::engine::local_server_ready(&url) {
+            // llama-server answers 503 while it loads, 200 {"status":"ok"} once ready - not
+            // any other program that may have taken the port meanwhile.
+            if amber_core::engine::health_ok(&url) {
                 return Ok(Running { id: id.to_string(), url, key, handle });
             }
             if Instant::now() > until {
@@ -152,18 +167,22 @@ impl Handle for crate::child::Child {
 impl Launcher for LlamaLauncher {
     fn launch(&self, file: &Path, port: u16, key: &str) -> Result<Box<dyn Handle>, String> {
         let threads = if self.threads == 0 { amber_core::local::default_threads() } else { self.threads };
-        let mut cmd = Command::new(&self.exe);
-        cmd.arg("--model")
-            .arg(file)
-            .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--api-key", key])
-            .args(["--ctx-size", "4096", "--parallel", "1", "--threads", &threads.to_string()]);
-        // llama.cpp's Linux build keeps its libraries next to the program.
-        #[cfg(unix)]
-        if let Some(dir) = self.exe.parent() {
-            cmd.env("LD_LIBRARY_PATH", dir);
-        }
-        crate::child::Child::spawn(cmd).map(|c| Box::new(c) as Box<dyn Handle>).map_err(|e| format!("the cleanup engine could not start: {e}"))
+        crate::child::Child::spawn(llama_command(&self.exe, file, port, key, threads))
+            .map(|c| Box::new(c) as Box<dyn Handle>)
+            .map_err(|e| format!("the cleanup engine could not start: {e}"))
     }
+}
+
+/// The key goes in the environment (`LLAMA_API_KEY`), not on the command line other users
+/// can read. llama.cpp's Linux build finds its libraries itself (RUNPATH `$ORIGIN`).
+fn llama_command(exe: &Path, file: &Path, port: u16, key: &str, threads: u32) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.arg("--model")
+        .arg(file)
+        .args(["--host", "127.0.0.1", "--port", &port.to_string()])
+        .args(["--ctx-size", "4096", "--parallel", "1", "--threads", &threads.to_string()])
+        .env("LLAMA_API_KEY", key);
+    cmd
 }
 
 #[cfg(test)]
@@ -273,6 +292,27 @@ mod tests {
         let err = c.answer(&ask("a"), "a").unwrap_err();
         assert_eq!(err.0, 503);
         assert!(err.1.contains("amber-server cleanup add"), "{}", err.1);
+    }
+
+    #[test]
+    fn the_default_can_be_loaded_ahead() {
+        let (_d, c, launches) = setup(false, &["a.gguf"]);
+        c.warm("a");
+        assert_eq!(launches.lock().unwrap().len(), 1);
+        assert_eq!(content(&c.answer(&ask("a"), "a").unwrap()), "a.gguf");
+        assert_eq!(launches.lock().unwrap().len(), 1, "no second start");
+    }
+
+    #[test]
+    fn the_key_stays_off_the_command_line() {
+        let cmd = llama_command(Path::new("/opt/llama/llama-server"), Path::new("/m/a.gguf"), 5555, "s3cret", 4);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(!args.iter().any(|a| a.contains("s3cret")), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--port", "5555"]));
+        let envs: Vec<(String, Option<String>)> =
+            cmd.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
+        assert!(envs.contains(&("LLAMA_API_KEY".into(), Some("s3cret".into()))));
+        assert!(!envs.iter().any(|(k, _)| k == "LD_LIBRARY_PATH"), "the user's own value stays");
     }
 
     #[test]

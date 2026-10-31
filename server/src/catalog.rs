@@ -50,17 +50,27 @@ fn meminfo_mb(text: &str) -> Option<u64> {
     Some(kb / 1024)
 }
 
+/// The desktop's recommendation - but never a model too big for the memory (with a GPU the
+/// recommendation does not look at it): then the largest small one that fits.
 pub fn recommended_speech(gpu: bool, threads: u32, ram_mb: u64) -> &'static str {
-    local::recommend(gpu, threads, ram_mb).1
+    let pick = local::recommend(gpu, threads, ram_mb).1;
+    std::iter::once(pick)
+        .chain(["futo-multilingual-244", "futo-multilingual-74"])
+        .find(|id| local::model(id).is_some_and(|m| !too_big(m, ram_mb)))
+        .unwrap_or("futo-multilingual-74")
+}
+
+/// In memory a model takes about twice its file; more than half the RAM leaves too little.
+fn too_big(m: &Model, ram_mb: u64) -> bool {
+    u64::from(m.size_mb) * 2 > ram_mb / 2
 }
 
 /// How a speech model suits a machine: "recommended", "fits", "slow here" or "too big".
 pub fn fit(m: &Model, gpu: bool, threads: u32, ram_mb: u64) -> &'static str {
-    if m.id == recommended_speech(gpu, threads, ram_mb) {
-        "recommended"
-    } else if u64::from(m.size_mb) * 2 > ram_mb / 2 {
-        // In memory it takes about twice its file; more than half the RAM leaves too little.
+    if too_big(m, ram_mb) {
         "too big"
+    } else if m.id == recommended_speech(gpu, threads, ram_mb) {
+        "recommended"
     } else if m.wants_gpu && !gpu {
         "slow here"
     } else {
@@ -82,10 +92,14 @@ fn download(url: &str, sha256: &str, dest: &Path, label: &str) -> Result<(), Str
     let cancel = AtomicBool::new(false);
     let mut last = u64::MAX;
     let result = local::download_verified(url, sha256, dest, &cancel, &mut |done, total| {
-        let percent = total.map(|t| done * 100 / t.max(1)).unwrap_or(0);
-        if percent != last {
-            last = percent;
-            eprint!("\r  {label}: {percent}% of {} MB   ", total.unwrap_or(0) / (1 << 20));
+        // Percent of a known size, else megabytes so far.
+        let step = total.map_or(done >> 20, |t| done * 100 / t.max(1));
+        if step != last {
+            last = step;
+            match total {
+                Some(t) => eprint!("\r  {label}: {step}% of {} MB   ", t >> 20),
+                None => eprint!("\r  {label}: {step} MB   "),
+            }
             let _ = std::io::stderr().flush();
         }
     });
@@ -182,6 +196,9 @@ mod tests {
         assert_eq!(fit(turbo, true, 16, 32_000), "recommended");
         assert_eq!(fit(turbo, false, 16, 32_000), "slow here", "a GPU model on a CPU");
         assert_eq!(fit(amber_core::local::model("futo-multilingual-244").unwrap(), true, 16, 32_000), "fits");
+        // A GPU in a small box: the big model is too big, and not what setup takes.
+        assert_eq!(fit(turbo, true, 16, 3_000), "too big");
+        assert_eq!(recommended_speech(true, 16, 3_000), "futo-multilingual-244");
     }
 
     #[test]

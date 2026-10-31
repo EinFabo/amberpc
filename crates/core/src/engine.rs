@@ -246,6 +246,21 @@ pub fn local_server_ready(base_url: &str) -> bool {
         .is_some_and(|r| r.status().as_u16() != 503)
 }
 
+/// Whether the server at [base_url] says it is ready: `GET /health` answering 200 with
+/// `{"status": "ok"}` (llama-server, whisper-server). Anything else - loading, an error, some
+/// other program that took the port - is not.
+pub fn health_ok(base_url: &str) -> bool {
+    let url = format!("{}/health", base_url.trim_end_matches('/'));
+    Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .ok()
+        .and_then(|c| c.get(url).send().ok())
+        .filter(|r| r.status().as_u16() == 200)
+        .and_then(|r| r.json::<serde_json::Value>().ok())
+        .is_some_and(|v| v["status"] == "ok")
+}
+
 fn wav_part(wav: &[u8]) -> multipart::Part {
     multipart::Part::bytes(wav.to_vec()).file_name("dictation.wav").mime_str("audio/wav").expect("static mime")
 }
@@ -469,6 +484,18 @@ mod tests {
         assert_eq!((text.as_str(), lang.as_deref()), (" Hallo.", Some("german")));
         let body = String::from_utf8_lossy(&rx.recv().unwrap().body).to_string();
         assert!(body.contains("verbose_json") && body.contains("name=\"no_language_probabilities\"\r\n\r\ntrue"));
+    }
+
+    #[test]
+    fn health_means_this_kind_of_server_said_ok() {
+        let (url, _rx) = serve(vec![json(200, r#"{"status":"ok"}"#)]);
+        assert!(health_ok(&url));
+        let (url, _rx) = serve(vec![json(503, r#"{"error":"loading"}"#)]);
+        assert!(!health_ok(&url));
+        // Some other program on the port.
+        let (url, _rx) = serve(vec![json(200, r#"<html>hello</html>"#)]);
+        assert!(!health_ok(&url));
+        assert!(!health_ok("http://127.0.0.1:9"));
     }
 
     #[test]
