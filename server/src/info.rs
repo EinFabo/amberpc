@@ -77,9 +77,18 @@ pub fn status(path: &Path) -> String {
         None => out += "cleanup  off\n",
     }
     out += &format!("service  {}\n", crate::service::state());
-    let answers = amber_core::engine::health_ok(&format!("http://127.0.0.1:{}", config.port));
-    out += &format!("server   {}\n", if answers { format!("answers on port {}", config.port) } else { "not running".into() });
+    let health = amber_core::engine::health(&format!("http://127.0.0.1:{}", config.port));
+    out += &format!("server   {}\n", server_line(config.port, health.as_ref()));
     out
+}
+
+/// Whether Amber Server answers on [port] - and not something else, like the desktop app.
+pub fn server_line(port: u16, health: Option<&serde_json::Value>) -> String {
+    match health.map(|h| (h["service"].as_str().unwrap_or("another program"), h["version"].as_str().unwrap_or("?"))) {
+        Some(("amber-server", version)) => format!("answers on port {port} ({version})"),
+        Some((other, _)) => format!("not running - port {port} is taken by {other}: amber-server config set port <number>"),
+        None => "not running".into(),
+    }
 }
 
 /// The service's last lines.
@@ -134,6 +143,15 @@ mod tests {
         assert!(lines.len() > 10);
         assert!(lines.iter().all(|l| l.starts_with("\x1b[30;47m") && l.ends_with("\x1b[0m")), "{colored:?}");
         assert!(!qr("http://192.168.1.20:8765/abc/v1", false).contains('\x1b'), "no escapes into a file or pipe");
+    }
+
+    #[test]
+    fn status_tells_who_answers_on_the_port() {
+        let ours = serde_json::json!({ "service": "amber-server", "status": "ok", "version": "0.5.0" });
+        assert_eq!(server_line(8765, Some(&ours)), "answers on port 8765 (0.5.0)");
+        let desktop = serde_json::json!({ "service": "amber-pc", "status": "ok" });
+        assert_eq!(server_line(8765, Some(&desktop)), "not running - port 8765 is taken by amber-pc: amber-server config set port <number>");
+        assert_eq!(server_line(8765, None), "not running");
     }
 
     #[test]

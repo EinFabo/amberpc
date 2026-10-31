@@ -250,6 +250,11 @@ pub fn local_server_ready(base_url: &str) -> bool {
 /// `{"status": "ok"}` (llama-server, whisper-server). Anything else - loading, an error, some
 /// other program that took the port - is not.
 pub fn health_ok(base_url: &str) -> bool {
+    health(base_url).is_some_and(|v| v["status"] == "ok")
+}
+
+/// What `GET /health` at [base_url] answered with 200, if anything.
+pub fn health(base_url: &str) -> Option<serde_json::Value> {
     let url = format!("{}/health", base_url.trim_end_matches('/'));
     Client::builder()
         .timeout(Duration::from_secs(2))
@@ -258,7 +263,6 @@ pub fn health_ok(base_url: &str) -> bool {
         .and_then(|c| c.get(url).send().ok())
         .filter(|r| r.status().as_u16() == 200)
         .and_then(|r| r.json::<serde_json::Value>().ok())
-        .is_some_and(|v| v["status"] == "ok")
 }
 
 fn wav_part(wav: &[u8]) -> multipart::Part {

@@ -54,8 +54,16 @@ pub fn quick_with(path: &Path, machine: Machine, fetch: &dyn Fetch) -> Result<Co
     let mut config = existing(path)?;
     if !set_up(&config) {
         config.speech = recommended_speech(machine.gpu, machine.threads, machine.ram_mb).to_string();
+        // Amber for Windows on the same PC holds 8765: the next free one.
+        if !port_free(config.port) {
+            config.port = (config.port.saturating_add(1)..=u16::MAX).find(|p| port_free(*p)).unwrap_or(config.port);
+        }
     }
     finish(path, config, fetch)
+}
+
+fn port_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("0.0.0.0", port)).is_ok()
 }
 
 /// Whether setup ran before: only it makes the key (`config set` before it leaves it empty).
@@ -254,6 +262,21 @@ mod tests {
         let c = quick_with(&p, OFFICE_PC, &FailingCleanup).unwrap();
         assert_eq!(c.cleanup.as_deref(), Some("qwen3-4b-instruct-2507-q4km"), "kept, to retry with cleanup add");
         assert!(Config::load(&p).is_ok());
+    }
+
+    #[test]
+    fn the_first_setup_takes_a_free_port() {
+        // Amber for Windows on the same PC has 8765 already.
+        let taken = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let (_d, p) = path();
+        Config { port, ..Config::default() }.save(&p).unwrap();
+        let c = quick_with(&p, OFFICE_PC, &Stub::default()).unwrap();
+        assert_ne!(c.port, port);
+        assert!(std::net::TcpListener::bind(("0.0.0.0", c.port)).is_ok(), "{} is free", c.port);
+        // Set up before: the port is the user's choice, even while something holds it.
+        Config { key: "k".repeat(20), port, ..Config::default() }.save(&p).unwrap();
+        assert_eq!(quick_with(&p, OFFICE_PC, &Stub::default()).unwrap().port, port);
     }
 
     #[test]
