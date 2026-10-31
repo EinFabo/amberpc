@@ -2,6 +2,8 @@
 //! NAS or a small Linux box, with downloadable models for recognition and cleanup.
 
 mod config;
+mod paths;
+mod speech;
 
 use clap::{Parser, Subcommand};
 

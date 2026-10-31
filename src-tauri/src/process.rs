@@ -63,8 +63,7 @@ pub fn free_port() -> std::io::Result<u16> {
 /// Physical cores are what ggml scales with; hyper-threads mostly get in the way.
 /// Half the logical processors, capped at 8.
 pub fn default_threads() -> u32 {
-    let logical = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
-    (logical / 2).clamp(2, 8)
+    amber_core::local::default_threads()
 }
 
 #[cfg(windows)]

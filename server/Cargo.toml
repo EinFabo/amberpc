@@ -15,6 +15,11 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
+whisper-rs = "0.16"
+
+[features]
+# The GPU build: whisper.cpp through Vulkan (any vendor), and the Vulkan llama-server.
+vulkan = ["whisper-rs/vulkan"]
 
 [dev-dependencies]
 tempfile = "3"

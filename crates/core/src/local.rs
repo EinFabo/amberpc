@@ -213,6 +213,14 @@ const MIN_AUDIO_CTX: u32 = 256;
 /// the audio plus [slack], at least 256 - or 0 (the full window) from 30 s on, where
 /// whisper.cpp slides over the audio window by window anyway. Port of Android's
 /// `WhisperInput.audioCtxFor`.
+/// Threads for whisper.cpp and llama.cpp when the user set none: half the logical cores, 2 to
+/// 8. More is slower, not faster - on a 20-thread CPU one 30 s window took 4.9 s with 20
+/// threads and 0.8 s with 8 (ggml without OpenMP).
+pub fn default_threads() -> u32 {
+    let logical = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
+    (logical / 2).clamp(2, 8)
+}
+
 pub fn audio_ctx_for(samples: usize, slack: u32) -> u32 {
     let needed = samples.div_ceil(SAMPLES_PER_CTX) as u32 + slack;
     if needed >= FULL_AUDIO_CTX {

@@ -64,7 +64,7 @@ pub struct SttError {
 }
 
 impl SttError {
-    fn new(kind: ErrorKind, message: impl Into<String>, detail: impl Into<String>) -> Self {
+    pub fn new(kind: ErrorKind, message: impl Into<String>, detail: impl Into<String>) -> Self {
         SttError { kind, message: message.into(), detail: detail.into() }
     }
 }
