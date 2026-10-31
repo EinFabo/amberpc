@@ -49,11 +49,16 @@ pub fn sync(app: &AppHandle) {
     }
     key(&core);
 
-    let (k, e, t, r, c) = (app.clone(), app.clone(), app.clone(), app.clone(), app.clone());
+    let (k, e, t, r, c, m) = (app.clone(), app.clone(), app.clone(), app.clone(), app.clone(), app.clone());
     let hooks = Hooks {
+        service: "amber-pc",
+        version: env!("CARGO_PKG_VERSION"),
         // Read per request, so a new key takes effect at once.
         key: Arc::new(move || k.state::<Core>().key(KEY_ID).unwrap_or_default()),
-        engine: Arc::new(move || crate::dictation::transcriber(&e, &e.state::<Core>().settings()).map(|p| p.transcriber)),
+        // The PC keeps one speech model loaded for its own dictations: whatever the phone names,
+        // it gets that one.
+        engine: Arc::new(move |_model| crate::dictation::transcriber(&e, &e.state::<Core>().settings()).map(|p| p.transcriber)),
+        models: Arc::new(move || models(&m.state::<Core>())),
         // Like the PC's own dictations: fillers out, the model's tidy-up if it is on and
         // ready - never a wait for a model that is still loading.
         record: Arc::new(move |text, audio_ms, wait_ms| {
@@ -175,6 +180,46 @@ pub fn info(core: &Core) -> Info {
         public_url,
         public_qr,
     }
+}
+
+/// What the phone's choice of models shows: the speech model and the cleanup model this PC
+/// uses - the cleanup only once it can run.
+fn models(core: &Core) -> Vec<api::ModelInfo> {
+    use amber_core::local;
+    use amber_core::providers;
+    use amber_core::settings::EngineKind;
+    let s = core.settings();
+    let layout = &core.paths.layout;
+    let mut out = Vec::new();
+    let speech = match s.engine {
+        EngineKind::Local => local::model(&s.local.model).map(|m| {
+            let on = local::runtime(&s.local.runtime).map_or("this PC", |r| r.label);
+            (m.id.to_string(), m.label.to_string(), format!("on this PC · {on}"))
+        }),
+        EngineKind::Server => providers::by_id(&s.server.provider).map(|p| (s.server.model.clone(), s.server.model.clone(), format!("through this PC · {}", p.name))),
+    };
+    if let Some((id, label, note)) = speech {
+        out.push(api::ModelInfo { id, kind: api::ModelKind::Speech, label, note, default: true });
+    }
+    let c = &s.cleanup;
+    let cleanup = match c.engine {
+        EngineKind::Local => match (local::llm_runtime(&c.local_runtime), local::llm_model(&c.local_model)) {
+            (Some(rt), Some(m)) if layout.llm_runtime_installed(rt) && layout.llm_model_installed(m) => {
+                Some((m.id.to_string(), m.label.to_string(), format!("on this PC · {}", rt.label)))
+            }
+            _ => None,
+        },
+        EngineKind::Server => providers::by_id(&c.provider)
+            .filter(|p| !c.model.trim().is_empty() && (!p.needs_key || core.has_key(p.id)))
+            .map(|p| {
+                let label = p.chat_model(&c.model).map_or(c.model.clone(), |m| m.label.to_string());
+                (c.model.clone(), label, format!("through this PC · {}", p.name))
+            }),
+    };
+    if let Some((id, label, note)) = cleanup {
+        out.push(api::ModelInfo { id, kind: api::ModelKind::Cleanup, label, note, default: true });
+    }
+    out
 }
 
 fn qr_svg(text: &str) -> Option<String> {

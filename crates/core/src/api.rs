@@ -71,6 +71,41 @@ pub fn tunnel_token(pasted: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// What a model is for, in the model list a phone shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelKind {
+    Speech,
+    Cleanup,
+}
+
+/// One entry of the model list: what the phone shows in its choice of models, and the id it
+/// sends back as `model` (see docs/phone-api.md).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelInfo {
+    pub id: String,
+    pub kind: ModelKind,
+    pub label: String,
+    pub note: String,
+    /// What a request gets that names no model, or one this server does not have.
+    pub default: bool,
+}
+
+/// `GET /v1/models`: the OpenAI list, each entry with an `amber` object, and an `amber` object
+/// at the top by which a phone knows it talks to Amber.
+pub fn models_body(service: &str, version: &str, models: &[ModelInfo]) -> serde_json::Value {
+    let data: Vec<serde_json::Value> = models
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id, "object": "model", "owned_by": "amber",
+                "amber": { "kind": m.kind, "label": m.label, "note": m.note, "default": m.default },
+            })
+        })
+        .collect();
+    serde_json::json!({ "object": "list", "data": data, "amber": { "service": service, "version": version } })
+}
+
 /// What tools/setup-tunnel.sh hands over: the tunnel's token and hostname, and whether the
 /// phone gets a new access key with its new address.
 #[derive(Debug, PartialEq)]
@@ -242,8 +277,15 @@ fn is_cgnat(ip: Ipv4Addr) -> bool {
 
 /// What the server needs from the app: the key, the engine to use right now, and a log.
 pub struct Hooks {
+    /// "amber-pc", "amber-server": in the health answer and the model list.
+    pub service: &'static str,
+    pub version: &'static str,
     pub key: Arc<dyn Fn() -> String + Send + Sync>,
-    pub engine: Arc<dyn Fn() -> Result<Box<dyn Transcriber>, String> + Send + Sync>,
+    /// The engine for a transcription - the `model` the request named, if any; a server that
+    /// cannot switch takes its own.
+    pub engine: Arc<dyn Fn(Option<&str>) -> Result<Box<dyn Transcriber>, String> + Send + Sync>,
+    /// What the model list offers.
+    pub models: Arc<dyn Fn() -> Vec<ModelInfo> + Send + Sync>,
     /// What the PC does to its own dictations before inserting them (fillers, the smart
     /// cleanup) - so the phone gets the same without an update of its app.
     pub tidy: Arc<dyn Fn(String) -> String + Send + Sync>,
@@ -392,14 +434,8 @@ fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>, guard: &Mutex<Guar
             }
             (status, error_body(message, if status == 401 { "invalid_api_key" } else { "not_found" }))
         }
-        Ok(Route::Health) => (200, serde_json::json!({ "status": "ok", "service": "amber-pc" })),
-        Ok(Route::Models) => (
-            200,
-            serde_json::json!({ "object": "list", "data": [
-                { "id": "amber-pc", "object": "model", "owned_by": "amber" },
-                { "id": "amber-cleanup", "object": "model", "owned_by": "amber" },
-            ] }),
-        ),
+        Ok(Route::Health) => (200, serde_json::json!({ "status": "ok", "service": hooks.service, "version": hooks.version })),
+        Ok(Route::Models) => (200, models_body(hooks.service, hooks.version, &(hooks.models)())),
         Ok(Route::Chat) => {
             let started = Instant::now();
             if req.header("Content-Length").and_then(|v| v.parse::<usize>().ok()).is_some_and(|n| n > MAX_CHAT_BODY) {
@@ -464,7 +500,8 @@ fn transcribe(content_type: &str, body: &[u8], peer: &str, hooks: &Hooks) -> (u1
     let wav = audio::encode_wav(&audio::pad_for_engine(&mono16k, audio::TARGET_RATE), audio::TARGET_RATE);
     let options = TranscribeOptions::new(&field("language").unwrap_or_else(|| "auto".into()), &field("prompt").unwrap_or_default());
 
-    let engine = match (hooks.engine)() {
+    let requested = field("model");
+    let engine = match (hooks.engine)(requested.as_deref()) {
         Ok(e) => e,
         Err(e) => {
             (hooks.log)(format!("phone API: engine unavailable: {e}"));
@@ -602,8 +639,13 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let (f, l) = (fake.clone(), log.clone());
         let hooks = Hooks {
+            service: "amber-pc",
+            version: "0.0.0",
             key: Arc::new(|| "testkey".to_string()),
-            engine: Arc::new(move || Ok(Box::new(f.clone()) as Box<dyn Transcriber>)),
+            engine: Arc::new(move |_| Ok(Box::new(f.clone()) as Box<dyn Transcriber>)),
+            models: Arc::new(|| {
+                vec![ModelInfo { id: "acft-large-v3-turbo-q8_0".into(), kind: ModelKind::Speech, label: "Large v3 Turbo".into(), note: "local".into(), default: true }]
+            }),
             // Stands in for the PC's cleanup: drops the fillers the fake engine heard.
             tidy: Arc::new(|t| text::strip_fillers(&t)),
             record: Arc::new(|_, _, _| {}),
@@ -897,6 +939,29 @@ mod tests {
         assert_eq!(tunnel_token(&token).as_deref(), Some(token.as_str()));
         assert_eq!(tunnel_token(&format!("cloudflared.exe service install {token}")).as_deref(), Some(token.as_str()));
         assert_eq!(tunnel_token("hallo"), None);
+    }
+
+    #[test]
+    fn the_model_list_says_what_each_model_is_for() {
+        let models = [
+            ModelInfo { id: "acft-large-v3-turbo-q8_0".into(), kind: ModelKind::Speech, label: "Large v3 Turbo".into(), note: "local · GPU".into(), default: true },
+            ModelInfo { id: "qwen3-4b-instruct-2507-q4km".into(), kind: ModelKind::Cleanup, label: "Qwen3 4B".into(), note: "local".into(), default: true },
+        ];
+        let body = models_body("amber-pc", "0.4.2", &models);
+        assert_eq!(body["object"], "list");
+        assert_eq!(body["amber"]["service"], "amber-pc");
+        assert_eq!(body["data"][0]["id"], "acft-large-v3-turbo-q8_0");
+        assert_eq!(body["data"][0]["object"], "model", "still an OpenAI list");
+        assert_eq!(body["data"][0]["amber"]["kind"], "speech");
+        assert_eq!(body["data"][1]["amber"]["kind"], "cleanup");
+        assert_eq!(body["data"][1]["amber"]["default"], true);
+        // Over the wire: the list and the health answer name the service.
+        let (srv, _, _) = server(Ok(String::new()));
+        let mut s = TcpStream::connect(srv.addr).unwrap();
+        s.write_all(b"GET /testkey/v1/models HTTP/1.1\r\n\r\n").unwrap();
+        let mut answer = String::new();
+        s.read_to_string(&mut answer).unwrap();
+        assert!(answer.contains("\"kind\":\"speech\"") && answer.contains("\"service\":\"amber-pc\""), "{answer}");
     }
 
     #[test]
