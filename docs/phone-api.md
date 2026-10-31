@@ -50,10 +50,13 @@ lacks it.
   (then `/v1/chat/completions` answers `503`).
 - Amber for Windows lists the one speech and the one cleanup model it uses. Amber Server lists
   every model that is downloaded, and switches to the one a request names.
+- Top-level `amber.audio` (optional): the formats `/v1/audio/transcriptions` takes, e.g.
+  `["wav", "opus"]` - see [Compressed uploads](#compressed-uploads). Missing means `["wav"]`.
 
 ### `POST /v1/audio/transcriptions`
 
-Multipart form: `file` (WAV, any rate, 1-8 channels, up to 15 min), optional `model` (an id of
+Multipart form: `file` (WAV, any rate, 1-8 channels, up to 15 min - or a compressed format the
+server lists in `amber.audio`), optional `model` (an id of
 kind `speech`), `language` (ISO 639-1 or `auto`), `prompt` (names and terms). Answer:
 `{ "text": "..." }`, already cleaned by the server's rules (fillers, spoken punctuation, German
 commas) as its owner set them. Silence answers `{ "text": "" }`.
@@ -64,6 +67,27 @@ An OpenAI chat request, at most 256 KB. `messages`, `temperature` and `max_token
 4096, 2048 if none) are used; `model` picks a model of kind `cleanup` (Amber Server; Amber for
 Windows always uses its own); other fields are dropped - they belong to the caller's idea of a
 model, not to the server's. The answer is the model's OpenAI answer as it came.
+
+## Compressed uploads
+
+A phone on mobile data spends more time uploading than the server spends recognizing: WAV at
+16 kHz is 32 KB per second of speech, so a 20-second dictation is 640 KB - several seconds on a
+weak uplink, and the server's log shows it (`... (640 KB uploaded in 7200 ms)`). Opus at
+24 kbit/s is about a tenth of that and loses nothing whisper needs.
+
+- A server that takes more than WAV says so in `/v1/models`:
+  `"amber": { "service": "...", "version": "...", "audio": ["wav", "opus"] }`.
+- `"opus"`: Opus in an Ogg container (RFC 7845), mono, any of Opus' rates; sent as
+  `file` with the filename `dictation.ogg` and `Content-Type: audio/ogg`. Recommended:
+  16 kHz input, 24 kbit/s, 20 ms frames.
+- The client takes the first format in its own order of preference that the list holds, and
+  WAV otherwise; values it does not know it ignores (a later `"flac"`, say).
+- The server tells the formats apart by their first bytes (`RIFF`, `OggS`), not by the
+  filename. A format it does not take: `400` with the message, as for broken WAV.
+- Whatever came in, the server resamples to 16 kHz mono itself - the rest of the request is
+  the same.
+
+Status: the contract; servers announce `"opus"` from the version that decodes it.
 
 ## Errors
 
