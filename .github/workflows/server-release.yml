@@ -5,7 +5,9 @@
 # releases/latest/download/latest.json. The installers fetch from the release `server-latest`,
 # which every server release refreshes.
 #
-# Run by hand (workflow_dispatch) it only builds, for a look at the artifacts.
+# Run by hand (workflow_dispatch) it only builds, for a look at the artifacts. A test tag
+# (server-v<version>-<anything>, e.g. server-v0.4.2-test1) releases as a pre-release and
+# leaves server-latest alone.
 name: Amber Server release
 
 on:
@@ -102,7 +104,11 @@ jobs:
       - name: The tag matches the version
         run: |
           version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
-          [ "${GITHUB_REF_NAME}" = "server-v$version" ] || { echo "tag ${GITHUB_REF_NAME} but Cargo.toml says $version"; exit 1; }
+          case "${GITHUB_REF_NAME}" in
+            "server-v$version") echo "TEST=" >> "$GITHUB_ENV" ;;
+            "server-v$version"-*) echo "TEST=1" >> "$GITHUB_ENV" ;;
+            *) echo "tag ${GITHUB_REF_NAME} but Cargo.toml says $version"; exit 1 ;;
+          esac
 
       - uses: actions/download-artifact@v4
         with:
@@ -121,6 +127,10 @@ jobs:
       - name: Release
         run: |
           notes="Amber Server ${GITHUB_REF_NAME#server-v}. Install: curl -fsSL https://github.com/${GH_REPO}/releases/download/server-latest/install-server.sh | sh  -  Windows: irm https://github.com/${GH_REPO}/releases/download/server-latest/install-server.ps1 | iex"
+          if [ -n "$TEST" ]; then
+            gh release create "$GITHUB_REF_NAME" artifacts/* --latest=false --prerelease --title "Amber Server ${GITHUB_REF_NAME#server-v} (test)" --notes "A test of the release workflow - not for use."
+            exit 0
+          fi
           gh release create "$GITHUB_REF_NAME" artifacts/* --latest=false --title "Amber Server ${GITHUB_REF_NAME#server-v}" --notes "$notes"
           # The installers' fixed address.
           if gh release view server-latest > /dev/null 2>&1; then
