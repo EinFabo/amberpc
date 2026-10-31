@@ -103,7 +103,8 @@ pub fn models_body(service: &str, version: &str, models: &[ModelInfo]) -> serde_
             })
         })
         .collect();
-    serde_json::json!({ "object": "list", "data": data, "amber": { "service": service, "version": version } })
+    // `audio`: what /v1/audio/transcriptions takes - the phone sends Ogg Opus when it is listed.
+    serde_json::json!({ "object": "list", "data": data, "amber": { "service": service, "version": version, "audio": ["wav", "opus"] } })
 }
 
 /// What tools/setup-tunnel.sh hands over: the tunnel's token and hostname, and whether the
@@ -490,9 +491,9 @@ fn transcribe(content_type: &str, body: &[u8], peer: &str, upload: &str, hooks: 
     };
     let field = |name: &str| fields.get(name).map(|p| String::from_utf8_lossy(&p.data).trim().to_string()).filter(|v| !v.is_empty());
 
-    let (samples, rate) = match audio::decode_wav(&file.data) {
+    let (samples, rate) = match audio::decode_upload(&file.data) {
         Ok(decoded) => decoded,
-        Err(e) => return (400, error_body(&format!("Amber reads WAV only: {e}"), "invalid_request_error")),
+        Err(e) => return (400, error_body(&e, "invalid_request_error")),
     };
     let mono16k = audio::resample(&samples, rate, audio::TARGET_RATE);
     // Silence is a valid question with an empty answer - the phone's connection test sends a
@@ -737,6 +738,23 @@ mod tests {
         // Counted from when the server took the connection, which its accept loop does up to
         // ~50 ms late.
         assert!((300..3_000).contains(&ms), "the upload's time, the pause included: {line}");
+    }
+
+    #[test]
+    fn a_compressed_upload_is_transcribed() {
+        let (srv, fake, log) = server(Ok("hallo".into()));
+        let ogg = include_bytes!("../tests/data/tone-440-880.ogg");
+        let form = reqwest::blocking::multipart::Form::new().part(
+            "file",
+            reqwest::blocking::multipart::Part::bytes(ogg.to_vec()).file_name("dictation.ogg").mime_str("audio/ogg").unwrap(),
+        );
+        let res = reqwest::blocking::Client::new().post(format!("http://{}/testkey/v1/audio/transcriptions", srv.addr)).multipart(form).send().unwrap();
+        assert_eq!(res.status().as_u16(), 200);
+        // The engine got a WAV of the second of audio (16-bit at 16 kHz: 32 KB).
+        let calls = fake.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0 >= 30_000, "{} bytes", calls[0].0);
+        assert!(log.lock().unwrap().last().unwrap().contains("3 KB uploaded"));
     }
 
     #[test]
@@ -1006,6 +1024,7 @@ mod tests {
         let body = models_body("amber-pc", "0.4.2", &models);
         assert_eq!(body["object"], "list");
         assert_eq!(body["amber"]["service"], "amber-pc");
+        assert_eq!(body["amber"]["audio"], serde_json::json!(["wav", "opus"]), "the phone may send Ogg Opus");
         assert_eq!(body["data"][0]["id"], "acft-large-v3-turbo-q8_0");
         assert_eq!(body["data"][0]["object"], "model", "still an OpenAI list");
         assert_eq!(body["data"][0]["amber"]["kind"], "speech");

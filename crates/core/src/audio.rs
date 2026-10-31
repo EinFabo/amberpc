@@ -197,6 +197,54 @@ pub fn encode_wav(samples: &[f32], rate: u32) -> Vec<u8> {
     out
 }
 
+/// An upload to the phone API as mono samples and their rate: WAV, or Ogg Opus (a phone on
+/// mobile data sends a tenth of the bytes). Told apart by the first bytes, not the filename.
+pub fn decode_upload(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
+    match bytes.get(..4) {
+        Some(b"RIFF") => decode_wav(bytes),
+        Some(b"OggS") => decode_ogg_opus(bytes).map(|s| (s, TARGET_RATE)),
+        _ => Err("Amber reads WAV or Ogg Opus".into()),
+    }
+}
+
+/// Ogg Opus (RFC 7845), decoded straight to 16 kHz mono; the encoder's lead-in (pre-skip) is
+/// dropped and its output gain applied.
+fn decode_ogg_opus(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    let broken = |what: &str| format!("broken Ogg Opus: {what}");
+    let mut reader = ogg::PacketReader::new(std::io::Cursor::new(bytes));
+    let mut next = || reader.read_packet().map_err(|e| broken(&e.to_string()));
+    let head = next()?.ok_or_else(|| broken("empty"))?.data;
+    if head.len() < 19 || &head[..8] != b"OpusHead" {
+        return Err("Ogg, but not Opus - Amber reads WAV or Ogg Opus".into());
+    }
+    let (channels, mapping) = (head[9], head[18]);
+    if !(1..=2).contains(&channels) || mapping != 0 {
+        return Err(broken("only mono or stereo"));
+    }
+    // Pre-skip counts 48 kHz samples.
+    let skip = u16::from_le_bytes([head[10], head[11]]) as usize * TARGET_RATE as usize / 48_000;
+    let gain = 10f32.powf(i16::from_le_bytes([head[16], head[17]]) as f32 / (20.0 * 256.0));
+    next()?.filter(|tags| tags.data.starts_with(b"OpusTags")).ok_or_else(|| broken("no OpusTags"))?;
+
+    // Decoding to one channel mixes a stereo stream down.
+    let mut decoder = opus_decoder::OpusDecoder::new(TARGET_RATE, 1).map_err(|e| broken(&e.to_string()))?;
+    let max = (MAX_DECODE_SECONDS * TARGET_RATE as u64) as usize;
+    let mut frame = vec![0f32; decoder.max_frame_size_per_channel()];
+    let mut samples = Vec::new();
+    while let Some(packet) = next()? {
+        let n = decoder.decode_float(&packet.data, &mut frame, false).map_err(|e| broken(&e.to_string()))?;
+        samples.extend(frame[..n].iter().map(|s| s * gain));
+        if samples.len() > max + skip {
+            return Err(format!("longer than {} minutes", MAX_DECODE_SECONDS / 60));
+        }
+    }
+    if samples.len() <= skip {
+        return Err(broken("no audio"));
+    }
+    samples.drain(..skip);
+    Ok(samples)
+}
+
 /// The longest recording [decode_wav] accepts.
 pub const MAX_DECODE_SECONDS: u64 = 15 * 60;
 
@@ -271,6 +319,54 @@ pub fn prepare(mono: &[f32], rate: u32) -> Result<Prepared, Rejected> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TONE_OGG: &[u8] = include_bytes!("../tests/data/tone-440-880.ogg");
+
+    /// Zero crossings per second, half of which is the frequency of a pure tone.
+    fn frequency(samples: &[f32], rate: u32) -> f32 {
+        let crossings = samples.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
+        crossings as f32 / 2.0 / (samples.len() as f32 / rate as f32)
+    }
+
+    #[test]
+    fn ogg_opus_from_the_phone_is_read() {
+        // One second made with libopus: 440 Hz, then 880 Hz; 3 KB instead of 31 KB as WAV.
+        let (samples, rate) = decode_upload(TONE_OGG).unwrap();
+        assert_eq!(rate, 16_000);
+        assert!((15_000..=16_100).contains(&samples.len()), "{} samples", samples.len());
+        let (first, second) = samples.split_at(samples.len() / 2);
+        let (f1, f2) = (frequency(&first[1_000..7_000], rate), frequency(&second[1_000..7_000], rate));
+        assert!((420.0..460.0).contains(&f1), "{f1} Hz");
+        assert!((850.0..910.0).contains(&f2), "{f2} Hz");
+        assert!(rms(&samples) > 0.1, "loud, as encoded");
+    }
+
+    #[test]
+    fn uploads_are_told_apart_by_their_first_bytes() {
+        let wav = encode_wav(&[0.1; 1_600], 16_000);
+        assert_eq!(decode_upload(&wav).unwrap().0.len(), 1_600);
+        assert!(decode_upload(b"ID3\x04 an mp3").unwrap_err().contains("WAV or Ogg Opus"));
+        assert!(decode_upload(b"").is_err());
+    }
+
+    #[test]
+    fn broken_ogg_is_refused_not_a_crash() {
+        // Cut anywhere, or bytes flipped: an error, never a panic or a hang.
+        for cut in [4, 27, 60, 200, TONE_OGG.len() / 2, TONE_OGG.len() - 1] {
+            let _ = decode_upload(&TONE_OGG[..cut]);
+        }
+        assert!(decode_upload(&TONE_OGG[..40]).is_err(), "no audio after the head");
+        let mut flipped = TONE_OGG.to_vec();
+        for i in (100..flipped.len()).step_by(37) {
+            flipped[i] ^= 0x5a;
+        }
+        let _ = decode_upload(&flipped);
+        // An Ogg file that is not Opus (Vorbis, say).
+        let mut vorbis = TONE_OGG.to_vec();
+        let at = vorbis.windows(8).position(|w| w == b"OpusHead").unwrap();
+        vorbis[at..at + 8].copy_from_slice(b"\x01vorbis\0");
+        assert!(decode_upload(&vorbis).unwrap_err().contains("Opus"));
+    }
 
     fn sine(freq: f32, rate: u32, ms: u32, amp: f32) -> Vec<f32> {
         let n = rate as usize * ms as usize / 1000;
