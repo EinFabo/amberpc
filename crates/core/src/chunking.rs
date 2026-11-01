@@ -167,6 +167,17 @@ impl Parts {
 }
 
 /// Whisper names the language it detected ("german"); the next request wants the code.
+/// The language a long dictation's later parts are recognized in, from what its first part
+/// was heard in ([detected], Whisper's name): with languages chosen ([among]) only one of
+/// them - a cloud service detects freely and may hear Turkish - else the first chosen.
+pub fn part_language(detected: Option<&str>, among: &[String]) -> Option<String> {
+    let code = detected.and_then(language_code).map(str::to_string);
+    match code {
+        Some(c) if among.is_empty() || among.contains(&c) => Some(c),
+        _ => among.first().cloned(),
+    }
+}
+
 pub fn language_code(name: &str) -> Option<&'static str> {
     const NAMES: &[(&str, &str)] = &[
         ("english", "en"),
@@ -212,6 +223,18 @@ pub fn prompt(vocabulary: &str, so_far: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_parts_keep_a_language_that_was_chosen() {
+        let among = ["de".to_string(), "en".to_string()];
+        assert_eq!(part_language(Some("english"), &among).as_deref(), Some("en"));
+        // A cloud service detects freely: Turkish was not chosen, the first chosen one is.
+        assert_eq!(part_language(Some("turkish"), &among).as_deref(), Some("de"));
+        assert_eq!(part_language(None, &among).as_deref(), Some("de"));
+        // "auto": whatever was heard, or keep asking.
+        assert_eq!(part_language(Some("turkish"), &[]).as_deref(), Some("tr"));
+        assert_eq!(part_language(None, &[]), None);
+    }
 
     const RATE: u32 = 16_000;
     const FRAME: usize = (RATE / 50) as usize;

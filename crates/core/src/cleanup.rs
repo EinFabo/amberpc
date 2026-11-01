@@ -114,7 +114,8 @@ pub fn plausible(original: &str, cleaned: &str, style: WritingStyle) -> bool {
         WritingStyle::Formal => (0.4, 2.0, 0.5),
         WritingStyle::Concise => (0.25, 1.2, 0.6),
     };
-    let (o, c) = (original.chars().count() as f64, cleaned.chars().count() as f64);
+    // A list's "- " and line breaks are layout, not growth.
+    let (o, c) = (original.chars().count() as f64, cleaned.replace("\n- ", " ").chars().count() as f64);
     let slack = if o < 40.0 { 10.0 } else { 0.0 };
     if c < o * low - slack || c > o * high + slack {
         return false;
@@ -359,6 +360,8 @@ mod tests {
         assert_eq!(unwrap("Einkaufsliste:  \n- Tomaten  \n- Gurken\t\n- Käse"), "Einkaufsliste:\n- Tomaten\n- Gurken\n- Käse");
         let spoken = WritingStyle::AsSpoken;
         assert!(plausible("Einkaufsliste Tomaten Gurken Käse Milch und Brot", "Einkaufsliste:\n- Tomaten\n- Gurken\n- Käse\n- Milch\n- Brot", spoken));
+        // A note is held shorter - but a list's dashes and breaks are no growth.
+        assert!(plausible("Einkaufsliste Eier Milch Brot Butter Käse Äpfel und Tomaten", "Einkaufsliste:\n- Eier\n- Milch\n- Brot\n- Butter\n- Käse\n- Äpfel\n- Tomaten", WritingStyle::Concise));
         assert!(plausible(
             "für morgen erstens auto zur werkstatt bringen zweitens oma anrufen drittens die steuererklärung abschicken",
             "Für morgen:\n- Auto zur Werkstatt bringen\n- Oma anrufen\n- die Steuererklärung abschicken",

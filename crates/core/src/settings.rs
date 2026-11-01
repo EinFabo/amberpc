@@ -13,8 +13,8 @@ pub struct Settings {
     pub engine: EngineKind,
     pub local: LocalSettings,
     pub server: ServerSettings,
-    /// "auto" or an ISO 639-1 code ("de"). A fixed language makes Whisper translate
-    /// everything else into it, so "auto" is the default.
+    /// "auto", an ISO 639-1 code ("de"), or several to choose among ("de,en"). A fixed language
+    /// makes Whisper translate everything else into it, so "auto" is the default.
     pub language: String,
     /// Names and jargon, handed to the engine as a prompt.
     pub vocabulary: String,
@@ -302,8 +302,13 @@ impl Settings {
                 self.server.model = p.default_model().to_string();
             }
         }
-        let lang = self.language.trim().to_lowercase();
-        self.language = if lang.len() == 2 && lang.chars().all(|c| c.is_ascii_lowercase()) { lang } else { "auto".into() };
+        // "de", or several to choose among ("de,en"): two-letter codes, each once, in order.
+        let codes: Vec<String> = crate::engine::TranscribeOptions::new(&self.language, "")
+            .among()
+            .into_iter()
+            .filter(|c| c.len() == 2 && c.chars().all(|ch| ch.is_ascii_lowercase()))
+            .collect();
+        self.language = if codes.is_empty() { "auto".into() } else { codes.join(",") };
         self.bubble.size = self.bubble.size.clamp(*BUBBLE_SIZES.start(), *BUBBLE_SIZES.end());
         self.bubble.opacity = if self.bubble.opacity.is_finite() { self.bubble.opacity.clamp(0.3, 1.0) } else { 1.0 };
         self.bubble.y = if self.bubble.y.is_finite() { self.bubble.y.clamp(0.0, 1.0) } else { d.bubble.y };
@@ -375,6 +380,18 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn several_languages_survive_saving() {
+        // Review finding: the sanitizer turned "de,en" into "auto" on every save.
+        let s = |l: &str| Settings { language: l.into(), ..Settings::default() }.sanitized().language;
+        assert_eq!(s("de,en"), "de,en");
+        assert_eq!(s(" DE-de , en_US,de "), "de,en");
+        assert_eq!(s("de"), "de");
+        assert_eq!(s("auto"), "auto");
+        assert_eq!(s("klingon,, ,"), "auto");
+        assert_eq!(s("de,klingon"), "de");
+    }
 
     #[test]
     fn round_trip() {

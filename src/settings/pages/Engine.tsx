@@ -37,8 +37,8 @@ export function EnginePage(p: PageProps) {
           <div className="label">
             <div>Spoken languages</div>
             <div className="hint">
-              Pick the languages you speak. Several: Whisper picks among them for each dictation - a short one is not taken for Turkish or translated into English. One: everything else is
-              translated into it. None: any language.
+              Pick the languages you speak. Several: Whisper on this PC picks among them for each dictation - a short one is not taken for Turkish or translated into English (a server
+              service detects on its own). One: everything else is translated into it. None: any language.
             </div>
           </div>
           <Languages value={s.language} onChange={(v) => save((x) => (x.language = v))} />
@@ -58,6 +58,8 @@ export function EnginePage(p: PageProps) {
 /** "auto", "de" or "de,en" - in the order picked: the first wins when Whisper is unsure. */
 function Languages({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const picked = value.split(",").map((c) => c.trim()).filter((c) => c && c !== "auto");
+  // A code without a chip of its own (typed into an older version) still shows, and can go.
+  const chips: [string, string][] = [...LANGUAGES, ...picked.filter((c) => !LANGUAGES.some(([v]) => v === c)).map((c): [string, string] => [c, c])];
   const toggle = (code: string) => {
     const next = picked.includes(code) ? picked.filter((c) => c !== code) : [...picked, code];
     onChange(next.length ? next.join(",") : "auto");
@@ -67,7 +69,7 @@ function Languages({ value, onChange }: { value: string; onChange: (v: string) =
       <button className={picked.length === 0 ? "on" : ""} onClick={() => onChange("auto")}>
         Any
       </button>
-      {LANGUAGES.map(([code, label]) => (
+      {chips.map(([code, label]) => (
         <button key={code} className={picked.includes(code) ? "on" : ""} onClick={() => toggle(code)}>
           {label}
         </button>

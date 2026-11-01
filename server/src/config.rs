@@ -177,9 +177,11 @@ fn language(value: &str) -> Option<String> {
     if value.trim().eq_ignore_ascii_case("auto") {
         return Some("auto".into());
     }
-    let parts = value.split(',').filter(|p| !p.trim().is_empty()).count();
+    // Every part must be a code whisper knows; one given twice counts once.
+    let mut parts: Vec<String> = value.split(',').map(|p| p.trim().to_lowercase()).filter(|p| !p.is_empty()).collect();
+    parts.dedup();
     let codes = crate::speech::whisper_languages(value);
-    (!codes.is_empty() && codes.len() == parts).then(|| codes.join(","))
+    (!codes.is_empty() && parts.iter().all(|p| crate::speech::whisper_language(p).is_some())).then(|| codes.join(","))
 }
 
 const MAX_THREADS: u32 = 256;
@@ -229,6 +231,8 @@ mod tests {
         c.set("language", "de, en").unwrap();
         assert_eq!(c.get("language").unwrap(), "de,en");
         assert!(c.set("language", "de,klingon").is_err());
+        c.set("language", "de,de,en").unwrap();
+        assert_eq!(c.language, "de,en", "a code twice is no unknown one");
         c.set("language", "auto").unwrap();
         assert_eq!(c.language, "auto");
     }

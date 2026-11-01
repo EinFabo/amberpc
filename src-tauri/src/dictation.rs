@@ -490,7 +490,7 @@ impl ChunkJob {
                     match result {
                         Ok((text, detected)) => {
                             if detect {
-                                parts.language = detected.as_deref().and_then(chunking::language_code).map(str::to_string);
+                                parts.language = chunking::part_language(detected.as_deref(), &options.among());
                             }
                             // Cleaned right away: the next part's prompt must not carry
                             // Whisper's "[Musik]" or invented credits.

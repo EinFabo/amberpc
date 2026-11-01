@@ -78,41 +78,46 @@ impl Transcriber for Engine {
         }
         let state = &mut loaded.as_mut().expect("loaded above").state;
 
-        let mut fp = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        // No retries at higher temperatures: on noise and silence they run each 30 s window
-        // up to five times over (a 10-minute recording took 3.5 min instead of 1 on a CPU).
-        fp.set_temperature(0.0);
-        fp.set_temperature_inc(0.0);
-        // Several languages to choose among: whisper.cpp's detection, then the likeliest of them -
-        // short German speech is easily taken for Turkish or English otherwise.
-        let picked = if plan.among.len() > 1 {
-            let threads = plan.threads as usize;
-            state.pcm_to_mel(&samples, threads).map_err(|e| fail("Recognition failed.", e.to_string()))?;
-            let (_, probabilities) = state.lang_detect(0, threads).map_err(|e| fail("Recognition failed.", e.to_string()))?;
+        let run = |state: &mut WhisperState, language: Option<&str>| -> Result<String, SttError> {
+            let mut fp = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            // No retries at higher temperatures: on noise and silence they run each 30 s window
+            // up to five times over (a 10-minute recording took 3.5 min instead of 1 on a CPU).
+            fp.set_temperature(0.0);
+            fp.set_temperature_inc(0.0);
+            fp.set_language(language);
+            if let Some(prompt) = &plan.prompt {
+                fp.set_initial_prompt(prompt);
+            }
+            if plan.audio_ctx > 0 {
+                fp.set_audio_ctx(plan.audio_ctx as i32);
+            }
+            fp.set_n_threads(plan.threads);
+            fp.set_no_timestamps(plan.no_timestamps);
+            fp.set_print_progress(false);
+            fp.set_print_realtime(false);
+            fp.set_print_special(false);
+            fp.set_print_timestamps(false);
+            state.full(fp, &samples).map_err(|e| fail("Recognition failed.", e.to_string()))?;
+            Ok(state.as_iter().filter_map(|s| s.to_str_lossy().ok().map(|t| t.into_owned())).collect::<Vec<_>>().join(""))
+        };
+        let text = if plan.among.len() > 1 {
+            // Several languages: one run with detection, then the probabilities on this
+            // dictation's own context (the detection before the run used the previous one's),
+            // and again in the likeliest allowed language when Whisper chose another - short
+            // German speech is easily taken for Turkish or English.
+            let text = run(state, None)?;
+            let detected = whisper_rs::get_lang_str(state.full_lang_id_from_state());
+            let (_, probabilities) = state.lang_detect(0, plan.threads as usize).map_err(|e| fail("Recognition failed.", e.to_string()))?;
             let by_code: serde_json::Map<String, serde_json::Value> = probabilities
                 .iter()
                 .enumerate()
                 .filter_map(|(id, p)| whisper_rs::get_lang_str(id as i32).map(|code| (code.to_string(), serde_json::json!(p))))
                 .collect();
-            Some(amber_core::engine::pick_language(&serde_json::Value::Object(by_code), &plan.among))
+            let picked = amber_core::engine::pick_language(&serde_json::Value::Object(by_code), &plan.among);
+            if detected == Some(picked.as_str()) { text } else { run(state, Some(&picked))? }
         } else {
-            None
+            run(state, plan.language.as_deref())?
         };
-        fp.set_language(picked.as_deref().or(plan.language.as_deref()));
-        if let Some(prompt) = &plan.prompt {
-            fp.set_initial_prompt(prompt);
-        }
-        if plan.audio_ctx > 0 {
-            fp.set_audio_ctx(plan.audio_ctx as i32);
-        }
-        fp.set_n_threads(plan.threads);
-        fp.set_no_timestamps(plan.no_timestamps);
-        fp.set_print_progress(false);
-        fp.set_print_realtime(false);
-        fp.set_print_special(false);
-        fp.set_print_timestamps(false);
-        state.full(fp, &samples).map_err(|e| fail("Recognition failed.", e.to_string()))?;
-        let text = state.as_iter().filter_map(|s| s.to_str_lossy().ok().map(|t| t.into_owned())).collect::<Vec<_>>().join("");
         if self.model.short_context && plan.audio_ctx == 0 {
             // A full window left the state at 30 s: the next short dictation's language
             // detection would pay for it.
