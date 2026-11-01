@@ -114,7 +114,7 @@ pub fn hooks(config: &Config, dirs: &Dirs, cleanup: Option<Arc<Cleanup>>) -> Hoo
     Hooks {
         service: "amber-server",
         version: env!("CARGO_PKG_VERSION"),
-        key: Arc::new(move || key.clone()),
+        keys: Arc::new(move || vec![amber_core::api::AccessKey::new("default", &key)]),
         engine: Arc::new(move |requested| {
             let inner = speech.engine(requested, &default_speech)?;
             Ok(Box::new(WithDefaults { inner, language: language.clone(), vocabulary: vocabulary.clone() }) as Box<dyn Transcriber>)

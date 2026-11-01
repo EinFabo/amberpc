@@ -143,31 +143,93 @@ pub enum Route {
     Chat,
 }
 
-/// Which endpoint a request means, if it may use it. The key may lead the path or come as a
-/// Bearer token; the health check needs none.
-pub fn route(method: &str, path: &str, bearer: Option<&str>, key: &str) -> Result<Route, (u16, &'static str)> {
+/// One way in: a secret for the address, a name for the log, and what it may use.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AccessKey {
+    /// "Fabis Handy", "Laptop" - in the log and in the settings.
+    pub name: String,
+    pub secret: String,
+    /// The model ids it may use; None for every model offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+    /// Its requests a day; None for the usual [PER_DAY].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_day: Option<u32>,
+}
+
+impl AccessKey {
+    /// A key for every model, at the usual quota.
+    pub fn new(name: &str, secret: &str) -> AccessKey {
+        AccessKey { name: name.into(), secret: secret.into(), models: None, per_day: None }
+    }
+}
+
+/// Which endpoint a request means and with which key, if it may use it. The key may lead the
+/// path or come as a Bearer token; the health check needs none.
+pub fn route<'k>(method: &str, path: &str, bearer: Option<&str>, keys: &'k [AccessKey]) -> Result<(Route, Option<&'k AccessKey>), (u16, &'static str)> {
     let path = path.split('?').next().unwrap_or("");
-    // No key configured means nobody gets in - never "any empty key fits".
-    let key_ok = |candidate: &str| !key.is_empty() && same(candidate, key);
+    // No key configured means nobody gets in - never "any empty key fits". Every key is
+    // compared, so timing says nothing about which one nearly fitted.
+    let find = |candidate: &str| {
+        let mut found = None;
+        for k in keys {
+            if !k.secret.is_empty() && same(candidate, &k.secret) {
+                found = Some(k);
+            }
+        }
+        found
+    };
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if method == "GET" && (segments.is_empty() || segments == ["health"]) {
-        return Ok(Route::Health);
+        return Ok((Route::Health, None));
     }
-    let rest: &[&str] = match segments.split_first() {
-        Some((first, rest)) if key_ok(first) => rest,
-        _ if bearer.is_some_and(key_ok) => &segments,
+    let (rest, key): (&[&str], &AccessKey) = match (segments.split_first(), bearer.and_then(find)) {
+        (Some((first, rest)), _) if find(first).is_some() => (rest, find(first).expect("found above")),
+        (_, Some(k)) => (&segments, k),
         _ => return Err((401, "Missing or wrong access key - copy the address again from Amber on the PC.")),
     };
     // Accept the forms the phone builds from whatever was typed: ".../v1/audio/transcriptions"
     // and ".../audio/transcriptions".
     let rest = rest.strip_prefix(&["v1"][..]).unwrap_or(rest);
-    match (method, rest) {
-        ("POST", ["audio", "transcriptions"]) => Ok(Route::Transcribe),
-        ("POST", ["chat", "completions"]) => Ok(Route::Chat),
-        ("GET", ["models"]) => Ok(Route::Models),
-        ("GET", []) => Ok(Route::Health),
-        _ => Err((404, "Amber's phone API only offers /v1/audio/transcriptions, /v1/chat/completions and /v1/models.")),
+    let route = match (method, rest) {
+        ("POST", ["audio", "transcriptions"]) => Route::Transcribe,
+        ("POST", ["chat", "completions"]) => Route::Chat,
+        ("GET", ["models"]) => Route::Models,
+        ("GET", []) => Route::Health,
+        _ => return Err((404, "Amber's phone API only offers /v1/audio/transcriptions, /v1/chat/completions and /v1/models.")),
+    };
+    Ok((route, Some(key)))
+}
+
+/// What [key] may use of [all]: its models only, and per kind exactly one default - the
+/// server's own where the key may use it, else its first of that kind.
+pub fn offered(all: &[ModelInfo], key: &AccessKey) -> Vec<ModelInfo> {
+    let mut mine: Vec<ModelInfo> = all.iter().filter(|m| key.models.as_ref().is_none_or(|ids| ids.contains(&m.id))).cloned().collect();
+    for kind in [ModelKind::Speech, ModelKind::Cleanup] {
+        if !mine.iter().any(|m| m.kind == kind && m.default) {
+            if let Some(first) = mine.iter_mut().find(|m| m.kind == kind) {
+                first.default = true;
+            }
+        }
     }
+    mine
+}
+
+/// The model of [kind] a request gets: the one it names if its key may use it ([mine]), else
+/// the key's default; `403` when the server offers that kind ([all]) but not to this key;
+/// None when the server offers none (its hook answers that).
+pub fn resolve(kind: ModelKind, requested: Option<&str>, all: &[ModelInfo], mine: &[ModelInfo]) -> Result<Option<String>, (u16, String)> {
+    let of_kind: Vec<&ModelInfo> = mine.iter().filter(|m| m.kind == kind).collect();
+    if of_kind.is_empty() {
+        if all.iter().any(|m| m.kind == kind) {
+            let what = if kind == ModelKind::Speech { "speech" } else { "cleanup" };
+            return Err((403, format!("This access key may not use the {what} models - ask the owner of the server.")));
+        }
+        return Ok(None);
+    }
+    let named = requested.and_then(|r| of_kind.iter().find(|m| m.id == r));
+    let chosen = named.or_else(|| of_kind.iter().find(|m| m.default)).unwrap_or(&of_kind[0]);
+    Ok(Some(chosen.id.clone()))
 }
 
 /// Compares without stopping at the first difference, so timing says nothing about the key.
@@ -283,7 +345,8 @@ pub struct Hooks {
     /// "amber-pc", "amber-server": in the health answer and the model list.
     pub service: &'static str,
     pub version: &'static str,
-    pub key: Arc<dyn Fn() -> String + Send + Sync>,
+    /// The ways in; none means nobody gets in.
+    pub keys: Arc<dyn Fn() -> Vec<AccessKey> + Send + Sync>,
     /// The engine for a transcription - the `model` the request named, if any; a server that
     /// cannot switch takes its own.
     pub engine: Arc<dyn Fn(Option<&str>) -> Result<Box<dyn Transcriber>, String> + Send + Sync>,
@@ -334,8 +397,8 @@ pub struct Guard {
     /// Per sender: wrong keys since the first one counted.
     strikes: HashMap<String, (u32, Instant)>,
     paused: HashMap<String, Instant>,
-    /// Requests with the key over the last day.
-    spent: std::collections::VecDeque<Instant>,
+    /// Per key name: its requests over the last day.
+    spent: HashMap<String, std::collections::VecDeque<Instant>>,
     /// When running out of budget was last logged.
     said: Option<Instant>,
     /// When a refusal was last logged, and how many went unlogged since.
@@ -366,16 +429,18 @@ impl Guard {
         false
     }
 
-    /// One request with the key; false once the budget is used up.
-    pub fn spend(&mut self, now: Instant) -> bool {
-        while self.spent.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(24 * 3600)) {
-            self.spent.pop_front();
+    /// One request with the key [name]; false once its budget is used up: [PER_TEN_MINUTES]
+    /// in ten minutes, and [per_day] (else [PER_DAY]) a day.
+    pub fn spend(&mut self, name: &str, per_day: Option<u32>, now: Instant) -> bool {
+        let spent = self.spent.entry(name.to_string()).or_default();
+        while spent.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(24 * 3600)) {
+            spent.pop_front();
         }
-        let last_ten = self.spent.iter().filter(|t| now.duration_since(**t) < Duration::from_secs(600)).count();
-        if last_ten >= PER_TEN_MINUTES || self.spent.len() >= PER_DAY {
+        let last_ten = spent.iter().filter(|t| now.duration_since(**t) < Duration::from_secs(600)).count();
+        if last_ten >= PER_TEN_MINUTES || spent.len() >= per_day.map_or(PER_DAY, |d| d as usize) {
             return false;
         }
-        self.spent.push_back(now);
+        spent.push_back(now);
         true
     }
 
@@ -415,19 +480,26 @@ fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>, guard: &Mutex<Guar
         return (429, error_body("Too many wrong keys - try again in a few minutes.", "rate_limit_exceeded"));
     }
     let bearer = req.header("Authorization").and_then(|v| v.strip_prefix("Bearer ")).map(|v| v.trim().to_string());
-    let routed = route(&req.method, &req.target, bearer.as_deref(), &(hooks.key)());
-    if let Ok(r) = routed {
-        if r != Route::Health {
-            let mut g = guard.lock().unwrap_or_else(|e| e.into_inner());
-            if !g.spend(now) {
-                if g.say(now) {
-                    (hooks.log)(format!("phone API: request budget used up ({PER_TEN_MINUTES} per 10 min, {PER_DAY} a day) - {peer} turned away"));
-                }
-                return (429, error_body("Too many requests - try again later.", "rate_limit_exceeded"));
+    let keys = (hooks.keys)();
+    let routed = route(&req.method, &req.target, bearer.as_deref(), &keys);
+    let key = routed.as_ref().ok().and_then(|(_, k)| k.cloned());
+    if let Some(k) = &key {
+        let mut g = guard.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.spend(&k.name, k.per_day, now) {
+            if g.say(now) {
+                let day = k.per_day.map_or(PER_DAY, |d| d as usize);
+                (hooks.log)(format!("phone API: request budget of \"{}\" used up ({PER_TEN_MINUTES} per 10 min, {day} a day) - {peer} turned away", k.name));
             }
+            return (429, error_body("Too many requests - try again later.", "rate_limit_exceeded"));
         }
     }
-    match routed {
+    // Who it was, for the log: the sender and the key's name.
+    let peer = match &key {
+        Some(k) => format!("{peer} ({})", k.name),
+        None => peer,
+    };
+    let key = key.unwrap_or_else(|| AccessKey::new("", ""));
+    match routed.map(|(r, _)| r) {
         Err((status, message)) => {
             if status == 401 {
                 note_refused(hooks, guard, &peer);
@@ -438,7 +510,7 @@ fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>, guard: &Mutex<Guar
             (status, error_body(message, if status == 401 { "invalid_api_key" } else { "not_found" }))
         }
         Ok(Route::Health) => (200, serde_json::json!({ "status": "ok", "service": hooks.service, "version": hooks.version })),
-        Ok(Route::Models) => (200, models_body(hooks.service, hooks.version, &(hooks.models)())),
+        Ok(Route::Models) => (200, models_body(hooks.service, hooks.version, &offered(&(hooks.models)(), &key))),
         Ok(Route::Chat) => {
             let started = Instant::now();
             if req.header("Content-Length").and_then(|v| v.parse::<usize>().ok()).is_some_and(|n| n > MAX_CHAT_BODY) {
@@ -448,11 +520,17 @@ fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>, guard: &Mutex<Guar
                 Ok(b) => b,
                 Err((status, message)) => return (status, error_body(message, "invalid_request_error")),
             };
-            let request = match serde_json::from_slice::<serde_json::Value>(&body) {
+            let mut request = match serde_json::from_slice::<serde_json::Value>(&body) {
                 Ok(r) if r["messages"].as_array().is_some_and(|m| !m.is_empty()) => r,
                 _ => return (400, error_body("Expected a JSON chat request with messages.", "invalid_request_error")),
             };
-            // Whatever model the phone names: the PC answers with its own cleanup model.
+            // The model it names if its key may use it, else the key's default.
+            let all = (hooks.models)();
+            match resolve(ModelKind::Cleanup, request["model"].as_str(), &all, &offered(&all, &key)) {
+                Ok(Some(id)) => request["model"] = serde_json::Value::String(id),
+                Ok(None) => {}
+                Err((status, message)) => return (status, error_body(&message, "permission_denied")),
+            }
             match (hooks.chat)(&request) {
                 Ok(answer) => {
                     (hooks.log)(format!("phone API: {peer}, cleanup in {} ms", started.elapsed().as_millis()));
@@ -474,14 +552,14 @@ fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>, guard: &Mutex<Guar
             // Measured here, before any wait for another transcription.
             let upload = format!("{} KB uploaded in {} ms", body.len() / 1024, req.accepted.elapsed().as_millis());
             let content_type = req.header("Content-Type").unwrap_or("").to_string();
-            transcribe(&content_type, &body, &peer, &upload, hooks, busy)
+            transcribe(&content_type, &body, &peer, &key, &upload, hooks, busy)
         }
     }
 }
 
 /// Reads and decodes the upload, then waits its turn ([busy]) for the engine - decoding a
 /// large upload does not hold up the others.
-fn transcribe(content_type: &str, body: &[u8], peer: &str, upload: &str, hooks: &Hooks, busy: &Mutex<()>) -> (u16, serde_json::Value) {
+fn transcribe(content_type: &str, body: &[u8], peer: &str, key: &AccessKey, upload: &str, hooks: &Hooks, busy: &Mutex<()>) -> (u16, serde_json::Value) {
     let started = Instant::now();
     let parts = match parse_multipart(content_type, body) {
         Ok(p) => p,
@@ -507,7 +585,13 @@ fn transcribe(content_type: &str, body: &[u8], peer: &str, upload: &str, hooks: 
     let wav = audio::encode_wav(&audio::pad_for_engine(&mono16k, audio::TARGET_RATE), audio::TARGET_RATE);
     let options = TranscribeOptions::new(&field("language").unwrap_or_else(|| "auto".into()), &field("prompt").unwrap_or_default());
 
-    let requested = field("model");
+    // The model it names if its key may use it, else the key's default.
+    let all = (hooks.models)();
+    let requested = match resolve(ModelKind::Speech, field("model").as_deref(), &all, &offered(&all, key)) {
+        Ok(Some(id)) => Some(id),
+        Ok(None) => field("model"),
+        Err((status, message)) => return (status, error_body(&message, "permission_denied")),
+    };
     let _one_at_a_time = busy.lock().unwrap_or_else(|e| e.into_inner());
     let engine = match (hooks.engine)(requested.as_deref()) {
         Ok(e) => e,
@@ -562,20 +646,120 @@ mod tests {
 
     #[test]
     fn routes_with_the_key_in_the_path_or_as_bearer() {
-        let k = "secretkey";
-        assert_eq!(route("POST", "/secretkey/v1/audio/transcriptions", None, k), Ok(Route::Transcribe));
-        assert_eq!(route("POST", "/secretkey/audio/transcriptions", None, k), Ok(Route::Transcribe));
-        assert_eq!(route("GET", "/secretkey/v1/models?x=1", None, k), Ok(Route::Models));
-        assert_eq!(route("POST", "/v1/audio/transcriptions", Some("secretkey"), k), Ok(Route::Transcribe));
-        assert_eq!(route("GET", "/", None, k), Ok(Route::Health));
-        assert_eq!(route("POST", "/wrongkey/v1/audio/transcriptions", None, k).unwrap_err().0, 401);
-        assert_eq!(route("POST", "/v1/audio/transcriptions", Some("secretkez"), k).unwrap_err().0, 401);
-        assert_eq!(route("POST", "/v1/audio/transcriptions", None, k).unwrap_err().0, 401);
-        assert_eq!(route("POST", "/secretkey/v1/chat/completions", None, k), Ok(Route::Chat));
-        assert_eq!(route("POST", "/v1/chat/completions", Some("secretkey"), k), Ok(Route::Chat));
-        assert_eq!(route("POST", "/wrongkey/v1/chat/completions", None, k).unwrap_err().0, 401);
-        assert_eq!(route("POST", "/secretkey/v1/completions", None, k).unwrap_err().0, 404);
-        assert_eq!(route("GET", "/secretkey/v1/audio/transcriptions", None, k).unwrap_err().0, 404);
+        let keys = [AccessKey::new("Phone", "secretkey")];
+        let k = &keys[..];
+        let r = |m: &str, p: &str, b: Option<&str>| route(m, p, b, k).map(|(r, _)| r);
+        assert_eq!(r("POST", "/secretkey/v1/audio/transcriptions", None), Ok(Route::Transcribe));
+        assert_eq!(r("POST", "/secretkey/audio/transcriptions", None), Ok(Route::Transcribe));
+        assert_eq!(r("GET", "/secretkey/v1/models?x=1", None), Ok(Route::Models));
+        assert_eq!(r("POST", "/v1/audio/transcriptions", Some("secretkey")), Ok(Route::Transcribe));
+        assert_eq!(r("GET", "/", None), Ok(Route::Health));
+        assert_eq!(r("POST", "/wrongkey/v1/audio/transcriptions", None).unwrap_err().0, 401);
+        assert_eq!(r("POST", "/v1/audio/transcriptions", Some("secretkez")).unwrap_err().0, 401);
+        assert_eq!(r("POST", "/v1/audio/transcriptions", None).unwrap_err().0, 401);
+        assert_eq!(r("POST", "/secretkey/v1/chat/completions", None), Ok(Route::Chat));
+        assert_eq!(r("POST", "/v1/chat/completions", Some("secretkey")), Ok(Route::Chat));
+        assert_eq!(r("POST", "/wrongkey/v1/chat/completions", None).unwrap_err().0, 401);
+        assert_eq!(r("POST", "/secretkey/v1/completions", None).unwrap_err().0, 404);
+        assert_eq!(r("GET", "/secretkey/v1/audio/transcriptions", None).unwrap_err().0, 404);
+    }
+
+    #[test]
+    fn each_key_gets_in_with_its_name_and_a_revoked_one_does_not() {
+        let keys = [AccessKey::new("Fabis Handy", "handykey12345"), AccessKey::new("Laptop", "laptopkey1234")];
+        let who = |p: &str| route("POST", p, None, &keys).map(|(_, k)| k.map(|k| k.name.clone()));
+        assert_eq!(who("/handykey12345/v1/audio/transcriptions"), Ok(Some("Fabis Handy".into())));
+        assert_eq!(who("/laptopkey1234/v1/audio/transcriptions"), Ok(Some("Laptop".into())));
+        // Removed from the list: refused, the others go on.
+        let left = [keys[1].clone()];
+        assert_eq!(route("POST", "/handykey12345/v1/audio/transcriptions", None, &left).unwrap_err().0, 401);
+        assert_eq!(route("GET", "/health", None, &keys).map(|(r, k)| (r, k.is_none())), Ok((Route::Health, true)));
+    }
+
+    #[test]
+    fn each_key_has_its_own_quota() {
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        assert!((0..3).all(|_| g.spend("Laptop", Some(3), t0)));
+        assert!(!g.spend("Laptop", Some(3), t0), "its own day used up");
+        assert!(g.spend("Fabis Handy", None, t0), "another key is not touched");
+    }
+
+    #[test]
+    fn a_key_sees_and_gets_only_its_models() {
+        let all = vec![
+            ModelInfo { id: "acft-large-v3-turbo-q8_0".into(), kind: ModelKind::Speech, label: "Large v3 Turbo".into(), note: String::new(), default: true },
+            ModelInfo { id: "futo-multilingual-74".into(), kind: ModelKind::Speech, label: "Base (FUTO)".into(), note: String::new(), default: false },
+            ModelInfo { id: "qwen3-4b-instruct-2507-q4km".into(), kind: ModelKind::Cleanup, label: "Qwen3 4B".into(), note: String::new(), default: true },
+        ];
+        let open = AccessKey::new("Phone", "k1");
+        assert_eq!(offered(&all, &open).len(), 3);
+        let small = AccessKey { models: Some(vec!["futo-multilingual-74".into()]), ..AccessKey::new("Kid", "k2") };
+        let mine = offered(&all, &small);
+        assert_eq!(mine.iter().map(|m| (m.id.as_str(), m.default)).collect::<Vec<_>>(), [("futo-multilingual-74", true)], "its own default per kind");
+        // Asked for the big model: the key's own instead; the cleanup is not its to use.
+        assert_eq!(resolve(ModelKind::Speech, Some("acft-large-v3-turbo-q8_0"), &all, &mine), Ok(Some("futo-multilingual-74".into())));
+        assert_eq!(resolve(ModelKind::Cleanup, Some("qwen3-4b-instruct-2507-q4km"), &all, &mine).unwrap_err().0, 403);
+        // What the server does not offer at all is the hook's to answer (503).
+        assert_eq!(resolve(ModelKind::Cleanup, None, &all[..2], &offered(&all[..2], &open)), Ok(None));
+        assert_eq!(resolve(ModelKind::Speech, Some("futo-multilingual-74"), &all, &offered(&all, &open)), Ok(Some("futo-multilingual-74".into())));
+        assert_eq!(resolve(ModelKind::Speech, Some("nope"), &all, &offered(&all, &open)), Ok(Some("acft-large-v3-turbo-q8_0".into())));
+    }
+
+    #[test]
+    fn a_restricted_key_through_the_api() {
+        let used = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+        let u = used.clone();
+        let fake = Arc::new(Fake(Mutex::new(Vec::new()), Ok("hallo".into())));
+        let f = fake.clone();
+        let hooks = Hooks {
+            service: "amber-server",
+            version: "0.0.0",
+            keys: Arc::new(|| {
+                vec![
+                    AccessKey::new("Phone", "phonekey"),
+                    AccessKey { models: Some(vec!["futo-multilingual-74".into()]), ..AccessKey::new("Kid", "kidkey") },
+                ]
+            }),
+            engine: Arc::new(move |m| {
+                u.lock().unwrap().push(m.map(str::to_string));
+                Ok(Box::new(f.clone()) as Box<dyn Transcriber>)
+            }),
+            models: Arc::new(|| {
+                vec![
+                    ModelInfo { id: "acft-large-v3-turbo-q8_0".into(), kind: ModelKind::Speech, label: "L".into(), note: String::new(), default: true },
+                    ModelInfo { id: "futo-multilingual-74".into(), kind: ModelKind::Speech, label: "B".into(), note: String::new(), default: false },
+                    ModelInfo { id: "qwen3-4b-instruct-2507-q4km".into(), kind: ModelKind::Cleanup, label: "Q".into(), note: String::new(), default: true },
+                ]
+            }),
+            tidy: Arc::new(|t| t),
+            record: Arc::new(|_, _, _| {}),
+            chat: Arc::new(|req| Ok(serde_json::json!({ "model": req["model"] }))),
+            log: Arc::new(|_| {}),
+        };
+        let srv = start_with("127.0.0.1:0".parse().unwrap(), hooks, Limits::default()).unwrap();
+        let get = |key: &str| reqwest::blocking::get(format!("http://{}/{key}/v1/models", srv.addr)).unwrap().json::<serde_json::Value>().unwrap();
+        assert_eq!(get("phonekey")["data"].as_array().unwrap().len(), 3);
+        assert_eq!(get("kidkey")["data"].as_array().unwrap().len(), 1);
+        let transcribe = |key: &str, model: &str| {
+            let form = reqwest::blocking::multipart::Form::new()
+                .part("file", reqwest::blocking::multipart::Part::bytes(speech()).file_name("d.wav"))
+                .text("model", model.to_string());
+            reqwest::blocking::Client::new().post(format!("http://{}/{key}/v1/audio/transcriptions", srv.addr)).multipart(form).send().unwrap().status().as_u16()
+        };
+        assert_eq!(transcribe("phonekey", "futo-multilingual-74"), 200);
+        assert_eq!(transcribe("kidkey", "acft-large-v3-turbo-q8_0"), 200);
+        assert_eq!(*used.lock().unwrap(), [Some("futo-multilingual-74".into()), Some("futo-multilingual-74".into())], "the kid's key gets its own model");
+        let chat = |key: &str| {
+            let r = reqwest::blocking::Client::new()
+                .post(format!("http://{}/{key}/v1/chat/completions", srv.addr))
+                .json(&serde_json::json!({ "model": "something", "messages": [{ "role": "user", "content": "x" }] }))
+                .send()
+                .unwrap();
+            (r.status().as_u16(), r.json::<serde_json::Value>().unwrap())
+        };
+        assert_eq!(chat("phonekey"), (200, serde_json::json!({ "model": "qwen3-4b-instruct-2507-q4km" })), "an unknown model: the default");
+        assert_eq!(chat("kidkey").0, 403, "no cleanup for this key");
     }
 
     #[test]
@@ -672,7 +856,7 @@ mod tests {
         let hooks = Hooks {
             service: "amber-pc",
             version: "0.0.0",
-            key: Arc::new(|| "testkey".to_string()),
+            keys: Arc::new(|| vec![AccessKey::new("Phone", "testkey")]),
             engine: Arc::new(move |_| Ok(Box::new(f.clone()) as Box<dyn Transcriber>)),
             models: Arc::new(|| {
                 vec![ModelInfo { id: "acft-large-v3-turbo-q8_0".into(), kind: ModelKind::Speech, label: "Large v3 Turbo".into(), note: "local".into(), default: true }]
@@ -1007,9 +1191,9 @@ mod tests {
         }
         // The budget: 120 in ten minutes, then a wait.
         let mut g = Guard::default();
-        assert!((0..PER_TEN_MINUTES).all(|_| g.spend(t0)));
-        assert!(!g.spend(t0));
-        assert!(g.spend(t0 + Duration::from_secs(600)));
+        assert!((0..PER_TEN_MINUTES).all(|_| g.spend("Phone", None, t0)));
+        assert!(!g.spend("Phone", None, t0));
+        assert!(g.spend("Phone", None, t0 + Duration::from_secs(600)));
     }
 
     #[test]
@@ -1076,8 +1260,12 @@ mod tests {
 
     #[test]
     fn no_key_means_no_entry() {
-        assert_eq!(route("POST", "/v1/audio/transcriptions", Some(""), "").unwrap_err().0, 401);
-        assert_eq!(route("POST", "//v1/audio/transcriptions", None, "").unwrap_err().0, 401);
+        assert_eq!(route("POST", "/v1/audio/transcriptions", Some(""), &[]).unwrap_err().0, 401);
+        assert_eq!(route("POST", "//v1/audio/transcriptions", None, &[]).unwrap_err().0, 401);
+        // A key with an empty secret lets nobody in either.
+        let empty = [AccessKey::new("Phone", "")];
+        assert_eq!(route("POST", "//v1/audio/transcriptions", None, &empty).unwrap_err().0, 401);
+        assert_eq!(route("POST", "/v1/audio/transcriptions", Some(""), &empty).unwrap_err().0, 401);
     }
 
     #[test]

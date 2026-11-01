@@ -54,7 +54,7 @@ pub fn sync(app: &AppHandle) {
         service: "amber-pc",
         version: env!("CARGO_PKG_VERSION"),
         // Read per request, so a new key takes effect at once.
-        key: Arc::new(move || k.state::<Core>().key(KEY_ID).unwrap_or_default()),
+        keys: Arc::new(move || vec![api::AccessKey::new("Phone", &k.state::<Core>().key(KEY_ID).unwrap_or_default())]),
         // The PC keeps one speech model loaded for its own dictations: whatever the phone names,
         // it gets that one.
         engine: Arc::new(move |_model| crate::dictation::transcriber(&e, &e.state::<Core>().settings()).map(|p| p.transcriber)),
