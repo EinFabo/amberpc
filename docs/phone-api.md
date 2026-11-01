@@ -57,9 +57,18 @@ lacks it.
 
 Multipart form: `file` (WAV, any rate, 1-8 channels, up to 15 min - or a compressed format the
 server lists in `amber.audio`), optional `model` (an id of
-kind `speech`), `language` (ISO 639-1 or `auto`), `prompt` (names and terms). Answer:
+kind `speech`), `language`, `prompt` (names and terms), `amber_cleanup`. Answer:
 `{ "text": "..." }`, already cleaned by the server's rules (fillers, spoken punctuation, German
-commas) as its owner set them. Silence answers `{ "text": "" }`.
+commas) and, on Amber for Windows, its cleanup model - as its owner set them. Silence answers
+`{ "text": "" }`.
+
+- `language`: `auto`, one ISO 639-1 code (`de`; everything else is translated into it), or
+  several, comma-separated (`de,en`): the server detects which of them was spoken, per
+  dictation - a short German dictation is then not taken for Turkish or translated into
+  English, as `auto` can. On a tie, or when it heard none of them, the first wins.
+- `amber_cleanup=client`: the client cleans the text up itself, with its own prompt
+  (`/v1/chat/completions`). The server then leaves out its own rules and cleanup and returns
+  what was recognized (Whisper's annotations such as `[Musik]` removed).
 
 ### `POST /v1/chat/completions`
 

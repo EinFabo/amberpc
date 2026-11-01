@@ -9,18 +9,51 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Default)]
 pub struct TranscribeOptions {
-    /// ISO 639-1 code, or None to let the engine detect the language.
+    /// ISO 639-1 code, several of them comma-separated ("de,en": detect among these), or None
+    /// to let the engine detect any language.
     pub language: Option<String>,
     /// Names and jargon the engine should expect.
     pub prompt: Option<String>,
 }
 
 impl TranscribeOptions {
+    /// [language]: "auto", a code ("de", "de-DE") or several ("de, en-US").
     pub fn new(language: &str, vocabulary: &str) -> Self {
-        let language = (language != "auto" && !language.is_empty()).then(|| language.to_string());
+        let mut codes: Vec<String> = Vec::new();
+        for code in language.split(',').map(|c| c.trim().split(['-', '_']).next().unwrap_or("").to_lowercase()) {
+            if !code.is_empty() && code != "auto" && !codes.contains(&code) {
+                codes.push(code);
+            }
+        }
+        let language = (!codes.is_empty()).then(|| codes.join(","));
         let prompt = Some(vocabulary.trim().to_string()).filter(|p| !p.is_empty());
         TranscribeOptions { language, prompt }
     }
+
+    /// The languages to choose among - empty for any language.
+    pub fn among(&self) -> Vec<String> {
+        self.language.as_deref().map(|l| l.split(',').map(str::to_string).collect()).unwrap_or_default()
+    }
+
+    /// The one language, when exactly one is set.
+    pub fn fixed(&self) -> Option<&str> {
+        self.language.as_deref().filter(|l| !l.contains(','))
+    }
+}
+
+/// Of [allowed], the one whisper.cpp found likeliest ([probabilities]: `{"de": 0.2, ...}`) -
+/// the first of them when it heard none of them, or when two are equally likely. Short
+/// German speech is easily taken for Turkish or English; among German and English only,
+/// German stays German.
+pub fn pick_language(probabilities: &serde_json::Value, allowed: &[String]) -> String {
+    let p = |code: &str| probabilities.get(code).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mut best = allowed.first().cloned().unwrap_or_default();
+    for code in allowed {
+        if p(code) > p(&best) {
+            best = code.clone();
+        }
+    }
+    best
 }
 
 pub trait Transcriber: Send + Sync {
@@ -121,8 +154,9 @@ impl Transcriber for OpenAiTranscriber {
             .text("model", self.model.clone())
             .text("response_format", "json")
             .text("temperature", "0");
-        if let Some(lang) = &options.language {
-            form = form.text("language", lang.clone());
+        // A list ("de,en") is ours: the services detect by themselves then.
+        if let Some(lang) = options.fixed() {
+            form = form.text("language", lang.to_string());
         }
         if let Some(prompt) = &options.prompt {
             form = form.text("prompt", prompt.clone());
@@ -168,6 +202,14 @@ impl Transcriber for WhisperServerTranscriber {
 
 impl WhisperServerTranscriber {
     fn request(&self, wav: &[u8], options: &TranscribeOptions, format: &str) -> Result<(String, Option<String>), SttError> {
+        let among = options.among();
+        let chosen;
+        let options = if among.len() > 1 {
+            chosen = TranscribeOptions { language: Some(self.detect_among(wav, &among)?), prompt: options.prompt.clone() };
+            &chosen
+        } else {
+            options
+        };
         let mut form = multipart::Form::new()
             .part("file", wav_part(wav))
             .text("response_format", format.to_string())
@@ -213,6 +255,30 @@ impl WhisperServerTranscriber {
 }
 
 impl WhisperServerTranscriber {
+    /// Which of [among] was spoken: whisper.cpp's language detection alone, on the same
+    /// encoder context the dictation gets, then the likeliest of the allowed ones.
+    fn detect_among(&self, wav: &[u8], among: &[String]) -> Result<String, SttError> {
+        let mut form = multipart::Form::new()
+            .part("file", wav_part(wav))
+            .text("response_format", "verbose_json")
+            .text("language", "auto")
+            .text("detect_language", "true");
+        if let Some(slack) = self.context_slack {
+            let ctx = crate::local::audio_ctx_for(wav.len().saturating_sub(44) / 2, slack);
+            if ctx > 0 {
+                form = form.text("audio_ctx", ctx.to_string());
+            }
+        }
+        let resp = self.http.post(format!("{}/inference", self.base_url)).multipart(form).send().map_err(network_error)?;
+        let status = resp.status().as_u16();
+        let body = resp.text().map_err(network_error)?;
+        if !(200..300).contains(&status) {
+            return Err(status_error(status, &body));
+        }
+        let probabilities = serde_json::from_str::<serde_json::Value>(&body).ok().map(|v| v["language_probabilities"].clone()).unwrap_or_default();
+        Ok(pick_language(&probabilities, among))
+    }
+
     /// Leaves the server's state at a short context: after loading a tuned model, and after a
     /// dictation that needed the full window.
     pub fn reset_context(&self) {
@@ -424,6 +490,55 @@ mod tests {
         let body = String::from_utf8_lossy(&req.body).to_string();
         assert!(body.contains("name=\"language\"\r\n\r\nauto"));
         assert!(!body.contains("audio_ctx"), "a stock model gets the full window");
+    }
+
+    #[test]
+    fn languages_read_as_a_choice() {
+        let o = TranscribeOptions::new("de-DE, en_US", "");
+        assert_eq!(o.language.as_deref(), Some("de,en"));
+        assert_eq!((o.among(), o.fixed()), (vec!["de".to_string(), "en".to_string()], None));
+        let one = TranscribeOptions::new("de", "");
+        assert_eq!((one.among(), one.fixed()), (vec!["de".to_string()], Some("de")));
+        let auto = TranscribeOptions::new("auto", "");
+        assert_eq!((auto.language.clone(), auto.among()), (None, Vec::<String>::new()));
+        assert_eq!(TranscribeOptions::new("de,de, ,auto", "").language.as_deref(), Some("de"));
+    }
+
+    #[test]
+    fn the_likeliest_allowed_language_wins() {
+        let allowed = ["de".to_string(), "en".to_string()];
+        assert_eq!(pick_language(&serde_json::json!({"tr": 0.5, "en": 0.3, "de": 0.2}), &allowed), "en");
+        // Turkish is not allowed; neither listed language heard at all: the first.
+        assert_eq!(pick_language(&serde_json::json!({"tr": 0.9}), &allowed), "de");
+        assert_eq!(pick_language(&serde_json::json!({"de": 0.4, "en": 0.4}), &allowed), "de", "a tie: the first");
+        assert_eq!(pick_language(&serde_json::Value::Null, &allowed), "de");
+    }
+
+    #[test]
+    fn whisper_server_detects_among_the_chosen_languages() {
+        // Short German speech that whisper.cpp alone would take for Turkish or English.
+        let (url, rx) = serve(vec![
+            json(200, r#"{"text":"","detected_language":"turkish","language_probabilities":{"tr":0.55,"en":0.25,"de":0.2}}"#),
+            json(200, r#"{"text":"I get it.","language":"english"}"#),
+        ]);
+        let (text, language) = WhisperServerTranscriber::new(&url, Some(128))
+            .transcribe_detecting(&crate::audio::encode_wav(&vec![0.1; 16_000], 16_000), &TranscribeOptions::new("de,en", ""))
+            .unwrap();
+        let detect = String::from_utf8_lossy(&rx.recv().unwrap().body).to_string();
+        assert!(detect.contains("name=\"detect_language\"\r\n\r\ntrue") && detect.contains("name=\"language\"\r\n\r\nauto"), "{detect}");
+        assert!(detect.contains("name=\"audio_ctx\""), "detected on the same short context");
+        let run = String::from_utf8_lossy(&rx.recv().unwrap().body).to_string();
+        assert!(run.contains("name=\"language\"\r\n\r\nen"), "English beat German, Turkish was never allowed: {run}");
+        assert_eq!((text.as_str(), language.as_deref()), ("I get it.", Some("english")));
+    }
+
+    #[test]
+    fn a_cloud_engine_gets_no_language_list() {
+        // Groq or OpenAI refuse "de,en": they detect by themselves then.
+        let (url, rx) = serve(vec![json(200, r#"{"text":"x"}"#)]);
+        OpenAiTranscriber::new(&url, "", "m").transcribe(b"", &TranscribeOptions::new("de,en", "")).unwrap();
+        let body = String::from_utf8_lossy(&rx.recv().unwrap().body).to_string();
+        assert!(!body.contains("name=\"language\""), "{body}");
     }
 
     #[test]

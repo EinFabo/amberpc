@@ -137,7 +137,7 @@ impl Config {
         let v = value.trim();
         match key {
             "port" => self.port = v.parse::<u16>().ok().filter(|p| *p >= 1024).ok_or("port: a number from 1024 to 65535")?,
-            "language" => self.language = language(v).ok_or("language: auto, or a code whisper knows, such as de or en")?,
+            "language" => self.language = language(v).ok_or("language: auto, a code whisper knows such as de, or several to choose among such as de,en")?,
             "vocabulary" => self.vocabulary = v.to_string(),
             "threads" => {
                 self.threads =
@@ -172,11 +172,14 @@ fn switch(key: &str, value: &str) -> Result<bool, String> {
 }
 
 /// "auto", or a code whisper knows, in lower case.
+/// "auto", or one or more codes whisper knows ("de", "de,en"); None when any is unknown.
 fn language(value: &str) -> Option<String> {
     if value.trim().eq_ignore_ascii_case("auto") {
         return Some("auto".into());
     }
-    crate::speech::whisper_language(value)
+    let parts = value.split(',').filter(|p| !p.trim().is_empty()).count();
+    let codes = crate::speech::whisper_languages(value);
+    (!codes.is_empty() && codes.len() == parts).then(|| codes.join(","))
 }
 
 const MAX_THREADS: u32 = 256;
@@ -218,6 +221,16 @@ mod tests {
         let path = dir.path().join("amber-server.toml");
         Config::default().save(&path).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn several_languages_can_be_set() {
+        let mut c = Config::default();
+        c.set("language", "de, en").unwrap();
+        assert_eq!(c.get("language").unwrap(), "de,en");
+        assert!(c.set("language", "de,klingon").is_err());
+        c.set("language", "auto").unwrap();
+        assert_eq!(c.language, "auto");
     }
 
     #[test]

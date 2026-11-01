@@ -83,7 +83,22 @@ impl Transcriber for Engine {
         // up to five times over (a 10-minute recording took 3.5 min instead of 1 on a CPU).
         fp.set_temperature(0.0);
         fp.set_temperature_inc(0.0);
-        fp.set_language(plan.language.as_deref());
+        // Several languages to choose among: whisper.cpp's detection, then the likeliest of them -
+        // short German speech is easily taken for Turkish or English otherwise.
+        let picked = if plan.among.len() > 1 {
+            let threads = plan.threads as usize;
+            state.pcm_to_mel(&samples, threads).map_err(|e| fail("Recognition failed.", e.to_string()))?;
+            let (_, probabilities) = state.lang_detect(0, threads).map_err(|e| fail("Recognition failed.", e.to_string()))?;
+            let by_code: serde_json::Map<String, serde_json::Value> = probabilities
+                .iter()
+                .enumerate()
+                .filter_map(|(id, p)| whisper_rs::get_lang_str(id as i32).map(|code| (code.to_string(), serde_json::json!(p))))
+                .collect();
+            Some(amber_core::engine::pick_language(&serde_json::Value::Object(by_code), &plan.among))
+        } else {
+            None
+        };
+        fp.set_language(picked.as_deref().or(plan.language.as_deref()));
         if let Some(prompt) = &plan.prompt {
             fp.set_initial_prompt(prompt);
         }
@@ -132,10 +147,23 @@ pub fn whisper_language(value: &str) -> Option<String> {
     whisper_rs::get_lang_id(&code).map(|_| code)
 }
 
+/// The languages in [value] ("de,en", "de-DE, en_US") whisper knows, each once, in order.
+pub fn whisper_languages(value: &str) -> Vec<String> {
+    let mut codes = Vec::new();
+    for code in value.split(',').filter_map(whisper_language) {
+        if !codes.contains(&code) {
+            codes.push(code);
+        }
+    }
+    codes
+}
+
 /// How one request is run.
 #[derive(Debug, PartialEq)]
 struct ParamsPlan {
+    /// One language; None for detection - among [among] when that holds several.
     language: Option<String>,
+    among: Vec<String>,
     prompt: Option<String>,
     /// Encoder positions; 0 for the model's full 30 s window.
     audio_ctx: u32,
@@ -154,8 +182,10 @@ fn params(options: &TranscribeOptions, samples: usize, m: &Model, threads: u32) 
         let clean: Vec<char> = p.chars().filter(|c| *c != '\0').collect();
         clean[clean.len().saturating_sub(PROMPT_CHARS)..].iter().collect::<String>()
     });
+    let languages = options.language.as_deref().map(whisper_languages).unwrap_or_default();
     ParamsPlan {
-        language: options.language.as_deref().and_then(whisper_language),
+        language: (languages.len() == 1).then(|| languages[0].clone()),
+        among: if languages.len() > 1 { languages } else { Vec::new() },
         prompt: prompt.filter(|p| !p.trim().is_empty()),
         // Only tuned (ACFT) models may stop where the speech stops; a stock model loses words.
         audio_ctx: if m.short_context { local::audio_ctx_for(samples, m.context_slack) } else { 0 },
@@ -191,6 +221,16 @@ mod tests {
         assert_eq!(p.audio_ctx, 0, "a stock model keeps its 30 s window");
         assert_eq!(p.language, None);
         assert!((2..=8).contains(&p.threads), "0: half the logical cores, 2 to 8 - more slow ggml down: {}", p.threads);
+    }
+
+    #[test]
+    fn a_language_list_is_kept_to_choose_among() {
+        let m = local::model("futo-multilingual-74").unwrap();
+        let p = params(&TranscribeOptions::new("de,en", ""), 16_000, m, 4);
+        assert_eq!((p.language, p.among), (None, vec!["de".to_string(), "en".to_string()]));
+        // A code whisper does not know falls away; one left is a fixed language.
+        let p = params(&TranscribeOptions::new("de,xx", ""), 16_000, m, 4);
+        assert_eq!((p.language.as_deref(), p.among.len()), (Some("de"), 0));
     }
 
     #[test]

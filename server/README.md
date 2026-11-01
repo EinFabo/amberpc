@@ -77,7 +77,7 @@ install` restarts it (as does `key --new` by itself).
 | Key | Default | Meaning |
 |---|---|---|
 | `port` | `8765` | the port the phone connects to (1024 and up) |
-| `language` | `auto` | the language when the phone sends none (`de`, `en`, ...) - also for the rules |
+| `language` | `auto` | the language when the phone sends none: `de` (everything else is translated into it), or several to choose among, `de,en` - a short dictation is then not taken for another language |
 | `vocabulary` | empty | words to recognise, comma-separated (names, terms); added to the phone's own |
 | `threads` | `0` | CPU threads for recognition and cleanup; 0 picks a good number |
 | `gpu` | `auto` | `off` runs the GPU build on the CPU |

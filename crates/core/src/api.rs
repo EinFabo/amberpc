@@ -518,7 +518,9 @@ fn transcribe(content_type: &str, body: &[u8], peer: &str, upload: &str, hooks: 
     };
     match engine.transcribe(&wav, &options) {
         Ok(raw) => {
-            let cleaned = (hooks.tidy)(text::clean(&raw));
+            // A phone that cleans up with its own prompt says so: then not the PC's on top.
+            let own_cleanup = field("amber_cleanup").is_some_and(|v| v == "client");
+            let cleaned = if own_cleanup { text::clean(&raw) } else { (hooks.tidy)(text::clean(&raw)) };
             (hooks.record)(&cleaned, audio::duration_ms(mono16k.len(), audio::TARGET_RATE), started.elapsed().as_millis() as u64);
             (hooks.log)(format!(
                 "phone API: {peer}, {} words from {} ms of audio in {} ms ({upload})",
@@ -741,6 +743,25 @@ mod tests {
         // Counted from when the server took the connection, which its accept loop does up to
         // ~50 ms late.
         assert!((300..3_000).contains(&ms), "the upload's time, the pause included: {line}");
+    }
+
+    #[test]
+    fn a_phone_that_cleans_up_itself_gets_no_cleanup_from_the_pc() {
+        // The phone's own prompt for the phone's dictations, the PC's for the PC's.
+        let (srv, _, _) = server(Ok(" [Musik] Ähm, hallo vom Handy. ".into()));
+        let send = |extra: Option<(&'static str, &'static str)>| {
+            let mut form = reqwest::blocking::multipart::Form::new().part(
+                "file",
+                reqwest::blocking::multipart::Part::bytes(speech()).file_name("d.wav").mime_str("audio/wav").unwrap(),
+            );
+            if let Some((k, v)) = extra {
+                form = form.text(k, v);
+            }
+            let res = reqwest::blocking::Client::new().post(format!("http://{}/testkey/v1/audio/transcriptions", srv.addr)).multipart(form).send().unwrap();
+            res.json::<serde_json::Value>().unwrap()["text"].as_str().unwrap().to_string()
+        };
+        assert_eq!(send(None), "Hallo vom Handy.", "the PC's cleanup, as before");
+        assert_eq!(send(Some(("amber_cleanup", "client"))), "Ähm, hallo vom Handy.", "only Whisper's annotation gone");
     }
 
     #[test]

@@ -249,6 +249,11 @@ textarea {
   color: var(--text);
 }
 
+.seg.wrap {
+  flex-wrap: wrap;
+  align-self: flex-start;
+}
+
 .switch {
   all: unset;
   cursor: pointer;

@@ -5,7 +5,6 @@ import { Row, Section, Segmented, Switch } from "../ui";
 import { DownloadItem, StatusLabel, useLocal } from "../downloads";
 
 const LANGUAGES: [string, string][] = [
-  ["auto", "Detect automatically"],
   ["de", "German"],
   ["en", "English"],
   ["fr", "French"],
@@ -34,15 +33,16 @@ export function EnginePage(p: PageProps) {
       </div>
       {s.engine === "local" ? <LocalEngine {...p} /> : <ServerEngine {...p} />}
       <Section title="Language">
-        <Row label="Spoken language" hint="A fixed language makes Whisper translate everything else into it - keep it on automatic if you switch languages.">
-          <select value={s.language} onChange={(e) => save((x) => (x.language = e.target.value))}>
-            {LANGUAGES.map(([v, l]) => (
-              <option key={v} value={v}>
-                {l}
-              </option>
-            ))}
-          </select>
-        </Row>
+        <div className="row column">
+          <div className="label">
+            <div>Spoken languages</div>
+            <div className="hint">
+              Pick the languages you speak. Several: Whisper picks among them for each dictation - a short one is not taken for Turkish or translated into English. One: everything else is
+              translated into it. None: any language.
+            </div>
+          </div>
+          <Languages value={s.language} onChange={(v) => save((x) => (x.language = v))} />
+        </div>
         <div className="row column">
           <div className="label">
             <div>Vocabulary</div>
@@ -52,6 +52,27 @@ export function EnginePage(p: PageProps) {
         </div>
       </Section>
     </>
+  );
+}
+
+/** "auto", "de" or "de,en" - in the order picked: the first wins when Whisper is unsure. */
+function Languages({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const picked = value.split(",").map((c) => c.trim()).filter((c) => c && c !== "auto");
+  const toggle = (code: string) => {
+    const next = picked.includes(code) ? picked.filter((c) => c !== code) : [...picked, code];
+    onChange(next.length ? next.join(",") : "auto");
+  };
+  return (
+    <div className="seg wrap">
+      <button className={picked.length === 0 ? "on" : ""} onClick={() => onChange("auto")}>
+        Any
+      </button>
+      {LANGUAGES.map(([code, label]) => (
+        <button key={code} className={picked.includes(code) ? "on" : ""} onClick={() => toggle(code)}>
+          {label}
+        </button>
+      ))}
+    </div>
   );
 }
 

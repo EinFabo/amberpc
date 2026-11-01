@@ -475,8 +475,9 @@ impl ChunkJob {
                     };
                     let language = parts.language.clone().unwrap_or_else(|| settings.language.clone());
                     let options = TranscribeOptions::new(&language, &chunking::prompt(&settings.vocabulary, &parts.texts));
-                    // Asked for its language only until it is known.
-                    let detect = settings.language == "auto" && parts.language.is_none();
+                    // Asked for its language only until it is known - with no language set, or
+                    // several to choose among.
+                    let detect = options.fixed().is_none() && parts.language.is_none();
                     let result = transcriber(&app, &settings).and_then(|p| {
                         parts.engine = p.label.clone();
                         let r = if detect {
