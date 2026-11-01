@@ -368,6 +368,20 @@ mod win {
 pub use win::{exe_of_pid, insert, note_foreground, program_of_window, remember, running_programs, to_clipboard};
 
 impl Target {
+    /// The target window's title ("fabi@pc: ~/projects", "Windows PowerShell") - the terminal
+    /// mode's only hint of the folder and the shell.
+    pub fn title(&self) -> String {
+        #[cfg(windows)]
+        {
+            use windows::Win32::UI::WindowsAndMessaging::GetWindowTextW;
+            let mut buf = [0u16; 512];
+            let n = unsafe { GetWindowTextW(windows::Win32::Foundation::HWND(self.hwnd as *mut _), &mut buf) };
+            return String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+        }
+        #[cfg(not(windows))]
+        String::new()
+    }
+
     /// The target's program, lowercase ("discord.exe"), for its profile.
     pub fn program(&self) -> Option<String> {
         #[cfg(windows)]

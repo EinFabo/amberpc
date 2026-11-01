@@ -327,6 +327,28 @@ pub fn cleaner_for(app: &AppHandle, s: &Settings, model: Option<&str>) -> Result
     cleaner(app, s, true)
 }
 
+/// A terminal request turned into one shell command by the cleanup's model - the local one or
+/// the provider's set under Cleanup, also while the smart cleanup itself is off.
+pub fn command(app: &AppHandle, s: &Settings, spoken: &str, shell: amber_core::terminal::Shell, title: &str) -> Result<amber_core::terminal::Answer, String> {
+    let c = &s.cleanup;
+    let model = match c.engine {
+        EngineKind::Local => c.local_model.as_str(),
+        EngineKind::Server => c.model.as_str(),
+    };
+    let cleaner = cleaner_for(app, s, Some(model)).map_err(|e| format!("Terminal commands need the cleanup's model (set it up under Cleanup): {e}"))?;
+    let (system, user) = amber_core::terminal::request(spoken, shell, title);
+    let request = serde_json::json!({
+        "messages": [{ "role": "system", "content": system }, { "role": "user", "content": user }],
+        "temperature": 0,
+        // One line; a provider's model may reason first. Short for the local one: a small model
+        // that repeats itself stops soon.
+        "max_tokens": if c.engine == EngineKind::Local { 200 } else { 1024 },
+    });
+    let answer = cleaner.forward(&request).map_err(|e| format!("The cleanup's model did not answer: {}", e.message))?;
+    let reply = answer.pointer("/choices/0/message/content").and_then(|v| v.as_str()).unwrap_or("");
+    amber_core::terminal::command_from(reply, shell)
+}
+
 /// What the dictation gets: a snippet if the dictation is its phrase; else the rules (fillers,
 /// spoken punctuation, German commas), and - when the smart cleanup runs for [profile]'s program - the
 /// model's tidy-up in that program's style. A failing model leaves the text as it was: never

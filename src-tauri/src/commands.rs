@@ -82,10 +82,14 @@ pub fn save_settings(app: AppHandle, core: State<Core>, settings: Settings) -> R
     let mut after = core.update_settings(|s| *s = settings);
 
     let mut problem = None;
-    if after.hotkey != before.hotkey {
+    let command_key = |s: &amber_core::settings::Settings| (s.terminal.enabled, s.terminal.hotkey.clone());
+    if after.hotkey != before.hotkey || command_key(&after) != command_key(&before) {
         if let Err(e) = crate::hotkeys::register(&app, &after) {
             problem = Some(format!("Hotkey not changed: {e}"));
-            after = core.update_settings(|s| s.hotkey = before.hotkey.clone());
+            after = core.update_settings(|s| {
+                s.hotkey = before.hotkey.clone();
+                s.terminal.hotkey = before.terminal.hotkey.clone();
+            });
             let _ = crate::hotkeys::register(&app, &after);
         }
     }

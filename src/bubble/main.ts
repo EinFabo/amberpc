@@ -11,6 +11,10 @@ const root = document.getElementById("bubble")!;
 const canvas = document.createElement("canvas");
 root.appendChild(canvas);
 const ctx = canvas.getContext("2d")!;
+const commandMark = document.createElement("div");
+commandMark.id = "command";
+commandMark.textContent = ">_";
+root.appendChild(commandMark);
 const fire = new Fire();
 
 let config: BubbleConfig = { opacity: 1, sounds: true };
@@ -19,6 +23,7 @@ let state: DictationEvent["state"] = "idle";
 
 function resize() {
   cssSize = Math.min(window.innerWidth, window.innerHeight);
+  commandMark.style.fontSize = `${Math.round(cssSize * 0.34)}px`;
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(cssSize * dpr);
   canvas.height = Math.round(cssSize * dpr);
@@ -72,6 +77,9 @@ listen<DictationEvent>("dictation-state", (e) => {
     if (state === "error") chime("error");
   }
   canvas.title = state === "error" ? e.payload.message ?? "" : "";
+  // ">_" from the moment a request is known until the dictation ends.
+  if (e.payload.command) commandMark.classList.add("on");
+  else if (state === "idle" || state === "recording" || state === "error") commandMark.classList.remove("on");
   fire.set(visualOf(state));
   if (e.payload.expectedMs) fire.expect(e.payload.expectedMs);
   // The opacity setting is for the bubble at rest; while it works, it is fully there.

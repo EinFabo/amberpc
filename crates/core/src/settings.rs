@@ -45,6 +45,8 @@ pub struct Settings {
     /// Spoken phrases that insert a saved text.
     pub snippets: Vec<crate::snippets::Snippet>,
     pub discord: DiscordSettings,
+    /// Spoken requests in terminals become shell commands.
+    pub terminal: TerminalSettings,
 }
 
 impl Default for Settings {
@@ -72,6 +74,7 @@ impl Default for Settings {
             statistics: true,
             snippets: Vec::new(),
             discord: DiscordSettings::default(),
+            terminal: TerminalSettings::default(),
         }
     }
 }
@@ -213,6 +216,24 @@ impl Default for InsertSettings {
     }
 }
 
+/// Terminal mode: in a terminal (or with its hotkey, or after a spoken prefix) a request is
+/// turned into a shell command and typed without running it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TerminalSettings {
+    pub enabled: bool,
+    /// A hotkey of its own: a request anywhere. Empty: none.
+    pub hotkey: String,
+    /// Words that make one dictation a request when it starts with them ("Befehl: ...").
+    pub prefixes: Vec<String>,
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        TerminalSettings { enabled: true, hotkey: String::new(), prefixes: vec!["Befehl".into(), "Command".into()] }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PhoneSettings {
@@ -325,6 +346,12 @@ impl Settings {
                 self.server.model = p.default_model().to_string();
             }
         }
+        let mut seen = std::collections::HashSet::new();
+        self.terminal.prefixes = std::mem::take(&mut self.terminal.prefixes)
+            .into_iter()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty() && seen.insert(p.to_lowercase()))
+            .collect();
         // The key of 0.4.x first; a name and an id once each, a quota of at least one.
         // A name given twice gets a number: a key is never dropped for its name.
         let mut ids = std::collections::HashSet::new();
@@ -422,6 +449,16 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_mode_is_on_with_its_prefixes() {
+        let t = Settings::default().terminal;
+        assert!(t.enabled && t.hotkey.is_empty());
+        assert_eq!(t.prefixes, ["Befehl", "Command"]);
+        let mut s = Settings::default();
+        s.terminal.prefixes = vec![" Befehl ".into(), "".into(), "befehl".into(), "Kommando".into()];
+        assert_eq!(s.sanitized().terminal.prefixes, ["Befehl", "Kommando"]);
+    }
 
     #[test]
     fn the_phone_key_of_0_4_becomes_the_first_of_several() {

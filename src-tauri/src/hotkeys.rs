@@ -42,10 +42,40 @@ pub fn register(app: &AppHandle, settings: &Settings) -> Result<(), String> {
             Err(e) => problems.push(format!("{toggle} is not a valid hotkey ({e})")),
         }
     }
+    let command = settings.terminal.hotkey.trim();
+    if settings.terminal.enabled && !command.is_empty() && !command.eq_ignore_ascii_case(dictate) && !command.eq_ignore_ascii_case(toggle) {
+        match command.parse::<Shortcut>() {
+            Ok(sc) => {
+                if let Err(e) = gs.on_shortcut(sc, |app, _, event| on_command(app, event.state)) {
+                    problems.push(format!("{command} is taken by another app ({e})"));
+                }
+            }
+            Err(e) => problems.push(format!("{command} is not a valid hotkey ({e})")),
+        }
+    }
     if problems.is_empty() {
         Ok(())
     } else {
         Err(problems.join("; "))
+    }
+}
+
+/// The command hotkey: like the dictation hotkey (hold or toggle), but what is said becomes a
+/// terminal command wherever it goes.
+fn on_command(app: &AppHandle, state: ShortcutState) {
+    let core = app.state::<Core>();
+    let now = core.now_ms();
+    let recording = core.dictation.is_recording();
+    let action = {
+        let mut g = core.hotkey_gesture.lock().unwrap();
+        match state {
+            ShortcutState::Pressed => g.press(now, recording),
+            ShortcutState::Released => g.release(now, recording),
+        }
+    };
+    match action {
+        Action::Start => crate::dictation::start_as(app, true),
+        other => apply(app, other),
     }
 }
 

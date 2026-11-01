@@ -41,11 +41,35 @@ pub struct Profile {
     /// The user's own words for this program ("always address people formally").
     pub instruction: String,
     pub cleanup: CleanupChoice,
+    /// Whether what is said here becomes a shell command (terminal mode).
+    pub terminal: TerminalMode,
+}
+
+/// A program's terminal mode: as known terminals do, off, or on for a shell.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalMode {
+    /// On for known terminal programs (Windows Terminal, PowerShell, Git Bash...), off elsewhere.
+    #[default]
+    Default,
+    Off,
+    /// On, the shell told by the program and its title.
+    Auto,
+    Bash,
+    #[serde(rename = "powershell")]
+    PowerShell,
 }
 
 impl Default for Profile {
     fn default() -> Self {
-        Profile { exe: String::new(), label: String::new(), style: WritingStyle::AsSpoken, instruction: String::new(), cleanup: CleanupChoice::Default }
+        Profile {
+            exe: String::new(),
+            label: String::new(),
+            style: WritingStyle::AsSpoken,
+            instruction: String::new(),
+            cleanup: CleanupChoice::Default,
+            terminal: TerminalMode::Default,
+        }
     }
 }
 

@@ -7,6 +7,8 @@ export interface DictationEvent {
   message?: string | null;
   /** While recognizing: the expected duration, for the progress ring. */
   expectedMs?: number;
+  /** A terminal request: the bubble shows ">_". */
+  command?: boolean;
 }
 
 export interface BubbleConfig {
@@ -28,7 +30,12 @@ export interface Profile {
   style: WritingStyle;
   instruction: string;
   cleanup: CleanupChoice;
+  /** Whether what is said here becomes a shell command. */
+  terminal: TerminalMode;
 }
+
+/** "default": on for terminal programs (Windows Terminal, PowerShell, Git Bash...). */
+export type TerminalMode = "default" | "off" | "auto" | "bash" | "powershell";
 
 export interface Settings {
   engine: EngineKind;
@@ -61,6 +68,7 @@ export interface Settings {
   statistics: boolean;
   snippets: Snippet[];
   discord: { muteWhileDictating: boolean };
+  terminal: { enabled: boolean; hotkey: string; prefixes: string[] };
   cleanup: {
     fillers: boolean;
     spokenPunctuation: boolean;

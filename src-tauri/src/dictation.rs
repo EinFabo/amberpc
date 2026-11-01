@@ -38,6 +38,9 @@ pub struct StateEvent {
     /// While recognizing: how long it is expected to take, for the bubble's progress ring.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_ms: Option<u64>,
+    /// A terminal request, not a dictation: the bubble shows ">_".
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub command: bool,
 }
 
 struct Inner {
@@ -48,6 +51,10 @@ struct Inner {
     target: Option<Target>,
     /// The target's program ("discord.exe"), for its profile.
     program: Option<String>,
+    /// The target window's title, for terminal mode.
+    title: String,
+    /// Started with the command hotkey: a terminal request wherever it goes.
+    command: bool,
     started: Option<Instant>,
     /// Stop arrived while the microphone was still opening (a very short hold).
     stop_requested: bool,
@@ -61,7 +68,20 @@ pub struct Dictation {
 
 impl Default for Dictation {
     fn default() -> Self {
-        Dictation { inner: Mutex::new(Inner { phase: Phase::Idle, session: 0, recorder: None, target: None, program: None, started: None, stop_requested: false, chunks: None }) }
+        Dictation {
+            inner: Mutex::new(Inner {
+                phase: Phase::Idle,
+                session: 0,
+                recorder: None,
+                target: None,
+                program: None,
+                title: String::new(),
+                command: false,
+                started: None,
+                stop_requested: false,
+                chunks: None,
+            }),
+        }
     }
 }
 
@@ -93,7 +113,7 @@ fn announce(app: &AppHandle, phase: Phase, message: Option<String>) {
     }
     // Muted in Discord exactly while Amber listens - stop, cancel and a failed microphone alike.
     crate::mute::follow(&core.settings().discord, program.as_deref(), || core.dictation.phase() == Phase::Recording);
-    let _ = app.emit("dictation-state", StateEvent { state: phase, message, expected_ms: None });
+    let _ = app.emit("dictation-state", StateEvent { state: phase, message, expected_ms: None, command: false });
     crate::bubble::sync_visibility(app, !matches!(phase, Phase::Idle));
 }
 
@@ -131,6 +151,11 @@ fn fail(app: &AppHandle, session: u64, message: String, notify: bool) {
 }
 
 pub fn start(app: &AppHandle) {
+    start_as(app, false);
+}
+
+/// A dictation - with [command] (the command hotkey) a terminal request wherever it goes.
+pub fn start_as(app: &AppHandle, command: bool) {
     let core = app.state::<Core>();
     let settings = core.settings();
     let session = {
@@ -142,6 +167,8 @@ pub fn start(app: &AppHandle) {
         inner.phase = Phase::Recording;
         inner.target = insert::remember();
         inner.program = inner.target.and_then(|t| t.program());
+        inner.title = inner.target.map(|t| t.title()).unwrap_or_default();
+        inner.command = command;
         inner.started = Some(Instant::now());
         inner.stop_requested = false;
         inner.session
@@ -212,7 +239,7 @@ pub fn start(app: &AppHandle) {
 /// Ends the recording and sends it off.
 pub fn stop(app: &AppHandle) {
     let core = app.state::<Core>();
-    let (recorder, target, program, session, started, chunks) = {
+    let (recorder, target, program, session, started, chunks, asked) = {
         let mut inner = core.dictation.inner.lock().unwrap();
         if inner.phase != Phase::Recording {
             return;
@@ -222,7 +249,8 @@ pub fn stop(app: &AppHandle) {
             return;
         };
         inner.phase = Phase::Transcribing;
-        (recorder, inner.target.take(), inner.program.take(), inner.session, inner.started.take(), inner.chunks.take())
+        let asked = Asked { title: std::mem::take(&mut inner.title), command: inner.command };
+        (recorder, inner.target.take(), inner.program.take(), inner.session, inner.started.take(), inner.chunks.take(), asked)
     };
     announce(app, Phase::Transcribing, None);
     let app = app.clone();
@@ -234,7 +262,7 @@ pub fn stop(app: &AppHandle) {
         let recording = recorder.finish();
         // Waits for a part still being recognized; what is left after it is the tail.
         let parts = chunks.map(ChunkJob::finish);
-        run(&app, session, recording, parts, target, program, held_ms, stopped);
+        run(&app, session, recording, parts, target, program, asked, held_ms, stopped);
     });
 }
 
@@ -266,6 +294,97 @@ pub fn toggle(app: &AppHandle) {
     }
 }
 
+/// What a dictation was started into: its window's title, and whether by the command hotkey.
+struct Asked {
+    title: String,
+    command: bool,
+}
+
+/// Terminal mode: [spoken] as a request for a shell command - by the command hotkey, a spoken
+/// prefix ("Befehl: ..."), or a terminal program - typed at the prompt without Enter; a risky
+/// one commented out. True when it was handled (or failed) as a request.
+#[allow(clippy::too_many_arguments)]
+fn terminal(app: &AppHandle, settings: &Settings, session: u64, spoken: &str, program: Option<&str>, asked: &Asked, target: Option<Target>, spoken_ms: u64) -> bool {
+    use amber_core::terminal::{self as term, Answer, Shell, ShellChoice};
+    if !settings.terminal.enabled {
+        return false;
+    }
+    let prefixed = term::command_prefix(spoken, &settings.terminal.prefixes);
+    let profile = program.and_then(|p| amber_core::profiles::find(&settings.profiles, p));
+    let choice = term::terminal_choice(profile, program.unwrap_or(""));
+    let explicit = asked.command || prefixed.is_some();
+    // Claude Code or an editor in the terminal: text, unless asked for a command.
+    if !explicit && (choice.is_none() || term::app_in_front(&asked.title)) {
+        return false;
+    }
+    let Some(shell) = term::shell_for(program.unwrap_or(""), &asked.title, choice.unwrap_or(ShellChoice::Auto), Shell::Bash) else {
+        if explicit {
+            fail(app, session, "Terminal commands are for PowerShell and bash, not cmd.".into(), false);
+            return true;
+        }
+        // A cmd tab of Windows Terminal: an ordinary dictation.
+        return false;
+    };
+    let request = prefixed.unwrap_or_else(|| spoken.to_string());
+    if request.trim().is_empty() {
+        fail(app, session, "Nothing recognized.".into(), false);
+        return true;
+    }
+    let core = app.state::<Core>();
+    let _ = app.emit("dictation-state", StateEvent { state: Phase::Transcribing, message: None, expected_ms: None, command: true });
+    let command = match crate::llm::command(app, settings, &request, shell, &asked.title) {
+        Ok(Answer::Command(c)) => c,
+        // Said into a terminal but meant as text: an ordinary dictation after all.
+        Ok(Answer::Text) if !explicit => {
+            crate::diag::info("terminal: no command asked - typed as a dictation");
+            return false;
+        }
+        Ok(Answer::Text) => {
+            fail(app, session, "That sounded like no command - nothing typed.".into(), false);
+            return true;
+        }
+        Err(e) => {
+            fail(app, session, e, true);
+            return true;
+        }
+    };
+    let risk = term::risky(&command, shell);
+    let typed = if risk.is_some() { term::comment_out(&command) } else { command.clone() };
+    {
+        let mut inner = core.dictation.inner.lock().unwrap();
+        if inner.session != session {
+            return true;
+        }
+        inner.phase = Phase::Inserting;
+    }
+    announce(app, Phase::Inserting, None);
+    // Typed, not pasted: no clipboard, no trailing space - and never a line break or Enter.
+    let how = amber_core::settings::InsertSettings { method: amber_core::settings::InsertMethod::Type, restore_clipboard: true, trailing_space: false };
+    let outcome = insert::insert(&typed, &how, target);
+    let inserted = matches!(outcome, Ok(Outcome::Pasted | Outcome::Typed));
+    core.memory.remember(&core.settings(), &format!("{request} → {typed}"), program.unwrap_or(""), "terminal", inserted, spoken_ms, 0);
+    let what = if settings.log_text { format!("\"{typed}\"") } else { format!("{} characters", typed.chars().count()) };
+    crate::diag::info(format!("terminal: {} command {what} into {}", shell.name(), program.unwrap_or("?")));
+    if let Some(why) = risk {
+        crate::notify(app, "Amber", &format!("Typed as a comment - it {why}. Remove the # to run it."));
+    }
+    if let Err(e) = outcome {
+        let kept = if settings.history { " It is in the history." } else { "" };
+        fail(app, session, format!("The command could not be typed ({e}).{kept}"), true);
+        return true;
+    }
+    {
+        let mut inner = core.dictation.inner.lock().unwrap();
+        if inner.session != session {
+            return true;
+        }
+        inner.phase = Phase::Done;
+    }
+    announce(app, Phase::Done, Some(typed));
+    settle(app, session, Duration::from_millis(900));
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
     app: &AppHandle,
@@ -274,6 +393,7 @@ fn run(
     parts: Option<Parts>,
     target: Option<Target>,
     program: Option<String>,
+    asked: Asked,
     held_ms: u64,
     stopped: Instant,
 ) {
@@ -306,7 +426,7 @@ fn run(
         None => prepared.spoken_ms,
     };
     let expected = core.estimates.expected_ms(&estimate_key, left_ms, typical, OVERHEAD_MS);
-    let _ = app.emit("dictation-state", StateEvent { state: Phase::Transcribing, message: None, expected_ms: Some(expected) });
+    let _ = app.emit("dictation-state", StateEvent { state: Phase::Transcribing, message: None, expected_ms: Some(expected), command: false });
 
     let recognized = match (&parts, tail) {
         (Some(p), Some(Ok(t))) => {
@@ -335,6 +455,9 @@ fn run(
             return fail(app, session, format!("{message} The recording is kept - tray → \"Recognize again\"."), true);
         }
     };
+    if terminal(app, &settings, session, &text::clean(&raw), program.as_deref(), &asked, target, prepared.spoken_ms) {
+        return;
+    }
     let profile = program.as_deref().and_then(|p| amber_core::profiles::find(&settings.profiles, p));
     let (cleaned, _skipped) = crate::llm::tidy(app, &settings, &text::clean(&raw), profile, true);
     if cleaned.is_empty() {

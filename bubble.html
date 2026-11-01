@@ -3,7 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <title>Amber bubble</title>
-    <style>html,body{margin:0;background:transparent;overflow:hidden;user-select:none}</style>
+    <style>
+      html,body{margin:0;background:transparent;overflow:hidden;user-select:none}
+      #bubble{position:relative}
+      /* A terminal request: ">_" over the fire while the command is made. */
+      #command{position:absolute;inset:0;display:none;align-items:center;justify-content:center;pointer-events:none;
+        font-weight:700;font-family:ui-monospace,Consolas,monospace;color:#fff;text-shadow:0 0 3px #000,0 0 6px #000}
+      #command.on{display:flex}
+    </style>
   </head>
   <body>
     <div id="bubble"></div>
