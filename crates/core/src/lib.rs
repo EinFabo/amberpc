@@ -20,4 +20,5 @@ pub mod settings;
 pub mod snippets;
 pub mod spoken;
 pub mod stats;
+pub mod terminal;
 pub mod text;
