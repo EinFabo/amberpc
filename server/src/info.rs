@@ -10,18 +10,18 @@ use crate::config::{Config, KEYS};
 use crate::paths::{cleanup_dir, llm_ready, model_ready, speech_dir};
 
 /// The phone's addresses in the home network, the first as a QR code to scan.
-pub fn describe(config: &Config, interfaces: &[(String, IpAddr)]) -> String {
+pub fn describe(config: &Config, key: &amber_core::api::AccessKey, interfaces: &[(String, IpAddr)]) -> String {
     let addresses = api::phone_addresses(interfaces);
     let Some((_, first)) = addresses.first() else {
         return "This machine has no address in a home network right now - is it connected?".into();
     };
     let mut out = String::from("In Amber on the phone: Engine -> Own server, this address:\n\n");
     for (name, ip) in &addresses {
-        out += &format!("  {name:<12} {}\n", api::phone_url(*ip, config.port, &config.key));
+        out += &format!("  {name:<12} {}\n", api::phone_url(*ip, config.port, &key.secret));
     }
     use std::io::IsTerminal;
     out += "\n";
-    out += &qr(&api::phone_url(*first, config.port, &config.key), std::io::stdout().is_terminal());
+    out += &qr(&api::phone_url(*first, config.port, &key.secret), std::io::stdout().is_terminal());
     out
 }
 
@@ -43,14 +43,24 @@ pub fn interfaces() -> Vec<(String, IpAddr)> {
 /// Every setting - the key only by its end.
 pub fn listing(config: &Config, path: &Path) -> String {
     let mut out = format!("{}\n", path.display());
-    let key = if config.key.is_empty() { "(none yet - amber-server setup)".to_string() } else { format!("…{}", tail(&config.key, 4)) };
-    out += &format!("  key = {key}\n");
+    if config.keys.is_empty() {
+        out += "  keys: none yet - amber-server setup\n";
+    }
+    for k in &config.keys {
+        out += &format!("  key {} = …{}  ({})\n", k.name, tail(&k.secret, 4), key_terms(k));
+    }
     out += &format!("  speech = {}\n", config.speech);
     out += &format!("  cleanup = {}\n", config.cleanup.as_deref().unwrap_or("off"));
     for k in KEYS {
         out += &format!("  {k} = {}\n", config.get(k).unwrap_or_default());
     }
     out
+}
+
+/// What a key may: "every model, 2000 a day".
+pub fn key_terms(k: &amber_core::api::AccessKey) -> String {
+    let models = k.models.as_ref().map_or("every model".to_string(), |m| m.join(", "));
+    format!("{models}, {} a day", k.per_day.map_or(2000, |d| d))
 }
 
 fn tail(s: &str, n: usize) -> String {
@@ -126,12 +136,12 @@ mod tests {
 
     #[test]
     fn lists_the_home_address_first_with_its_code() {
-        let c = Config { key: "abc".into(), ..Config::default() };
-        let out = describe(&c, &[("WSL".into(), "172.20.0.2".parse().unwrap()), ("Ethernet".into(), "192.168.1.20".parse().unwrap())]);
+        let c = Config::with_key("abc");
+        let out = describe(&c, &c.keys[0], &[("WSL".into(), "172.20.0.2".parse().unwrap()), ("Ethernet".into(), "192.168.1.20".parse().unwrap())]);
         assert!(out.contains("http://192.168.1.20:8765/abc/v1"), "{out}");
         assert!(!out.contains("172.20.0.2"), "virtual adapters are left out");
         assert!(out.contains('▀') || out.contains('▄') || out.contains('█'), "a QR code in block characters");
-        let none = describe(&c, &[]);
+        let none = describe(&c, &c.keys[0], &[]);
         assert!(none.contains("no address"), "{none}");
     }
 
@@ -156,7 +166,7 @@ mod tests {
 
     #[test]
     fn config_never_shows_the_whole_key() {
-        let c = Config { key: "abcdefghjkmnpqrstuvw".into(), ..Config::default() };
+        let c = Config::with_key("abcdefghjkmnpqrstuvw");
         let out = listing(&c, std::path::Path::new("/x/amber-server.toml"));
         assert!(out.contains("tuvw") && !out.contains("abcdefghjkmnpqrs"), "{out}");
         assert!(out.contains("rules.fillers = true") && out.contains("/x/amber-server.toml"));

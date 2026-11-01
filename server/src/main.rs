@@ -55,12 +55,15 @@ enum Command {
         log: Option<std::path::PathBuf>,
     },
     /// The phone's address, with a QR code
-    Url,
-    /// The access key
-    Key {
-        /// A new key: every phone with the old address is locked out
+    Url {
+        /// The address of this key (default: the first)
         #[arg(long)]
-        new: bool,
+        key: Option<String>,
+    },
+    /// The access keys: list them, or add, renew and remove one
+    Key {
+        #[command(subcommand)]
+        action: Option<KeyAction>,
     },
     /// The background service
     Service {
@@ -107,6 +110,24 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum KeyAction {
+    /// A new key for another device, with its address
+    Add {
+        name: String,
+        /// Only these models (ids, comma-separated); default: every model
+        #[arg(long, value_delimiter = ',')]
+        models: Option<Vec<String>>,
+        /// Its requests a day (default 2000)
+        #[arg(long)]
+        per_day: Option<u32>,
+    },
+    /// A new secret for a key: devices with its old address are locked out
+    New { name: Option<String> },
+    /// Remove a key: its devices are locked out, the others go on
+    Remove { name: String },
+}
+
+#[derive(Subcommand)]
 enum ServiceAction {
     /// Start with the system (systemd user unit / Windows task at log-on)
     Install,
@@ -134,8 +155,8 @@ fn main() {
             Ok(_) => serve::serve(),
             Err(e) => Err(e),
         },
-        Command::Url => url_command(),
-        Command::Key { new } => key_command(new),
+        Command::Url { key } => url_command(key.as_deref()),
+        Command::Key { action } => key_command(action),
         Command::Status => {
             print!("{}", info::status(&Config::path()));
             Ok(())
@@ -177,7 +198,7 @@ fn setup_command(quick: bool) -> Result<(), String> {
 /// The config of a set-up server - or the hint to run setup.
 fn set_up() -> Result<(std::path::PathBuf, Config), String> {
     let (path, config) = current()?;
-    if config.key.trim().is_empty() {
+    if !config.set_up() {
         return Err("not set up yet - run: amber-server setup".into());
     }
     Ok((path, config))
@@ -196,27 +217,56 @@ fn service_command(action: ServiceAction) -> Result<(), String> {
     Ok(())
 }
 
-fn url_command() -> Result<(), String> {
+fn url_command(name: Option<&str>) -> Result<(), String> {
     let (_, config) = set_up()?;
-    print!("{}", info::describe(&config, &info::interfaces()));
+    let i = match name {
+        Some(n) => config.find_key(n).ok_or_else(|| format!("no key named {n} - amber-server key"))?,
+        None => 0,
+    };
+    print!("{}", info::describe(&config, &config.keys[i], &info::interfaces()));
     Ok(())
 }
 
-fn key_command(new: bool) -> Result<(), String> {
+fn key_command(action: Option<KeyAction>) -> Result<(), String> {
     let (path, mut config) = set_up()?;
-    if !new {
-        println!("The key is part of the phone's address: amber-server url. A new one: amber-server key --new");
-        return Ok(());
-    }
-    config.key = amber_core::api::new_key();
+    let name = match action {
+        None => {
+            for k in &config.keys {
+                println!("  {:<16} {}", k.name, info::key_terms(k));
+            }
+            println!("\nAddress: amber-server url --key <name>   another device: amber-server key add <name>");
+            return Ok(());
+        }
+        Some(KeyAction::Add { name, models, per_day }) => {
+            config.add_key(&name, models, per_day)?;
+            name
+        }
+        Some(KeyAction::New { name }) => {
+            let name = name.unwrap_or_else(|| config.keys[0].name.clone());
+            config.renew_key(&name)?;
+            name
+        }
+        Some(KeyAction::Remove { name }) => {
+            config.remove_key(&name)?;
+            config.save(&path)?;
+            restarted("Removed - its devices are locked out, the others go on.");
+            return Ok(());
+        }
+    };
     config.save(&path)?;
-    match service::restart_if_installed() {
-        Some(Ok(())) => println!("New key - the service restarted with it; phones with the old address are locked out.\n"),
-        Some(Err(e)) => println!("New key - but the service did not restart ({e}); it takes the key when it does.\n"),
-        None => println!("New key - a server running by hand takes it when you restart it.\n"),
-    }
-    print!("{}", info::describe(&config, &info::interfaces()));
+    restarted("Done.");
+    let i = config.find_key(&name).expect("just added or renewed");
+    print!("{}", info::describe(&config, &config.keys[i], &info::interfaces()));
     Ok(())
+}
+
+/// The keys are read when the server starts: restart an installed service now.
+fn restarted(done: &str) {
+    match service::restart_if_installed() {
+        Some(Ok(())) => println!("{done} The service restarted with it.\n"),
+        Some(Err(e)) => println!("{done} The service did not restart ({e}); it takes the change when it does.\n"),
+        None => println!("{done} A server running by hand takes it when you restart it.\n"),
+    }
 }
 
 /// The config, or the defaults before `setup` ran.

@@ -53,7 +53,7 @@ fn start() -> Result<(), (i32, String)> {
         return Err(setup("not set up yet - run: amber-server setup".into()));
     }
     let config = Config::load(&path).map_err(setup)?;
-    if config.key.trim().is_empty() {
+    if !config.set_up() {
         return Err(setup("no access key yet - run: amber-server setup".into()));
     }
     let dirs = Dirs::real();
@@ -106,7 +106,7 @@ pub fn cleanup_for(config: &Config, dirs: &Dirs, ensure_llama: impl FnOnce() -> 
 pub fn hooks(config: &Config, dirs: &Dirs, cleanup: Option<Arc<Cleanup>>) -> Hooks {
     let gpu = crate::catalog::machine(config).gpu;
     let speech = Arc::new(Speech::new(dirs.speech.clone(), config.threads, gpu));
-    let (key, default_speech, default_cleanup) = (config.key.clone(), config.speech.clone(), config.cleanup.clone());
+    let (keys, default_speech, default_cleanup) = (config.keys.clone(), config.speech.clone(), config.cleanup.clone());
     let (language, vocabulary) = (config.language.clone(), config.vocabulary.clone());
     let rules = config.rules;
     let rules_language = (config.language != "auto").then(|| config.language.clone());
@@ -114,7 +114,7 @@ pub fn hooks(config: &Config, dirs: &Dirs, cleanup: Option<Arc<Cleanup>>) -> Hoo
     Hooks {
         service: "amber-server",
         version: env!("CARGO_PKG_VERSION"),
-        keys: Arc::new(move || vec![amber_core::api::AccessKey::new("default", &key)]),
+        keys: Arc::new(move || keys.clone()),
         engine: Arc::new(move |requested| {
             let inner = speech.engine(requested, &default_speech)?;
             Ok(Box::new(WithDefaults { inner, language: language.clone(), vocabulary: vocabulary.clone() }) as Box<dyn Transcriber>)

@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use amber_core::api::AccessKey;
 use serde::{Deserialize, Serialize};
 
 /// What `config get` and `config set` know.
@@ -15,8 +16,12 @@ const DEFAULT_SPEECH: &str = "futo-multilingual-244";
 #[serde(default)]
 pub struct Config {
     pub port: u16,
-    /// The access key in the phone's address.
-    pub key: String,
+    /// The ways in: each a name, the secret in its address, the models it may use and its
+    /// quota (`amber-server key`).
+    pub keys: Vec<AccessKey>,
+    /// The one key of 0.4.x - read once and turned into the key "default".
+    #[serde(default, rename = "key", skip_serializing)]
+    pub legacy_key: String,
     /// The speech model a request gets that names none (an id of `local::MODELS`).
     pub speech: String,
     /// The cleanup model likewise (`local::LLM_MODELS`), none for no cleanup.
@@ -58,7 +63,8 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             port: amber_core::api::DEFAULT_PORT,
-            key: String::new(),
+            keys: Vec::new(),
+            legacy_key: String::new(),
             speech: DEFAULT_SPEECH.into(),
             cleanup: None,
             language: "auto".into(),
@@ -101,9 +107,71 @@ impl Config {
         std::fs::rename(&temp, path).map_err(|e| e.to_string())
     }
 
+    /// A config with the one key "default" - what setup makes.
+    #[cfg(test)]
+    pub fn with_key(secret: &str) -> Config {
+        Config { keys: vec![AccessKey::new("default", secret)], ..Config::default() }
+    }
+
+    /// Whether setup ran: only it makes the first key.
+    pub fn set_up(&self) -> bool {
+        !self.keys.is_empty()
+    }
+
+    /// A new key [name] for [models] (None: every model) at [per_day] requests a day (None:
+    /// the usual); its secret back.
+    pub fn add_key(&mut self, name: &str, models: Option<Vec<String>>, per_day: Option<u32>) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a key needs a name".into());
+        }
+        if self.find_key(name).is_some() {
+            return Err(format!("there is a key named {name} already"));
+        }
+        if let Some(ids) = &models {
+            if let Some(bad) = ids.iter().find(|id| amber_core::local::model(id).is_none() && amber_core::local::llm_model(id).is_none()) {
+                return Err(format!("{bad} is no model - amber-server models, amber-server cleanup"));
+            }
+        }
+        if per_day == Some(0) {
+            return Err("per day: at least 1".into());
+        }
+        let secret = amber_core::api::new_key();
+        self.keys.push(AccessKey { name: name.to_string(), secret: secret.clone(), models, per_day });
+        Ok(secret)
+    }
+
+    /// A new secret for the key [name]: devices with the old address are locked out.
+    pub fn renew_key(&mut self, name: &str) -> Result<String, String> {
+        let secret = amber_core::api::new_key();
+        let i = self.find_key(name).ok_or_else(|| format!("no key named {name} - amber-server key"))?;
+        self.keys[i].secret = secret.clone();
+        Ok(secret)
+    }
+
+    pub fn remove_key(&mut self, name: &str) -> Result<(), String> {
+        let i = self.find_key(name).ok_or_else(|| format!("no key named {name} - amber-server key"))?;
+        if self.keys.len() == 1 {
+            return Err("that is the last key - nobody could reach the server; add another first, or renew it".into());
+        }
+        self.keys.remove(i);
+        Ok(())
+    }
+
+    pub fn find_key(&self, name: &str) -> Option<usize> {
+        self.keys.iter().position(|k| k.name.eq_ignore_ascii_case(name.trim()))
+    }
+
     /// Unknown models and impossible values fall back to the defaults.
     pub fn sanitized(mut self) -> Config {
         let d = Config::default();
+        if self.keys.is_empty() && !self.legacy_key.trim().is_empty() {
+            self.keys.push(AccessKey::new("default", self.legacy_key.trim()));
+        }
+        self.legacy_key.clear();
+        // A key without a name or secret is no way in; a name only once.
+        let mut names = std::collections::HashSet::new();
+        self.keys.retain(|k| !k.name.trim().is_empty() && !k.secret.trim().is_empty() && names.insert(k.name.trim().to_lowercase()));
         if self.port < 1024 {
             self.port = d.port;
         }
@@ -191,10 +259,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_old_single_key_becomes_the_default_key() {
+        // Phones set up with 0.4.x keep working: same secret, now a key named "default".
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("amber-server.toml");
+        std::fs::write(&path, "port = 9000\nkey = \"oldsecret1234567890\"\n").unwrap();
+        let c = Config::load(&path).unwrap();
+        assert_eq!(c.keys, [AccessKey::new("default", "oldsecret1234567890")]);
+        c.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.lines().any(|l| l.starts_with("key =")), "{text}");
+        assert_eq!(Config::load(&path).unwrap(), c);
+    }
+
+    #[test]
+    fn keys_are_added_renewed_and_removed() {
+        let mut c = Config::with_key("defaultsecret123456");
+        let secret = c.add_key("Laptop", None, None).unwrap();
+        assert_eq!(secret.len(), 20);
+        assert!(c.add_key("laptop", None, None).is_err(), "names are unique, whatever the case");
+        assert!(c.add_key("  ", None, None).is_err());
+        c.add_key("Kind", Some(vec!["futo-multilingual-74".into()]), Some(200)).unwrap();
+        assert!(c.add_key("X", Some(vec!["no-such-model".into()]), None).unwrap_err().contains("no-such-model"));
+        assert!(c.add_key("Y", None, Some(0)).is_err());
+        let renewed = c.renew_key("Laptop").unwrap();
+        assert_ne!(renewed, secret);
+        c.remove_key("laptop").unwrap();
+        c.remove_key("Kind").unwrap();
+        assert!(c.remove_key("default").unwrap_err().contains("last"), "the server would be shut");
+        assert!(c.remove_key("nobody").is_err());
+        assert_eq!(c.keys.len(), 1);
+    }
+
+    #[test]
+    fn unusable_keys_are_dropped_on_load() {
+        let c = Config {
+            keys: vec![AccessKey::new("a", "secret1"), AccessKey::new("", "secret2"), AccessKey::new("b", ""), AccessKey::new("A", "secret3")],
+            ..Config::default()
+        }
+        .sanitized();
+        assert_eq!(c.keys.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["a"]);
+    }
+
+    #[test]
     fn round_trip_and_sanitize() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("amber-server.toml");
-        let c = Config { key: "k".repeat(20), ..Config::default() };
+        let c = Config::with_key(&"k".repeat(20));
         c.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), c);
         let bad = Config { port: 80, speech: "gone".into(), cleanup: Some("gone".into()), ..Config::default() }.sanitized();

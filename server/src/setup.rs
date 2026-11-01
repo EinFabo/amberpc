@@ -68,7 +68,7 @@ fn free_from(port: u16) -> u16 {
 
 /// Whether setup ran before: only it makes the key (`config set` before it leaves it empty).
 fn set_up(config: &Config) -> bool {
-    !config.key.trim().is_empty()
+    config.set_up()
 }
 
 /// Asks for the speech model, the cleanup, the language and the port; Enter takes the default.
@@ -134,8 +134,8 @@ fn finish(path: &Path, mut config: Config, fetch: &dyn Fetch) -> Result<Config, 
         }
     }
     // A config written by `config set` before setup has an empty key.
-    if config.key.trim().is_empty() {
-        config.key = amber_core::api::new_key();
+    if !config.set_up() {
+        config.keys.push(amber_core::api::AccessKey::new("default", &amber_core::api::new_key()));
     }
     config.save(path)?;
     Ok(config)
@@ -218,7 +218,7 @@ mod tests {
         assert!(asked.port >= 8765);
         assert_eq!(*stub.speech.borrow(), ["futo-multilingual-74"]);
         assert!(stub.cleanup.borrow().is_empty());
-        assert_eq!(asked.key.len(), 20, "a key was made");
+        assert_eq!(asked.keys[0].secret.len(), 20, "a key was made");
         let shown = String::from_utf8(out).unwrap();
         assert!(shown.contains("recommended") && shown.contains("Qwen3"), "{shown}");
     }
@@ -250,7 +250,7 @@ mod tests {
         // The installer runs setup --quick on every update.
         let (_d, p) = path();
         let big = Machine { gpu: true, threads: 16, ram_mb: 32_000 };
-        Config { key: "k".repeat(20), speech: "futo-multilingual-74".into(), ..Config::default() }.save(&p).unwrap();
+        Config { speech: "futo-multilingual-74".into(), ..Config::with_key(&"k".repeat(20)) }.save(&p).unwrap();
         assert_eq!(quick_with(&p, big, &Stub::default()).unwrap().speech, "futo-multilingual-74");
         let asked = ask_with(&p, big, &Stub::default(), &mut "\n\n\n\n".as_bytes(), &mut Vec::new()).unwrap();
         assert_eq!(asked.speech, "futo-multilingual-74", "Enter keeps it");
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn a_failed_cleanup_download_does_not_stop_setup() {
         let (_d, p) = path();
-        Config { key: "k".repeat(20), cleanup: Some("qwen3-4b-instruct-2507-q4km".into()), ..Config::default() }.save(&p).unwrap();
+        Config { cleanup: Some("qwen3-4b-instruct-2507-q4km".into()), ..Config::with_key(&"k".repeat(20)) }.save(&p).unwrap();
         let c = quick_with(&p, OFFICE_PC, &FailingCleanup).unwrap();
         assert_eq!(c.cleanup.as_deref(), Some("qwen3-4b-instruct-2507-q4km"), "kept, to retry with cleanup add");
         assert!(Config::load(&p).is_ok());
@@ -280,7 +280,7 @@ mod tests {
         assert_ne!(c.port, port);
         assert!(std::net::TcpListener::bind(("0.0.0.0", c.port)).is_ok(), "{} is free", c.port);
         // Set up before: the port is the user's choice, even while something holds it.
-        Config { key: "k".repeat(20), port, ..Config::default() }.save(&p).unwrap();
+        Config { port, ..Config::with_key(&"k".repeat(20)) }.save(&p).unwrap();
         assert_eq!(quick_with(&p, OFFICE_PC, &Stub::default()).unwrap().port, port);
     }
 
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn setup_keeps_the_key() {
         let (_d, p) = path();
-        Config { key: "k".repeat(20), ..Config::default() }.save(&p).unwrap();
-        assert_eq!(quick_with(&p, OFFICE_PC, &Stub::default()).unwrap().key, "k".repeat(20));
+        Config { ..Config::with_key(&"k".repeat(20)) }.save(&p).unwrap();
+        assert_eq!(quick_with(&p, OFFICE_PC, &Stub::default()).unwrap().keys[0].secret, "k".repeat(20));
     }
 }
