@@ -170,10 +170,7 @@ impl Whisper {
         // file name - its DLLs still load from the exe's own folder.
         let model_path = layout.model_path(model);
         let path = format!("/{}", amber_core::api::new_key());
-        cmd.current_dir(model_path.parent().unwrap_or(&layout.root))
-            .args(["--model", model.file])
-            .args(["--host", "127.0.0.1", "--port", &port.to_string(), "--threads", &threads.to_string()])
-            .args(["--request-path", &path]);
+        cmd.current_dir(model_path.parent().unwrap_or(&layout.root)).args(server_args(model, port, threads, &path));
         let child = process::spawn(cmd, &self.output).map_err(|e| format!("The local engine could not be started: {e}"))?;
 
         // Not the open port: this whisper-server opens it before the model has loaded and
@@ -268,5 +265,32 @@ impl Whisper {
             Ok(mut running) => running.as_mut().map(|r| matches!(r.child.try_wait(), Ok(None))).unwrap_or(false),
             Err(_) => false,
         }
+    }
+}
+
+/// whisper-server's arguments. It runs in the models folder, so the model is its file name;
+/// a tuned (short-context) model runs without flash attention ([local::flash_attention]).
+fn server_args(model: &local::Model, port: u16, threads: u32, path: &str) -> Vec<String> {
+    let mut args = vec!["--model".to_string(), model.file.to_string()];
+    args.extend(["--host", "127.0.0.1", "--port", &port.to_string(), "--threads", &threads.to_string()].map(String::from));
+    args.extend(["--request-path".to_string(), path.to_string()]);
+    if !local::flash_attention(model) {
+        args.push("--no-flash-attn".into());
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tuned_model_starts_without_flash_attention() {
+        let tuned = local::model("acft-large-v3-turbo-q8_0").unwrap();
+        let args = server_args(tuned, 5000, 8, "/k");
+        assert!(args.contains(&"--no-flash-attn".to_string()), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--model", tuned.file]) && args.windows(2).any(|w| w == ["--port", "5000"]));
+        let stock = local::model("large-v3-turbo-q5_0").unwrap();
+        assert!(!server_args(stock, 5000, 8, "/k").contains(&"--no-flash-attn".to_string()), "the full window keeps it");
     }
 }

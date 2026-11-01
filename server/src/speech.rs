@@ -65,8 +65,9 @@ impl Transcriber for Engine {
             *loaded = None;
             let mut cp = WhisperContextParameters::default();
             cp.use_gpu(self.speech.gpu);
-            // whisper.cpp's own default; much faster on a GPU.
-            cp.flash_attn(self.speech.gpu);
+            // whisper.cpp's own default, much faster on a GPU - but not with a shortened context
+            // (local::flash_attention: later dictations came out as nonsense).
+            cp.flash_attn(self.speech.gpu && amber_core::local::flash_attention(self.model));
             let ctx = WhisperContext::new_with_params(self.speech.dir.join(self.model.file), cp)
                 .map_err(|e| fail("The speech model could not be loaded.", e.to_string()))?;
             let mut state = ctx.create_state().map_err(|e| fail("The speech model could not start.", e.to_string()))?;

@@ -217,6 +217,15 @@ pub fn default_threads() -> u32 {
     (logical / 2).clamp(2, 8)
 }
 
+/// Whether whisper.cpp may use flash attention for [m]: not with a shortened context. With
+/// it (whisper.cpp 1.9.5, CPU and CUDA alike), once a dictation had used a larger context,
+/// later ones with a smaller context came out as nonsense until the model was loaded again -
+/// "Ja, passt." became ", et lorsqu to share.". Without it every one was right, at a few
+/// milliseconds more for a short dictation and about half a second more for a long one.
+pub fn flash_attention(m: &Model) -> bool {
+    !m.short_context
+}
+
 /// How much of the encoder context a short-context model needs for [samples] at 16 kHz:
 /// the audio plus [slack], at least 256 - or 0 (the full window) from 30 s on, where
 /// whisper.cpp slides over the audio window by window anyway. Port of Android's
@@ -712,6 +721,19 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shortened_context_runs_without_flash_attention() {
+        // whisper.cpp 1.9.5 with flash attention: once a dictation used a larger context,
+        // the following ones with a smaller one came out as nonsense ("Ja, passt." ->
+        // ", et lorsqu to share.") until the server restarted. Without it, all were right.
+        for m in MODELS.iter().filter(|m| m.short_context) {
+            assert!(!flash_attention(m), "{}", m.id);
+        }
+        for m in MODELS.iter().filter(|m| !m.short_context) {
+            assert!(flash_attention(m), "{} always takes the full window", m.id);
+        }
+    }
     use crate::engine::testserver::serve;
 
     #[test]
