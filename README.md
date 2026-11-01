@@ -131,14 +131,17 @@ no change to the phone app. Turn it on under *Settings → Phone*; it shows the 
 enter in the phone's *Engine → Own server* (as text and as a QR code), e.g.
 `http://192.168.178.30:8765/<key>/v1`.
 
-- OpenAI-compatible: `POST /v1/audio/transcriptions` (multipart, WAV) answers `{"text": …}`,
-  `GET /v1/models` lists `amber-pc` and `amber-cleanup`. Recognition uses the engine set on
-  the Engine page.
+- OpenAI-compatible: `POST /v1/audio/transcriptions` (multipart, WAV or Ogg Opus) answers
+  `{"text": …}`; `GET /v1/models` lists every downloaded speech and cleanup model and the
+  cloud models set in the app, the PC's own as the default - the phone picks among them, and
+  the PC loads the one it names (one local model at a time). See `docs/phone-api.md`.
 - `POST /v1/chat/completions` answers the phone's own cleanup (Amber for Android 0.17 and
-  later asks for it separately, with its styles per app) with the PC's cleanup model - local
-  or the provider under Cleanup. Any model name works; the PC uses its own model and fields.
+  later asks for it separately, with its styles per app) with the cleanup model it names -
+  local or the provider under Cleanup - or the PC's own.
 - The phone's own-server engine has no API key field, so the access key is part of the
-  path; a `Bearer` header with the key works too. A new key locks out old addresses.
+  path; a `Bearer` header with the key works too. Several keys, one per device or person,
+  each with its own address, the models it may use and its requests a day (*Phone → Access
+  keys*); a new secret or removing a key locks out only its devices.
 - Only devices in the private network (192.168/16, 10/8, 172.16/12, Tailscale's 100.64/10,
   loopback) are answered. Off by default; Windows asks once to let Amber through its
   firewall.

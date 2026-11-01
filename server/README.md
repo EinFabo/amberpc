@@ -60,14 +60,18 @@ a request for a model the server does not have gets the server's default.
 | `amber-server config` | every setting |
 | `amber-server config get language` / `config set language de` | one setting |
 | `amber-server url` | the phone's address and QR code |
-| `amber-server key --new` | a new access key: every phone with the old address is locked out |
+| `amber-server key` | the access keys: name, models, requests a day |
+| `amber-server key add Laptop --models futo-multilingual-74 --per-day 300` | a key for another device, limited to some models and a quota (both optional), and its address |
+| `amber-server key new [<name>]` | a new secret for a key (the first if none named): its devices are locked out, the others go on |
+| `amber-server key remove <name>` | remove a key - not the last one |
+| `amber-server url --key <name>` | the address of that key |
 | `amber-server status` | settings, models, the service, and whether the server answers |
 | `amber-server logs` | the service's last lines |
 | `amber-server service install` / `uninstall` / `status` | the background service |
 | `amber-server run` | serve in the foreground (what the service runs) |
 
 A running service takes changed settings and models when it restarts: `amber-server service
-install` restarts it (as does `key --new` by itself).
+install` restarts it (the `key` commands do so by themselves).
 
 ## Settings
 
@@ -85,7 +89,8 @@ install` restarts it (as does `key --new` by itself).
 | `rules.spoken_punctuation` | `true` | "Komma", "new line" ... become punctuation |
 | `rules.german_commas` | `true` | commas before German subordinate clauses |
 
-`key`, `speech` and `cleanup` are set by `setup`, `key --new`, `models default` and `cleanup`.
+`keys`, `speech` and `cleanup` are set by `setup`, the `key` commands, `models default` and
+`cleanup`. A 0.4.3 config's single `key` becomes the key "default", with the same secret.
 Models and llama.cpp live in `~/.local/share/amber-server/` or `%LOCALAPPDATA%\amber-server\`.
 
 ## The cleanup

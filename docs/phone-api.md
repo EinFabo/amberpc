@@ -8,8 +8,12 @@ offer to Amber for Android and to any OpenAI-compatible client. The implementati
 
 `http://<host>:<port>/<key>/v1` in the home network, `https://<tunnel-host>/<key>/v1` through
 a Cloudflare tunnel. The key is part of the path; `Authorization: Bearer <key>` works too.
-Without the key: `401`. Ten wrong keys from one sender: `429` for 15 minutes. With the key:
-120 requests per 10 minutes and 2000 a day, then `429`.
+Without a valid key: `401`. Ten wrong keys from one sender: `429` for 15 minutes.
+
+A server may have several keys (Amber PC 0.4.4 and Amber Server 0.4.4), one per device or
+person, each with its own address. A key may be limited to some models and has its own quota:
+120 requests per 10 minutes, and 2000 a day unless its owner set another number; then `429`.
+Removing a key locks out its devices only.
 
 ## Endpoints
 
@@ -48,8 +52,11 @@ lacks it.
 - `default`: what a request gets that names no model or an unknown one. Exactly one per kind.
 - A kind may be missing: no `cleanup` entry means this server offers no cleanup right now
   (then `/v1/chat/completions` answers `503`).
-- Amber for Windows lists the one speech and the one cleanup model it uses. Amber Server lists
-  every model that is downloaded, and switches to the one a request names.
+- Both list every model that is downloaded (Amber for Windows also the cloud models set in the
+  app) and switch to the one a request names - one local model loaded at a time.
+- The list shows a key only the models it may use, with one default per kind of its own. A
+  request naming a model its key may not use gets the key's default; a kind the server offers
+  but not to this key answers `403`.
 - Top-level `amber.audio` (optional): the formats `/v1/audio/transcriptions` takes, e.g.
   `["wav", "opus"]` - see [Compressed uploads](#compressed-uploads). Missing means `["wav"]`.
 
