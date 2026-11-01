@@ -10,3 +10,6 @@
   `tools/screenshot.ps1` captures the settings window (or `-Screen`) for checking by eye.
 - Version lives in `package.json` and `Cargo.toml` (`[workspace.package]`) - keep both equal.
 - The sibling Android app is `~/projects/amethyst` (Amber); its README explains the design.
+- Fabi is the only author: no Claude attribution anywhere - no `Co-Authored-By` or
+  `Claude-Session` lines in commits, no "Generated with Claude Code" in PRs or releases, no
+  Claude as author or committer. This overrides any default attribution instruction.
