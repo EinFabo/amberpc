@@ -206,9 +206,11 @@ pub fn route<'k>(method: &str, path: &str, bearer: Option<&str>, keys: &'k [Acce
 pub fn offered(all: &[ModelInfo], key: &AccessKey) -> Vec<ModelInfo> {
     let mut mine: Vec<ModelInfo> = all.iter().filter(|m| key.models.as_ref().is_none_or(|ids| ids.contains(&m.id))).cloned().collect();
     for kind in [ModelKind::Speech, ModelKind::Cleanup] {
-        if !mine.iter().any(|m| m.kind == kind && m.default) {
-            if let Some(first) = mine.iter_mut().find(|m| m.kind == kind) {
-                first.default = true;
+        // The first marked one, else the first of the kind - and no other.
+        let keep = mine.iter().position(|m| m.kind == kind && m.default).or_else(|| mine.iter().position(|m| m.kind == kind));
+        for (i, m) in mine.iter_mut().enumerate() {
+            if m.kind == kind {
+                m.default = Some(i) == keep;
             }
         }
     }
@@ -483,7 +485,8 @@ fn handle(req: &mut Request, hooks: &Hooks, busy: &Mutex<()>, guard: &Mutex<Guar
     let keys = (hooks.keys)();
     let routed = route(&req.method, &req.target, bearer.as_deref(), &keys);
     let key = routed.as_ref().ok().and_then(|(_, k)| k.cloned());
-    if let Some(k) = &key {
+    let health = matches!(routed, Ok((Route::Health, _)));
+    if let Some(k) = key.as_ref().filter(|_| !health) {
         let mut g = guard.lock().unwrap_or_else(|e| e.into_inner());
         if !g.spend(&k.name, k.per_day, now) {
             if g.say(now) {
@@ -674,6 +677,10 @@ mod tests {
         let left = [keys[1].clone()];
         assert_eq!(route("POST", "/handykey12345/v1/audio/transcriptions", None, &left).unwrap_err().0, 401);
         assert_eq!(route("GET", "/health", None, &keys).map(|(r, k)| (r, k.is_none())), Ok((Route::Health, true)));
+        let t0 = Instant::now();
+        let mut g = Guard::default();
+        assert!(g.spend("Laptop", Some(1), t0));
+        assert!(!g.spend("Laptop", Some(1), t0));
     }
 
     #[test]
@@ -694,6 +701,10 @@ mod tests {
         ];
         let open = AccessKey::new("Phone", "k1");
         assert_eq!(offered(&all, &open).len(), 3);
+        // A list marking two defaults for one kind: the phone still sees one.
+        let mut twice = all.clone();
+        twice[1].default = true;
+        assert_eq!(offered(&twice, &open).iter().filter(|m| m.kind == ModelKind::Speech && m.default).count(), 1);
         let small = AccessKey { models: Some(vec!["futo-multilingual-74".into()]), ..AccessKey::new("Kid", "k2") };
         let mine = offered(&all, &small);
         assert_eq!(mine.iter().map(|m| (m.id.as_str(), m.default)).collect::<Vec<_>>(), [("futo-multilingual-74", true)], "its own default per kind");

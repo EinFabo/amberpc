@@ -225,11 +225,34 @@ pub struct PhoneSettings {
     pub tunnel: bool,
     /// The tunnel's public hostname, "amber.example.com", as set up in Cloudflare.
     pub public_host: String,
+    /// The ways in, the first made by 0.4.x; their secrets are in the PC's secret store
+    /// under [PhoneKey::id].
+    pub keys: Vec<PhoneKey>,
+}
+
+/// An access key to the phone API: its name, the models it may use, its quota.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PhoneKey {
+    /// Where its secret is stored: "phone-api" for the first, "phone-api-..." for the others.
+    pub id: String,
+    pub name: String,
+    /// The model ids it may use; None for every model offered.
+    pub models: Option<Vec<String>>,
+    /// Its requests a day; None for the usual.
+    pub per_day: Option<u32>,
 }
 
 impl Default for PhoneSettings {
     fn default() -> Self {
-        PhoneSettings { enabled: false, port: crate::api::DEFAULT_PORT, cleanup: true, tunnel: false, public_host: String::new() }
+        PhoneSettings {
+            enabled: false,
+            port: crate::api::DEFAULT_PORT,
+            cleanup: true,
+            tunnel: false,
+            public_host: String::new(),
+            keys: vec![PhoneKey { id: "phone-api".into(), name: "Phone".into(), models: None, per_day: None }],
+        }
     }
 }
 
@@ -301,6 +324,19 @@ impl Settings {
             if let Some(p) = crate::providers::by_id(&self.server.provider) {
                 self.server.model = p.default_model().to_string();
             }
+        }
+        // The key of 0.4.x first; a name and an id once each, a quota of at least one.
+        let mut names = std::collections::HashSet::new();
+        let mut ids = std::collections::HashSet::new();
+        self.phone.keys.retain(|k| {
+            !k.name.trim().is_empty() && k.id.starts_with("phone-api") && ids.insert(k.id.clone()) && names.insert(k.name.trim().to_lowercase())
+        });
+        for k in &mut self.phone.keys {
+            k.name = k.name.trim().to_string();
+            k.per_day = k.per_day.map(|d| d.max(1));
+        }
+        if self.phone.keys.is_empty() {
+            self.phone.keys.push(PhoneKey { id: "phone-api".into(), name: "Phone".into(), models: None, per_day: None });
         }
         // "de", or several to choose among ("de,en"): two-letter codes, each once, in order.
         let codes: Vec<String> = crate::engine::TranscribeOptions::new(&self.language, "")
@@ -380,6 +416,23 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_phone_key_of_0_4_becomes_the_first_of_several() {
+        let s = Settings::default().sanitized();
+        assert_eq!(s.phone.keys, [PhoneKey { id: "phone-api".into(), name: "Phone".into(), models: None, per_day: None }]);
+        let mut s = Settings::default();
+        s.phone.keys = vec![
+            PhoneKey { id: "phone-api".into(), name: "Phone".into(), models: None, per_day: None },
+            PhoneKey { id: "phone-api-2".into(), name: "phone".into(), models: None, per_day: None },
+            PhoneKey { id: "phone-api-3".into(), name: " ".into(), models: None, per_day: None },
+            PhoneKey { id: "phone-api".into(), name: "Laptop".into(), models: None, per_day: Some(0) },
+            PhoneKey { id: "phone-api-4".into(), name: "Laptop".into(), models: Some(vec![]), per_day: Some(0) },
+        ];
+        let s = s.sanitized();
+        assert_eq!(s.phone.keys.iter().map(|k| (k.id.as_str(), k.name.as_str())).collect::<Vec<_>>(), [("phone-api", "Phone"), ("phone-api-4", "Laptop")]);
+        assert_eq!(s.phone.keys[1].per_day, Some(1), "at least one a day");
+    }
 
     #[test]
     fn several_languages_survive_saving() {

@@ -158,8 +158,10 @@ impl Config {
         Ok(())
     }
 
+    /// The key named [name] - the same comparison as the dedupe on load, Umlauts included.
     pub fn find_key(&self, name: &str) -> Option<usize> {
-        self.keys.iter().position(|k| k.name.eq_ignore_ascii_case(name.trim()))
+        let wanted = name.trim().to_lowercase();
+        self.keys.iter().position(|k| k.name.trim().to_lowercase() == wanted)
     }
 
     /// Unknown models and impossible values fall back to the defaults.
@@ -170,8 +172,14 @@ impl Config {
         }
         self.legacy_key.clear();
         // A key without a name or secret is no way in; a name only once.
-        let mut names = std::collections::HashSet::new();
-        self.keys.retain(|k| !k.name.trim().is_empty() && !k.secret.trim().is_empty() && names.insert(k.name.trim().to_lowercase()));
+        let (mut names, mut secrets) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+        let before = self.keys.len();
+        self.keys.retain(|k| {
+            !k.name.trim().is_empty() && !k.secret.trim().is_empty() && names.insert(k.name.trim().to_lowercase()) && secrets.insert(k.secret.trim().to_string())
+        });
+        if self.keys.len() < before {
+            eprintln!("amber-server: {} key(s) without a name or secret, or with one another key has, were left out", before - self.keys.len());
+        }
         if self.port < 1024 {
             self.port = d.port;
         }
@@ -278,6 +286,9 @@ mod tests {
         let secret = c.add_key("Laptop", None, None).unwrap();
         assert_eq!(secret.len(), 20);
         assert!(c.add_key("laptop", None, None).is_err(), "names are unique, whatever the case");
+        c.add_key("Ärger", None, None).unwrap();
+        assert!(c.add_key("ärger", None, None).is_err(), "also for an Umlaut's case");
+        c.remove_key("ÄRGER").unwrap();
         assert!(c.add_key("  ", None, None).is_err());
         c.add_key("Kind", Some(vec!["futo-multilingual-74".into()]), Some(200)).unwrap();
         assert!(c.add_key("X", Some(vec!["no-such-model".into()]), None).unwrap_err().contains("no-such-model"));
@@ -294,7 +305,7 @@ mod tests {
     #[test]
     fn unusable_keys_are_dropped_on_load() {
         let c = Config {
-            keys: vec![AccessKey::new("a", "secret1"), AccessKey::new("", "secret2"), AccessKey::new("b", ""), AccessKey::new("A", "secret3")],
+            keys: vec![AccessKey::new("a", "secret1"), AccessKey::new("", "secret2"), AccessKey::new("b", ""), AccessKey::new("A", "secret3"), AccessKey::new("c", "secret1")],
             ..Config::default()
         }
         .sanitized();
