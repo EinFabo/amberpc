@@ -8,8 +8,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// After cloudflared ended on its own: the next try.
+/// After cloudflared ended: the first wait, doubled on each failure up to [MAX_WAIT].
 const RETRY: Duration = Duration::from_secs(30);
+const MAX_WAIT: Duration = Duration::from_secs(600);
+/// A run that held this long was no failure: the next try is quick again.
+const HELD: Duration = Duration::from_secs(300);
+
+/// The wait before the next try, after [waited] - and [held]: whether the last run held.
+pub fn next_wait(waited: Duration, held: bool) -> Duration {
+    if held { RETRY } else { (waited * 2).min(MAX_WAIT) }
+}
 
 /// Where the token is kept: beside the config, readable by its owner only.
 pub fn token_path() -> PathBuf {
@@ -62,9 +70,12 @@ pub fn cloudflared_command(exe: &Path, port: u16, token: &str) -> Command {
     cmd
 }
 
+/// What cloudflared prints once it is through to Cloudflare.
+const CONNECTED: &str = "Registered tunnel connection";
+
 /// Whether cloudflared said it is through to Cloudflare.
 pub fn connected(lines: &[String]) -> bool {
-    lines.iter().any(|l| l.contains("Registered tunnel connection"))
+    lines.iter().any(|l| l.contains(CONNECTED))
 }
 
 /// What to tell when cloudflared ended, from its last words.
@@ -79,7 +90,10 @@ pub fn why_it_ended(last: &str) -> String {
 /// Keeps cloudflared running for as long as the server does: started (downloaded first if
 /// needed), watched, and started again a little after it ends.
 pub fn keep_running(port: u16, data: PathBuf, log: fn(String)) {
-    std::thread::spawn(move || loop {
+    std::thread::spawn(move || {
+        let mut wait = RETRY;
+        loop {
+        let began = std::time::Instant::now();
         let started = (|| {
             let token = load_token(&token_path()).ok_or("no tunnel token - amber-server tunnel setup <hostname>")?;
             let exe = ensure_cloudflared(&data)?;
@@ -90,7 +104,7 @@ pub fn keep_running(port: u16, data: PathBuf, log: fn(String)) {
                 log("tunnel starting".into());
                 let mut said = false;
                 while child.alive() {
-                    if !said && connected(&child.output().split(" | ").map(str::to_string).collect::<Vec<_>>()) {
+                    if !said && child.saw(CONNECTED) {
                         log("tunnel connected".into());
                         said = true;
                     }
@@ -100,7 +114,10 @@ pub fn keep_running(port: u16, data: PathBuf, log: fn(String)) {
             }
             Err(e) => log(format!("tunnel: {e}")),
         }
-        std::thread::sleep(RETRY);
+        wait = next_wait(wait, began.elapsed() >= HELD);
+        log(format!("tunnel: next try in {} s", wait.as_secs()));
+        std::thread::sleep(wait);
+        }
     });
 }
 
@@ -131,6 +148,18 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn a_failing_tunnel_waits_longer_each_time() {
+        // A wrong token or no network: 30 s, 1 min, 2 min ... at most 10 min - not two log
+        // lines and a 39 MB download every 30 s for ever.
+        let s = Duration::from_secs;
+        assert_eq!(next_wait(s(30), false), s(60));
+        assert_eq!(next_wait(s(480), false), s(600));
+        assert_eq!(next_wait(s(600), false), s(600));
+        // After a run that held for a while, the next try is quick again.
+        assert_eq!(next_wait(s(600), true), s(30));
     }
 
     #[test]

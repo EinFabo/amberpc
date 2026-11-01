@@ -311,11 +311,13 @@ fn tunnel_command(action: Option<TunnelAction>) -> Result<(), String> {
             return Ok(());
         }
         Some(TunnelAction::Setup { hostname, from_file }) => {
+            let mut handover = None;
             let (token, host, new_key) = match from_file {
                 Some(file) => {
+                    // Deleted only once its token is saved: a mistyped path is not lost.
                     let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-                    let _ = std::fs::remove_file(&file);
                     let i = amber_core::api::parse_tunnel_import(&text)?;
+                    handover = Some(file);
                     (i.token, i.host, i.new_key)
                 }
                 None => {
@@ -332,6 +334,9 @@ fn tunnel_command(action: Option<TunnelAction>) -> Result<(), String> {
             };
             tunnel::ensure_cloudflared(&paths::data_dir())?;
             tunnel::save_token(&tunnel::token_path(), &token)?;
+            if let Some(file) = handover {
+                let _ = std::fs::remove_file(file);
+            }
             if new_key {
                 let first = config.keys[0].name.clone();
                 config.renew_key(&first)?;

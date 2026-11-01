@@ -119,6 +119,11 @@ impl Child {
         running
     }
 
+    /// Whether any line still kept (the last 200 of each stream) contains [needle].
+    pub fn saw(&self, needle: &str) -> bool {
+        [&self.out, &self.err].iter().any(|b| b.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|l| l.contains(needle)))
+    }
+
     /// The last lines it printed - on stderr if any, the reason when it dies.
     pub fn output(&self) -> String {
         let err = last(&self.err, 5);
@@ -187,6 +192,21 @@ mod job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_line_is_found_among_all_kept() {
+        // cloudflared says it connected, then prints on: the last five lines miss it.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo 'INF Registered tunnel connection' >&2; for i in 1 2 3 4 5 6 7 8; do echo more$i >&2; done"]);
+        let mut child = Child::spawn(cmd).unwrap();
+        while child.alive() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!child.output().contains("Registered"));
+        assert!(child.saw("Registered tunnel connection"));
+        assert!(!child.saw("nothing like this"));
+    }
 
     #[cfg(unix)]
     #[test]
