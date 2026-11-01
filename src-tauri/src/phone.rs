@@ -139,8 +139,33 @@ fn access_keys(core: &Core) -> Vec<api::AccessKey> {
         .collect()
 }
 
-pub fn new_key(core: &Core) -> Result<(), String> {
-    core.set_key(KEY_ID, Some(api::new_key()))
+/// A new secret for the key [id] (the first if None): its old addresses stop working.
+pub fn new_key(core: &Core, id: Option<&str>) -> Result<(), String> {
+    let id = id.map(str::to_string).unwrap_or_else(|| core.settings().phone.keys.first().map_or(KEY_ID.to_string(), |k| k.id.clone()));
+    core.set_key(&id, Some(api::new_key()))
+}
+
+/// Removes the key [id] and its secret - not the last one: nobody could get in.
+pub fn remove_key(core: &Core, id: &str) -> Result<(), String> {
+    if core.settings().phone.keys.len() <= 1 {
+        return Err("That is the last key - add another first.".into());
+    }
+    core.update_settings(|s| s.phone.keys.retain(|k| k.id != id));
+    core.set_key(id, None)
+}
+
+/// A key as the Phone page shows it: what it may, and its address.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyInfo {
+    id: String,
+    name: String,
+    models: Option<Vec<String>>,
+    per_day: Option<u32>,
+    /// In the home network (the first address), and from anywhere when the tunnel is on.
+    url: Option<String>,
+    qr: Option<String>,
+    public_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -165,26 +190,45 @@ pub struct Info {
     tunnel_token: bool,
     public_url: Option<String>,
     public_qr: Option<String>,
+    /// Every key with its address; the first is the one shown above.
+    keys: Vec<KeyInfo>,
+    /// What the phone may choose among - for picking a key's models.
+    models: Vec<api::ModelInfo>,
 }
 
 pub fn info(core: &Core) -> Info {
     let settings = core.settings().phone;
     let running = core.phone.running.lock().unwrap().is_some();
     let error = core.phone.error.lock().unwrap().clone();
+    let interfaces: Vec<(String, std::net::IpAddr)> =
+        if running { if_addrs::get_if_addrs().unwrap_or_default().into_iter().map(|i| (i.name.clone(), i.ip())).collect() } else { Vec::new() };
+    let home_ips = api::phone_addresses(&interfaces);
     let addresses: Vec<Address> = if running {
         let key = key(core);
-        let interfaces: Vec<(String, std::net::IpAddr)> =
-            if_addrs::get_if_addrs().unwrap_or_default().into_iter().map(|i| (i.name.clone(), i.ip())).collect();
-        api::phone_addresses(&interfaces)
-            .into_iter()
-            .map(|(name, ip)| Address { name, url: api::phone_url(ip, settings.port, &key) })
-            .collect()
+        home_ips.iter().map(|(name, ip)| Address { name: name.clone(), url: api::phone_url(*ip, settings.port, &key) }).collect()
     } else {
         Vec::new()
     };
     let qr = addresses.first().and_then(|a| qr_svg(&a.url));
     let public_url = (settings.tunnel && !settings.public_host.is_empty()).then(|| api::public_url(&settings.public_host, &key(core)));
     let public_qr = public_url.as_deref().and_then(qr_svg);
+    let keys = settings
+        .keys
+        .iter()
+        .map(|k| {
+            let secret = secret(core, &k.id);
+            let url = home_ips.first().map(|(_, ip)| api::phone_url(*ip, settings.port, &secret));
+            KeyInfo {
+                id: k.id.clone(),
+                name: k.name.clone(),
+                models: k.models.clone(),
+                per_day: k.per_day,
+                qr: url.as_deref().and_then(qr_svg),
+                url,
+                public_url: (settings.tunnel && !settings.public_host.is_empty()).then(|| api::public_url(&settings.public_host, &secret)),
+            }
+        })
+        .collect();
     Info {
         running,
         error,
@@ -195,6 +239,8 @@ pub fn info(core: &Core) -> Info {
         tunnel_token: core.has_key(crate::tunnel::TOKEN_ID),
         public_url,
         public_qr,
+        keys,
+        models: models(core),
     }
 }
 

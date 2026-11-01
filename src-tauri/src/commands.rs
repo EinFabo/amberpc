@@ -624,12 +624,22 @@ pub async fn phone_info(app: AppHandle) -> crate::phone::Info {
     crate::phone::info(&app.state::<Core>())
 }
 
-/// A new access key: the addresses the phone has stop working.
+/// A new secret for an access key (the first if none is named): its old addresses stop
+/// working, the other keys go on.
 #[tauri::command]
-pub async fn phone_new_key(app: AppHandle) -> Result<crate::phone::Info, String> {
+pub async fn phone_new_key(app: AppHandle, id: Option<String>) -> Result<crate::phone::Info, String> {
     let core = app.state::<Core>();
-    crate::phone::new_key(&core)?;
+    crate::phone::new_key(&core, id.as_deref())?;
     crate::diag::info("phone API: new key");
+    Ok(crate::phone::info(&core))
+}
+
+/// Removes an access key: its devices are locked out, the others go on.
+#[tauri::command]
+pub async fn phone_remove_key(app: AppHandle, id: String) -> Result<crate::phone::Info, String> {
+    let core = app.state::<Core>();
+    crate::phone::remove_key(&core, &id)?;
+    crate::diag::info("phone API: a key removed");
     Ok(crate::phone::info(&core))
 }
 

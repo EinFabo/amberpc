@@ -54,7 +54,7 @@ export interface Settings {
   autoUpdate: boolean;
   logText: boolean;
   onboarded: boolean;
-  phone: { enabled: boolean; port: number; cleanup: boolean; tunnel: boolean; publicHost: string };
+  phone: { enabled: boolean; port: number; cleanup: boolean; tunnel: boolean; publicHost: string; keys: PhoneKey[] };
   profiles: Profile[];
   history: boolean;
   historyDays: number;
@@ -141,6 +141,30 @@ export interface UpdateInfo {
   notes?: string | null;
 }
 
+/** An access key to the phone API; its secret stays in the PC's secret store. */
+export interface PhoneKey {
+  id: string;
+  name: string;
+  /** Model ids it may use; null for every model offered. */
+  models: string[] | null;
+  /** Requests a day; null for the usual 2000. */
+  perDay: number | null;
+}
+
+export interface ModelInfo {
+  id: string;
+  kind: "speech" | "cleanup";
+  label: string;
+  note: string;
+  default: boolean;
+}
+
+export interface KeyInfo extends PhoneKey {
+  url?: string | null;
+  qr?: string | null;
+  publicUrl?: string | null;
+}
+
 export interface PhoneInfo {
   running: boolean;
   error?: string | null;
@@ -151,6 +175,8 @@ export interface PhoneInfo {
   tunnelToken: boolean;
   publicUrl?: string | null;
   publicQr?: string | null;
+  keys: KeyInfo[];
+  models: ModelInfo[];
 }
 
 export interface CleanupPreview {

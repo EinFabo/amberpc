@@ -81,7 +81,7 @@ pub enum ModelKind {
 
 /// One entry of the model list: what the phone shows in its choice of models, and the id it
 /// sends back as `model` (see docs/phone-api.md).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ModelInfo {
     pub id: String,
     pub kind: ModelKind,

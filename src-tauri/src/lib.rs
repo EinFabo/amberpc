@@ -130,6 +130,7 @@ pub fn run() {
             commands::open_url,
             commands::phone_info,
             commands::phone_new_key,
+            commands::phone_remove_key,
             commands::start_llm,
             commands::cleanup_preview,
             commands::chat_providers,

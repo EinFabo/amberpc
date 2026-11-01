@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { DownloadEvent, PhoneInfo } from "../../shared/types";
+import type { DownloadEvent, KeyInfo, ModelInfo, PhoneInfo, PhoneKey } from "../../shared/types";
 import type { PageProps } from "../App";
 import { Progress, Row, Section, Switch } from "../ui";
 
@@ -147,23 +147,7 @@ export function PhonePage(props: PageProps) {
               } />
           </Section>
           {info && <TunnelSection {...props} info={info} reload={reload} />}
-          <Section title="Access">
-            <Row label="Access key" hint="It is part of the address. A new key locks out every phone that has the old address.">
-              <button
-                className="btn danger"
-                onClick={async () => {
-                  try {
-                    setInfo(await invoke<PhoneInfo>("phone_new_key"));
-                    toast("New key - enter the new address on the phone.", true);
-                  } catch (e) {
-                    toast(String(e));
-                  }
-                }}
-              >
-                New key
-              </button>
-            </Row>
-          </Section>
+          {info && <KeysSection {...props} info={info} setInfo={setInfo} copy={copy} />}
           <p className="note">
             The phone uses the engine from the Engine page. The first time, Windows asks whether Amber may accept connections - allow it for private networks, otherwise the
             phone cannot reach the PC.
@@ -315,5 +299,162 @@ function TunnelSection({ s, save, toast, info, reload }: PageProps & { info: Pho
         </>
       )}
     </Section>
+  );
+}
+
+/**
+ * The access keys: each device or person its own - a name, the models it may use, how many
+ * requests a day, its own address; one can be locked out without the others. The first is
+ * the one in the address above.
+ */
+function KeysSection({ s, save, toast, info, setInfo, copy }: PageProps & { info: PhoneInfo; setInfo: (i: PhoneInfo) => void; copy: (url: string) => void }) {
+  const [adding, setAdding] = useState("");
+  const [open, setOpen] = useState<string | null>(null);
+  const keys = s.phone.keys;
+  const change = (id: string, edit: (k: PhoneKey) => void) => save((x) => x.phone.keys.forEach((k) => k.id === id && edit(k)));
+  const call = async (command: string, args: Record<string, unknown>, done: string) => {
+    try {
+      setInfo(await invoke<PhoneInfo>(command, args));
+      toast(done, true);
+    } catch (e) {
+      toast(String(e));
+    }
+  };
+  const add = () => {
+    const name = adding.trim();
+    if (!name) return;
+    if (keys.some((k) => k.name.toLowerCase() === name.toLowerCase())) return toast("There is a key with that name already.");
+    const id = `phone-api-${Date.now().toString(36)}`;
+    save((x) => x.phone.keys.push({ id, name, models: null, perDay: null }));
+    setAdding("");
+    setOpen(id);
+  };
+  return (
+    <Section title="Access keys">
+      <p className="hint">
+        Each key is its own way in, with its own address: give every device or person one. A key can be limited to some models and to a number of requests a day, and locked out
+        without the others. The first is the one in the address above.
+      </p>
+      {keys.map((k, i) => {
+        const shown = info.keys.find((x) => x.id === k.id);
+        return (
+          <KeyRow
+            key={k.id}
+            k={k}
+            shown={shown}
+            first={i === 0}
+            last={keys.length === 1}
+            open={open === k.id}
+            models={info.models}
+            onOpen={() => setOpen(open === k.id ? null : k.id)}
+            onChange={(edit) => change(k.id, edit)}
+            onRenew={() => call("phone_new_key", { id: k.id }, `New secret for “${k.name}” - its devices need the new address.`)}
+            onRemove={() => call("phone_remove_key", { id: k.id }, `“${k.name}” removed - its devices are locked out.`)}
+            copy={copy}
+          />
+        );
+      })}
+      <div className="row">
+        <input type="text" value={adding} placeholder="A new key, e.g. Laptop" onChange={(e) => setAdding(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+        <button className="btn primary" disabled={!adding.trim()} onClick={add}>
+          Add key
+        </button>
+      </div>
+    </Section>
+  );
+}
+
+function KeyRow(p: {
+  k: PhoneKey;
+  shown?: KeyInfo;
+  first: boolean;
+  last: boolean;
+  open: boolean;
+  models: ModelInfo[];
+  onOpen: () => void;
+  onChange: (edit: (k: PhoneKey) => void) => void;
+  onRenew: () => void;
+  onRemove: () => void;
+  copy: (url: string) => void;
+}) {
+  const { k, shown, models } = p;
+  const [name, setName] = useState(k.name);
+  useEffect(() => setName(k.name), [k.name]);
+  const allowed = (id: string) => k.models === null || k.models.includes(id);
+  const toggle = (id: string) =>
+    p.onChange((x) => {
+      const now = x.models ?? models.map((m) => m.id);
+      const next = now.includes(id) ? now.filter((m) => m !== id) : [...now, id];
+      x.models = models.every((m) => next.includes(m.id)) ? null : next;
+    });
+  const summary = k.models === null ? "every model" : `${k.models.length} model${k.models.length === 1 ? "" : "s"}`;
+  return (
+    <div className="row column">
+      <div className="label" style={{ cursor: "pointer" }} onClick={p.onOpen}>
+        <div>
+          {k.name} {p.first && <span className="hint">(the address above)</span>}
+        </div>
+        <div className="hint">
+          {summary}, {k.perDay ?? 2000} requests a day {p.open ? "▴" : "▾"}
+        </div>
+      </div>
+      {p.open && (
+        <>
+          <Row label="Name">
+            <input type="text" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() && name !== k.name && p.onChange((x) => (x.name = name.trim()))} />
+          </Row>
+          {shown?.url && (
+            <Row label="Address" hint={shown.url}>
+              <button className="btn" onClick={() => p.copy(shown.url!)}>
+                Copy
+              </button>
+            </Row>
+          )}
+          {shown?.publicUrl && (
+            <Row label="From anywhere" hint={shown.publicUrl}>
+              <button className="btn" onClick={() => p.copy(shown.publicUrl!)}>
+                Copy
+              </button>
+            </Row>
+          )}
+          {!p.first && shown?.qr && <div className="qr" dangerouslySetInnerHTML={{ __html: shown.qr }} />}
+          <div className="row column">
+            <div className="label">
+              <div>Models it may use</div>
+              <div className="hint">The phone's choice shows only these. Downloads stay on this PC.</div>
+            </div>
+            <div className="seg wrap">
+              {models.map((m) => (
+                <button key={m.id} className={allowed(m.id) ? "on" : ""} onClick={() => toggle(m.id)} title={m.note}>
+                  {m.kind === "cleanup" ? "Cleanup: " : ""}
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <Row label="Requests a day" hint="Then it waits until the next day. Every key also has at most 120 in ten minutes.">
+            <input
+              type="number"
+              min={1}
+              value={k.perDay ?? 2000}
+              onChange={(e) => {
+                const v = Math.max(1, Math.floor(Number(e.target.value) || 1));
+                p.onChange((x) => (x.perDay = v === 2000 ? null : v));
+              }}
+            />
+          </Row>
+          <Row label="Secret" hint="A new secret locks out the devices with this key's address; the other keys go on.">
+            <button className="btn danger" onClick={p.onRenew}>
+              New secret
+            </button>
+            {!p.last && (
+              <button className="btn danger" onClick={p.onRemove}>
+                Remove
+              </button>
+            )}
+          </Row>
+        </>
+      )}
+    </div>
   );
 }

@@ -168,7 +168,7 @@ pub fn import(app: &AppHandle, path: &str) {
         let core = app.state::<Core>();
         core.set_key(TOKEN_ID, Some(i.token))?;
         if i.new_key {
-            crate::phone::new_key(&core)?;
+            crate::phone::new_key(&core, None)?;
         }
         let after = core.update_settings(|s| {
             s.phone.enabled = true;
