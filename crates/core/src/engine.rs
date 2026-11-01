@@ -41,19 +41,80 @@ impl TranscribeOptions {
     }
 }
 
-/// Of [allowed], the one whisper.cpp found likeliest ([probabilities]: `{"de": 0.2, ...}`) -
-/// the first of them when it heard none of them, or when two are equally likely. Short
-/// German speech is easily taken for Turkish; among German and English only, it can no
-/// longer be.
-pub fn pick_language(probabilities: &serde_json::Value, allowed: &[String]) -> String {
+/// Up to this much audio, a dictation is short: whisper's language guess on a second or so is
+/// weak, and a wrong guess costs much more one way than the other. Measured on whisper-server
+/// with Large v3 Turbo (ACFT), German and English phrases of 0.5-1.1 s (TTS at 1.5-2x speed,
+/// Fabi's failures were 0.9-1.4 s): German was taken for English with p(en) 0.29-0.47 and
+/// p(de) 0.03-0.47, and run again in English it came back translated ("Okay, danke." ->
+/// "Okay, thank you.", "Ich hab kein Wasser." -> "I have no water."); short English run in
+/// German stayed English ("See you later.", "No problem.", "Sounds good."). From about 2 s on
+/// every phrase was detected clearly (the right language at 0.87 or more, mostly 0.99).
+pub const SHORT_DICTATION_MS: u64 = 3_000;
+
+/// In a short dictation another language than the first chosen needs at least this
+/// probability ("more likely than not")...
+pub const CLEAR_LANGUAGE: f64 = 0.5;
+
+/// ...and this many times the first one's. English phrases cleared both at 0.64-1.0; the
+/// German ones taken for English stayed below 0.47.
+pub const CLEAR_MARGIN: f64 = 2.0;
+
+/// Of [allowed], the language to recognize [audio_ms] of speech in, by whisper.cpp's
+/// [probabilities] (`{"de": 0.2, ...}`): the likeliest of them - in a short dictation the first
+/// chosen unless another is clearly likelier ([SHORT_DICTATION_MS]). The first, too, when it
+/// heard none of them or two equally. Short German speech is easily taken for Turkish; among
+/// German and English only, it can no longer be.
+pub fn pick_language(probabilities: &serde_json::Value, allowed: &[String], audio_ms: u64) -> String {
     let p = |code: &str| probabilities.get(code).and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let mut best = allowed.first().cloned().unwrap_or_default();
+    let first = allowed.first().cloned().unwrap_or_default();
+    let mut best = first.clone();
     for code in allowed {
         if p(code) > p(&best) {
             best = code.clone();
         }
     }
-    best
+    let unclear = p(&best) < CLEAR_LANGUAGE || p(&best) < CLEAR_MARGIN * p(&first);
+    let picked = if audio_ms <= SHORT_DICTATION_MS && unclear { first } else { best };
+    if allowed.len() > 1 {
+        note(language_note(probabilities, allowed, audio_ms, &picked));
+    }
+    picked
+}
+
+/// The log line for a pick: length, the chosen languages' probabilities, the pick - never the
+/// text.
+pub fn language_note(probabilities: &serde_json::Value, allowed: &[String], audio_ms: u64, picked: &str) -> String {
+    let each: Vec<String> = allowed.iter().map(|c| format!("{c} {:.2}", probabilities.get(c).and_then(|v| v.as_f64()).unwrap_or(0.0))).collect();
+    format!("language: {:.1} s of audio, among {}: {} -> {picked}", audio_ms as f64 / 1000.0, allowed.join(","), each.join(", "))
+}
+
+/// The language a cloud service is sent: the one chosen, or for a short dictation the first
+/// of several - it would guess freely, and a short German phrase guessed as English comes
+/// back translated. A long one it detects itself.
+pub fn cloud_language(options: &TranscribeOptions, audio_ms: u64) -> Option<String> {
+    match options.fixed() {
+        Some(one) => Some(one.to_string()),
+        None if audio_ms <= SHORT_DICTATION_MS => options.among().into_iter().next(),
+        None => None,
+    }
+}
+
+static LANGUAGE_LOG: std::sync::OnceLock<Box<dyn Fn(String) + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Where the language picks are logged - the desktop's log, the server's.
+pub fn log_languages_to(log: impl Fn(String) + Send + Sync + 'static) {
+    let _ = LANGUAGE_LOG.set(Box::new(log));
+}
+
+fn note(line: String) {
+    if let Some(log) = LANGUAGE_LOG.get() {
+        log(line);
+    }
+}
+
+/// Milliseconds of audio in a 16 kHz 16-bit mono WAV as Amber writes it (44-byte header).
+pub fn wav_ms(wav: &[u8]) -> u64 {
+    (wav.len().saturating_sub(44) / 2) as u64 * 1000 / 16_000
 }
 
 pub trait Transcriber: Send + Sync {
@@ -154,8 +215,9 @@ impl Transcriber for OpenAiTranscriber {
             .text("model", self.model.clone())
             .text("response_format", "json")
             .text("temperature", "0");
-        // A list ("de,en") is ours: the services detect by themselves then.
-        if let Some(lang) = options.fixed() {
+        // A list ("de,en") is ours: the services detect by themselves then - but not in a
+        // short dictation.
+        if let Some(lang) = cloud_language(options, wav_ms(wav)) {
             form = form.text("language", lang.to_string());
         }
         if let Some(prompt) = &options.prompt {
@@ -212,7 +274,7 @@ impl WhisperServerTranscriber {
         // another: short German speech is easily taken for Turkish or English.
         let any = TranscribeOptions { language: None, prompt: options.prompt.clone() };
         let (text, language, probabilities) = self.run(wav, &any, "verbose_json", true)?;
-        let picked = pick_language(&probabilities, &among);
+        let picked = pick_language(&probabilities, &among, wav_ms(wav));
         if language.as_deref().and_then(crate::chunking::language_code) == Some(picked.as_str()) {
             return Ok((text, language));
         }
@@ -494,12 +556,63 @@ mod tests {
 
     #[test]
     fn the_likeliest_allowed_language_wins() {
+        // A long dictation: the likeliest, whatever the margin.
+        let long = 6_000;
         let allowed = ["de".to_string(), "en".to_string()];
-        assert_eq!(pick_language(&serde_json::json!({"tr": 0.5, "en": 0.3, "de": 0.2}), &allowed), "en");
+        assert_eq!(pick_language(&serde_json::json!({"tr": 0.5, "en": 0.3, "de": 0.2}), &allowed, long), "en");
         // Turkish is not allowed; neither listed language heard at all: the first.
-        assert_eq!(pick_language(&serde_json::json!({"tr": 0.9}), &allowed), "de");
-        assert_eq!(pick_language(&serde_json::json!({"de": 0.4, "en": 0.4}), &allowed), "de", "a tie: the first");
-        assert_eq!(pick_language(&serde_json::Value::Null, &allowed), "de");
+        assert_eq!(pick_language(&serde_json::json!({"tr": 0.9}), &allowed, long), "de");
+        assert_eq!(pick_language(&serde_json::json!({"de": 0.4, "en": 0.4}), &allowed, long), "de", "a tie: the first");
+        assert_eq!(pick_language(&serde_json::Value::Null, &allowed, long), "de");
+        // A German speaker's English sentence, 7.4 s (TTS "Stefan").
+        assert_eq!(pick_language(&serde_json::json!({"de": 0.216, "en": 0.587}), &allowed, 7_390), "en");
+    }
+
+    #[test]
+    fn a_short_dictation_stays_in_the_first_language_unless_another_is_clear() {
+        let de_en = ["de".to_string(), "en".to_string()];
+        let pick = |de: f64, en: f64, ms: u64| pick_language(&serde_json::json!({"de": de, "en": en, "ja": 0.2}), &de_en, ms);
+        // Measured on whisper-server, Large v3 Turbo (ACFT), TTS at 1.5-2x speed: German that
+        // came back as English (in English, "Okay, danke." is "Okay, thank you.").
+        assert_eq!(pick(0.025, 0.292, 650), "de", "Okay, danke.");
+        assert_eq!(pick(0.177, 0.300, 740), "de", "Na gut.");
+        assert_eq!(pick(0.037, 0.414, 570), "de", "Na gut.");
+        assert_eq!(pick(0.466, 0.469, 880), "de", "Okay, bis morgen.");
+        // German that was right stays right.
+        assert_eq!(pick(0.998, 0.001, 940), "de", "Ich hab kein Wasser.");
+        assert_eq!(pick(0.999, 0.000, 720), "de", "Bis gleich.");
+        // Clearly English stays English.
+        assert_eq!(pick(0.253, 0.701, 870), "en", "See you later.");
+        assert_eq!(pick(0.000, 0.998, 830), "en", "See you later.");
+        assert_eq!(pick(0.081, 0.639, 660), "en", "Thank you.");
+        // Unsure English goes to German - whisper keeps short English as English there
+        // (measured: "No problem.", "Sounds good.", "Thank you." unchanged).
+        assert_eq!(pick(0.352, 0.378, 880), "de", "No problem.");
+        assert_eq!(pick(0.407, 0.568, 850), "de", "Sounds good.");
+        // Nothing hardcoded to German: the first chosen decides.
+        let en_de = ["en".to_string(), "de".to_string()];
+        assert_eq!(pick_language(&serde_json::json!({"de": 0.40, "en": 0.30}), &en_de, 900), "en");
+        assert_eq!(pick_language(&serde_json::json!({"de": 0.95, "en": 0.03}), &en_de, 900), "de");
+        // A tie and none of them: the first, short or long.
+        assert_eq!(pick(0.4, 0.4, 900), "de");
+        assert_eq!(pick_language(&serde_json::json!({"tr": 0.9}), &de_en, 900), "de");
+        // Long: the likeliest again.
+        assert_eq!(pick(0.177, 0.300, SHORT_DICTATION_MS + 1), "en");
+    }
+
+    #[test]
+    fn a_cloud_service_gets_the_first_language_for_a_short_dictation() {
+        let list = TranscribeOptions::new("de,en", "");
+        assert_eq!(cloud_language(&list, 1_400).as_deref(), Some("de"), "short: no free detection");
+        assert_eq!(cloud_language(&list, SHORT_DICTATION_MS + 1), None, "long: the service detects");
+        assert_eq!(cloud_language(&TranscribeOptions::new("en", ""), 60_000).as_deref(), Some("en"));
+        assert_eq!(cloud_language(&TranscribeOptions::new("auto", ""), 900), None);
+    }
+
+    #[test]
+    fn the_pick_is_logged_without_the_text() {
+        let line = language_note(&serde_json::json!({"de": 0.025, "en": 0.292, "ja": 0.3}), &["de".to_string(), "en".to_string()], 1377, "de");
+        assert_eq!(line, "language: 1.4 s of audio, among de,en: de 0.03, en 0.29 -> de");
     }
 
     #[test]
@@ -534,11 +647,17 @@ mod tests {
 
     #[test]
     fn a_cloud_engine_gets_no_language_list() {
-        // Groq or OpenAI refuse "de,en": they detect by themselves then.
-        let (url, rx) = serve(vec![json(200, r#"{"text":"x"}"#)]);
-        OpenAiTranscriber::new(&url, "", "m").transcribe(b"", &TranscribeOptions::new("de,en", "")).unwrap();
+        // Groq or OpenAI refuse "de,en": they detect by themselves then - a long dictation.
+        let (url, rx) = serve(vec![json(200, r#"{"text":"x"}"#), json(200, r#"{"text":"x"}"#)]);
+        let long = crate::audio::encode_wav(&vec![0.1; 16 * (SHORT_DICTATION_MS as usize + 500)], 16_000);
+        OpenAiTranscriber::new(&url, "", "m").transcribe(&long, &TranscribeOptions::new("de,en", "")).unwrap();
         let body = String::from_utf8_lossy(&rx.recv().unwrap().body).to_string();
         assert!(!body.contains("name=\"language\""), "{body}");
+        // A short one in the first chosen language.
+        let short = crate::audio::encode_wav(&vec![0.1; 16_000], 16_000);
+        OpenAiTranscriber::new(&url, "", "m").transcribe(&short, &TranscribeOptions::new("de,en", "")).unwrap();
+        let body = String::from_utf8_lossy(&rx.recv().unwrap().body).to_string();
+        assert!(body.contains("name=\"language\"\r\n\r\nde\r\n"), "{body}");
     }
 
     #[test]

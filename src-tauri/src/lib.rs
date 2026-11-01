@@ -42,6 +42,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         layout: Layout { root: data },
     };
     diag::init(&paths.logs);
+    amber_core::engine::log_languages_to(diag::info);
     diag::info(format!("Amber {} starting", env!("CARGO_PKG_VERSION")));
     app.manage(Core::new(paths));
 

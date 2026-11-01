@@ -113,7 +113,8 @@ impl Transcriber for Engine {
                 .enumerate()
                 .filter_map(|(id, p)| whisper_rs::get_lang_str(id as i32).map(|code| (code.to_string(), serde_json::json!(p))))
                 .collect();
-            let picked = amber_core::engine::pick_language(&serde_json::Value::Object(by_code), &plan.among);
+            let audio_ms = samples.len() as u64 * 1000 / amber_core::audio::TARGET_RATE as u64;
+            let picked = amber_core::engine::pick_language(&serde_json::Value::Object(by_code), &plan.among, audio_ms);
             if detected == Some(picked.as_str()) { text } else { run(state, Some(&picked))? }
         } else {
             run(state, plan.language.as_deref())?

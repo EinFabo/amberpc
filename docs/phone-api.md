@@ -71,15 +71,29 @@ commas) and, on Amber for Windows, its cleanup model - as its owner set them. Si
 
 - `language`: `auto`, one ISO 639-1 code (`de`; everything else is translated into it), or
   several, comma-separated (`de,en`): the server detects which of them was spoken, per
-  dictation - a short German dictation is then not taken for Turkish or translated into
-  English, as `auto` can. On a tie, or when it heard none of them, the first wins.
+  dictation, never another one (a short German dictation is not taken for Turkish, as `auto`
+  can). The first listed is the user's main language and wins a tie, and when the server
+  heard none of them. In a dictation of up to 3 s, where Whisper's guess is weak, another
+  listed language wins only when it is clearly likelier (probability 0.5 or more, and twice
+  the first's): with `de,en` a short German phrase ("Okay, danke.", "Ich hab kein Wasser.")
+  is no longer recognized as English and translated, a clear English one ("See you later.")
+  stays English, and a short English phrase too unclear to tell comes back as German speech
+  hears it - mostly unchanged English, a mumbled one may come out German. `en,de` favours
+  English the same way. Amber 0.4.6 or newer; before, the likeliest listed language won also
+  in a short dictation. A client's own cleanup must keep the language as well: a small model
+  under an English prompt translates short German even when told "never translate" (see
+  `/v1/chat/completions`).
 - `amber_cleanup=client`: the client cleans the text up itself, with its own prompt
   (`/v1/chat/completions`). The server then leaves out its own rules and cleanup and returns
   what was recognized (Whisper's annotations such as `[Musik]` removed).
 
 ### `POST /v1/chat/completions`
 
-An OpenAI chat request, at most 256 KB. `messages`, `temperature` and `max_tokens` (at most
+An OpenAI chat request, at most 256 KB. The messages go to the model as they are: a client's
+cleanup prompt should say in which language to answer ("Reply in the language of the
+dictation: German stays German, English stays English, a mix stays mixed") - Qwen3 4B, the
+PC's local model, translated short German dictations into English under "Keep the original
+language. Never translate." alone. `messages`, `temperature` and `max_tokens` (at most
 4096, 2048 if none) are used; `model` picks a model of kind `cleanup` (Amber Server; Amber for
 Windows always uses its own); other fields are dropped - they belong to the caller's idea of a
 model, not to the server's. The answer is the model's OpenAI answer as it came.

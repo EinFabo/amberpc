@@ -33,6 +33,7 @@ pub const EX_CONFIG: i32 = 78;
 /// Serves until the process ends. Without a config, a key or the speech model it exits with
 /// [EX_CONFIG] and says what to run.
 pub fn serve() -> ! {
+    amber_core::engine::log_languages_to(log);
     match start() {
         Ok(()) => loop {
             std::thread::park();
