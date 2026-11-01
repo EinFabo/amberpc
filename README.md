@@ -167,11 +167,22 @@ command installs it (Linux or Windows, CPU or Vulkan GPU), sets it up with the m
 suits the machine and starts it as a service; every setting and model has a command, and the
 phone chooses among the models it has downloaded.
 
+Linux:
+
 ```sh
 curl -fsSL https://github.com/EinFabo/amberpc/releases/download/server-latest/install-server.sh | sh
 ```
 
-See [server/README.md](server/README.md).
+Windows (PowerShell, no admin rights needed):
+
+```powershell
+irm https://github.com/EinFabo/amberpc/releases/download/server-latest/install-server.ps1 | iex
+```
+
+Run either again to update. Then `amber-server url` shows the phone's address and QR code;
+`amber-server key add <name>` gives another device its own key (with its models and requests a
+day), and `amber-server tunnel setup <hostname>` reaches the server from anywhere through a
+Cloudflare Tunnel. Every command and setting: [server/README.md](server/README.md).
 
 ## Inserting
 
