@@ -92,8 +92,61 @@ took 18.6 s with large-v3-turbo on the CPU). Android 0.16 solved it with ACFT mo
       text instead of the dictation. Matched after recognition, before the cleanup; a page to
       manage them.
 
+## Phase 7 - Easier servers, models for every PC (Fabi, 2026-11-01)
+
+- [ ] **Amber Server, made user-friendly.** What tripped Fabi up on a real install:
+      - `models add futo-multingual-244` (a typo), `add Small`, `add 2` were all refused. The fix:
+        take the list's label and number too, and on a miss suggest the closest id ("did you
+        mean futo-multilingual-244?").
+      - Removing it took the README. The fix: an `amber-server uninstall` command that stops
+        the service, removes the program, asks before deleting models and settings, and says
+        what is left at Cloudflare (tunnel, DNS record) and whether lingering was switched on
+        for it.
+      - Further:
+        - `amber-server` with no command shows the status and the next step, not the help.
+        - `setup` as one guided run: model by hardware, key, service, tunnel optional.
+        - `amber-server update`.
+        - Error messages that end with the command that fixes them.
+        - Maybe a small status page on localhost (model, keys, requests today, the log),
+          behind the key.
+      - The PC's Phone page gets the same review: what a newcomer must understand before the
+        phone connects.
+- [ ] **Cleanup models besides Qwen3 4B, also for CPU-only PCs.** Qwen3 4B (2.4 GB) is slow
+      without a GPU.
+      - Candidates, all GGUF for llama.cpp:
+        - Qwen3 1.7B and Qwen3.5 2B, the same family, good at German.
+        - Gemma 4 E2B (~2 GB, quantization-aware GGUF from Google).
+        - Llama 3.2 3B (German officially supported).
+        - Phi-4-mini (3.8B).
+        - Too small for real cleanup: Qwen3 0.6B and Gemma 3 1B, as a last resort for weak
+          PCs.
+      - How to choose: measure each on Fabi's PC, CPU only and on CUDA, with the cleanup's own
+        prompt. Run the dictations that already showed problems: self-corrections ("um drei
+        nee um vier"), lists, short German that must not be translated, a question that must
+        not be answered. Measure speed (ms per dictation, RAM) and how often `plausible`
+        rejects a reply.
+      - Offer the best one or two next to Qwen3 4B, and suggest one by hardware as the speech
+        model is.
+      - Same catalog for Amber Server.
+- [ ] **A better speech model for PCs without an NVIDIA GPU.** FUTO Base/Small are fast but
+      weak; Large v3 Turbo is too slow on a CPU.
+      - Candidates:
+        - **Parakeet TDT 0.6B v3** (NVIDIA, CC-BY-4.0, 25 European languages incl. German,
+          near Whisper large-v3 accuracy, many times faster on a CPU). Amber for Android runs
+          it through sherpa-onnx since 0.10.
+        - Nemotron 3.5 ASR (NVIDIA, June 2026, 600M, streaming, 40 locales).
+        - Qwen3-ASR (Alibaba, January 2026; accurate, but heavier on a CPU).
+        - Whisper on AMD/Intel graphics through whisper.cpp's Vulkan build (the server
+          workflow already builds Vulkan).
+      - How to choose: measure word error rate on real German speech (MINDS-14 / FLEURS as in
+        the turbo check) and the wait on Fabi's CPU with the GPU unused, against FUTO Small and
+        Large v3 Turbo.
+      - Parakeet needs a second runtime (sherpa-onnx or ONNX Runtime) next to whisper.cpp. The
+        language list, the vocabulary prompt and the chunking must work with it, and it does
+        not detect languages the way Whisper does.
+
 ## Not planned
 
-- Parakeet through sherpa-onnx and translation while dictating (Fabi, 2026-10-29: not now).
+- Translation while dictating (Fabi, 2026-10-29: not now). Parakeet moved to phase 7.
 - Tinfoil's enclave verification (Go verifier library, large); Android-only parts (keyboard
   tracking, accessibility, password-field detection through Android APIs).
