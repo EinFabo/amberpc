@@ -307,6 +307,14 @@ fn overwrites(command: &str) -> bool {
     false
 }
 
+/// What is typed for [command], and why it is risky if it is: in [settings]' safe mode a risky
+/// one commented out, else as it is.
+pub fn prepare(settings: &crate::settings::TerminalSettings, command: &str, shell: Shell) -> (String, Option<&'static str>) {
+    let risk = risky(command, shell);
+    let typed = if risk.is_some() && settings.safe_mode { comment_out(command) } else { command.to_string() };
+    (typed, risk)
+}
+
 /// Whether Amber presses Enter after typing [typed]: only when [settings] say so, and never for
 /// a risky command - that one is typed commented out and waits for the user.
 pub fn runs(settings: &crate::settings::TerminalSettings, typed: &str, shell: Shell) -> bool {
@@ -531,6 +539,22 @@ mod tests {
         assert!(!runs(&on, "rm -rf build", Shell::Bash));
         assert!(!runs(&on, "Remove-Item -Recurse build", Shell::PowerShell));
         assert!(!runs(&on, "# rm -rf build", Shell::Bash), "a comment is not run");
+    }
+
+    #[test]
+    fn safe_mode_comments_a_risky_command_out_and_without_it_only_the_hash_goes() {
+        use crate::settings::TerminalSettings;
+        let safe = TerminalSettings::default();
+        assert!(safe.safe_mode, "on by default");
+        assert_eq!(prepare(&safe, "rm -rf build", Shell::Bash), ("# rm -rf build".to_string(), Some("deletes files")));
+        assert_eq!(prepare(&safe, "ls -la", Shell::Bash), ("ls -la".to_string(), None));
+        let plain = TerminalSettings { safe_mode: false, ..TerminalSettings::default() };
+        assert_eq!(prepare(&plain, "rm -rf build", Shell::Bash), ("rm -rf build".to_string(), Some("deletes files")));
+        // Still never run by itself, also with the danger zone on.
+        let all = TerminalSettings { safe_mode: false, run_commands: true, ..TerminalSettings::default() };
+        let (typed, _) = prepare(&all, "rm -rf build", Shell::Bash);
+        assert!(!runs(&all, &typed, Shell::Bash));
+        assert!(runs(&all, "ls -la", Shell::Bash));
     }
 
     #[test]

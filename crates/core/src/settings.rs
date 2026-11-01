@@ -224,6 +224,8 @@ pub struct TerminalSettings {
     pub enabled: bool,
     /// Requests by themselves in terminal programs; off: only by the hotkey or a start word.
     pub automatic: bool,
+    /// A risky command comes commented out ("# rm -rf build"); off, as it is - Enter runs it.
+    pub safe_mode: bool,
     /// Press Enter after a harmless command: it runs at once. Off by default, behind a warning.
     pub run_commands: bool,
     /// A hotkey of its own: a request anywhere. Empty: none.
@@ -234,7 +236,7 @@ pub struct TerminalSettings {
 
 impl Default for TerminalSettings {
     fn default() -> Self {
-        TerminalSettings { enabled: true, automatic: true, run_commands: false, hotkey: String::new(), prefixes: vec!["Befehl".into(), "Command".into()] }
+        TerminalSettings { enabled: true, automatic: true, safe_mode: true, run_commands: false, hotkey: String::new(), prefixes: vec!["Befehl".into(), "Command".into()] }
     }
 }
 
@@ -462,6 +464,7 @@ mod tests {
         let old: TerminalSettings = serde_json::from_str(r#"{"enabled":true,"hotkey":"","prefixes":["Befehl"]}"#).unwrap();
         assert!(old.automatic);
         assert!(!old.run_commands, "never on without being switched on");
+        assert!(old.safe_mode, "risky commands commented out unless switched off");
         assert_eq!(t.prefixes, ["Befehl", "Command"]);
         let mut s = Settings::default();
         s.terminal.prefixes = vec![" Befehl ".into(), "".into(), "befehl".into(), "Kommando".into()];

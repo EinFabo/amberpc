@@ -115,11 +115,12 @@ says otherwise).
   message to Claude Code or an editor running in the terminal - it is dictated as usual;
   titles of Claude Code and Vim skip the model.
 - **Risky commands** (deleting, overwriting, `sudo`, a script piped into a shell, forcing
-  git, disks, shutting down) come commented out (`# rm -rf build`): Enter does nothing, remove
-  the `#` to run it.
-- **Danger zone** (off by default, switched on only after a confirmation): Amber presses Enter
-  itself, so a harmless command runs at once. A risky one never does - it still comes
-  commented out.
+  git, disks, shutting down) come commented out in *safe mode* (the default: `# rm -rf build`
+  - Enter does nothing, remove the `#` to run it); without it they come as they are, with a
+  warning. Amber never runs a risky command by itself.
+- **Danger zone** (red, on the Programs page): *safe mode* off, and running commands by
+  themselves (off by default, switched on only after a confirmation) - Amber presses Enter
+  itself, so a harmless command runs at once. A risky one never does.
 - The bubble shows `>_`; the history keeps "request → command".
 
 ## History and statistics

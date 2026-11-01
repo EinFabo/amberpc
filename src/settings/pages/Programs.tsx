@@ -176,6 +176,12 @@ function RunCommands({ s, save }: Pick<PageProps, "s" | "save">) {
       >
         <Switch on={on} onChange={(v) => (v ? setAsking(true) : save((x) => (x.terminal.runCommands = false)))} />
       </Row>
+      <Row
+        label="Safe mode"
+        hint="On: a risky command (deleting, overwriting, sudo...) comes commented out - Enter does nothing until you remove the #. Off: it comes as it is, one Enter runs it. Either way Amber never runs a risky command by itself."
+      >
+        <Switch on={s.terminal.safeMode} onChange={(v) => save((x) => (x.terminal.safeMode = v))} />
+      </Row>
       {asking && !on && (
         <div className="confirm">
           <span>Commands will run without you checking them first. Switch this on?</span>

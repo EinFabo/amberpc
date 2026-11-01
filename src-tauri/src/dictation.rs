@@ -358,8 +358,7 @@ fn terminal(app: &AppHandle, settings: &Settings, session: u64, spoken: &str, pr
             return true;
         }
     };
-    let risk = term::risky(&command, shell);
-    let typed = if risk.is_some() { term::comment_out(&command) } else { command.clone() };
+    let (typed, risk) = term::prepare(&settings.terminal, &command, shell);
     // Never anything that could press Enter (command_from refuses it already).
     if typed.chars().any(char::is_control) {
         fail(app, session, "The command held control characters - nothing typed.".into(), true);
@@ -380,8 +379,10 @@ fn terminal(app: &AppHandle, settings: &Settings, session: u64, spoken: &str, pr
     core.memory.remember(&core.settings(), &format!("{request} → {typed}"), program.unwrap_or(""), "terminal", inserted, spoken_ms, 0);
     let what = if settings.log_text { format!("\"{typed}\"") } else { format!("{} characters", typed.chars().count()) };
     crate::diag::info(format!("terminal: {} command {what} into {}", shell.name(), program.unwrap_or("?")));
-    if let Some(why) = risk {
-        crate::notify(app, "Amber", &format!("Typed as a comment - it {why}. Remove the # to run it."));
+    match risk {
+        Some(why) if settings.terminal.safe_mode => crate::notify(app, "Amber", &format!("Typed as a comment - it {why}. Remove the # to run it.")),
+        Some(why) => crate::notify(app, "Amber", &format!("Careful - this command {why}. Read it before you press Enter.")),
+        None => {}
     }
     match outcome {
         // An elevated window, or the focus moved: on the clipboard instead.
