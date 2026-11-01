@@ -348,6 +348,8 @@ function KeysSection({ s, save, toast, info, setInfo, copy }: PageProps & { info
             models={info.models}
             onOpen={() => setOpen(open === k.id ? null : k.id)}
             onChange={(edit) => change(k.id, edit)}
+            taken={(name) => keys.some((x) => x.id !== k.id && x.name.toLowerCase() === name.toLowerCase())}
+            toast={toast}
             onRenew={() => call("phone_new_key", { id: k.id }, `New secret for “${k.name}” - its devices need the new address.`)}
             onRemove={() => call("phone_remove_key", { id: k.id }, `“${k.name}” removed - its devices are locked out.`)}
             copy={copy}
@@ -376,17 +378,31 @@ function KeyRow(p: {
   onRenew: () => void;
   onRemove: () => void;
   copy: (url: string) => void;
+  taken: (name: string) => boolean;
+  toast: (message: string, ok?: boolean) => void;
 }) {
   const { k, shown, models } = p;
   const [name, setName] = useState(k.name);
   useEffect(() => setName(k.name), [k.name]);
+  const [perDay, setPerDay] = useState(String(k.perDay ?? 2000));
+  useEffect(() => setPerDay(String(k.perDay ?? 2000)), [k.perDay]);
+  const rename = () => {
+    const next = name.trim();
+    if (!next || next === k.name) return setName(k.name);
+    if (p.taken(next)) {
+      p.toast("There is a key with that name already.");
+      return setName(k.name);
+    }
+    p.onChange((x) => (x.name = next));
+  };
   const allowed = (id: string) => k.models === null || k.models.includes(id);
-  const toggle = (id: string) =>
-    p.onChange((x) => {
-      const now = x.models ?? models.map((m) => m.id);
-      const next = now.includes(id) ? now.filter((m) => m !== id) : [...now, id];
-      x.models = models.every((m) => next.includes(m.id)) ? null : next;
-    });
+  // All on means every model, also ones downloaded later; never none - the key would be useless.
+  const toggle = (id: string) => {
+    const now = k.models ?? models.map((m) => m.id);
+    const next = now.includes(id) ? now.filter((m) => m !== id) : [...now, id];
+    if (!next.some((m) => models.some((x) => x.id === m))) return p.toast("A key needs at least one model.");
+    p.onChange((x) => (x.models = models.every((m) => next.includes(m.id)) ? null : next));
+  };
   const summary = k.models === null ? "every model" : `${k.models.length} model${k.models.length === 1 ? "" : "s"}`;
   return (
     <div className="row column">
@@ -401,7 +417,7 @@ function KeyRow(p: {
       {p.open && (
         <>
           <Row label="Name">
-            <input type="text" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() && name !== k.name && p.onChange((x) => (x.name = name.trim()))} />
+            <input type="text" value={name} onChange={(e) => setName(e.target.value)} onBlur={rename} onKeyDown={(e) => e.key === "Enter" && rename()} />
           </Row>
           {shown?.url && (
             <Row label="Address" hint={shown.url}>
@@ -421,7 +437,7 @@ function KeyRow(p: {
           <div className="row column">
             <div className="label">
               <div>Models it may use</div>
-              <div className="hint">The phone's choice shows only these. Downloads stay on this PC.</div>
+              <div className="hint">The phone's choice shows only these. All on: also models downloaded later. Downloads stay on this PC.</div>
             </div>
             <div className="seg wrap">
               {models.map((m) => (
@@ -436,9 +452,11 @@ function KeyRow(p: {
             <input
               type="number"
               min={1}
-              value={k.perDay ?? 2000}
-              onChange={(e) => {
-                const v = Math.max(1, Math.floor(Number(e.target.value) || 1));
+              value={perDay}
+              onChange={(e) => setPerDay(e.target.value)}
+              onBlur={() => {
+                const v = Math.floor(Number(perDay));
+                if (!Number.isFinite(v) || v < 1) return setPerDay(String(k.perDay ?? 2000));
                 p.onChange((x) => (x.perDay = v === 2000 ? null : v));
               }}
             />

@@ -638,7 +638,9 @@ pub async fn phone_new_key(app: AppHandle, id: Option<String>) -> Result<crate::
 #[tauri::command]
 pub async fn phone_remove_key(app: AppHandle, id: String) -> Result<crate::phone::Info, String> {
     let core = app.state::<Core>();
-    crate::phone::remove_key(&core, &id)?;
+    let after = crate::phone::remove_key(&core, &id)?;
+    // The page holds the settings too: without this its next save brings the key back.
+    let _ = app.emit("settings-changed", &after);
     crate::diag::info("phone API: a key removed");
     Ok(crate::phone::info(&core))
 }

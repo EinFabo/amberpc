@@ -112,13 +112,17 @@ pub fn sync(app: &AppHandle) {
     }
 }
 
-/// The first access key's secret (the one of 0.4.x), created on first use.
+/// The first access key's secret - the one in the address the Phone page shows on top.
 fn key(core: &Core) -> String {
-    secret(core, KEY_ID)
+    let first = core.settings().phone.keys.first().map_or(KEY_ID.to_string(), |k| k.id.clone());
+    secret(core, &first)
 }
 
-/// A key's secret from the PC's secret store, created on first use.
+/// A key's secret from the PC's secret store, created on first use - once: a request and the
+/// page asking at the same moment must not make two.
 fn secret(core: &Core, id: &str) -> String {
+    static MAKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = MAKING.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(k) = core.key(id) {
         return k;
     }
@@ -139,19 +143,32 @@ fn access_keys(core: &Core) -> Vec<api::AccessKey> {
         .collect()
 }
 
+/// [id] if it is one of the access keys - the secret store also holds providers' API keys.
+fn known(core: &Core, id: &str) -> Result<(), String> {
+    if id.starts_with("phone-api") && core.settings().phone.keys.iter().any(|k| k.id == id) {
+        Ok(())
+    } else {
+        Err("No such access key.".into())
+    }
+}
+
 /// A new secret for the key [id] (the first if None): its old addresses stop working.
 pub fn new_key(core: &Core, id: Option<&str>) -> Result<(), String> {
     let id = id.map(str::to_string).unwrap_or_else(|| core.settings().phone.keys.first().map_or(KEY_ID.to_string(), |k| k.id.clone()));
+    known(core, &id)?;
     core.set_key(&id, Some(api::new_key()))
 }
 
-/// Removes the key [id] and its secret - not the last one: nobody could get in.
-pub fn remove_key(core: &Core, id: &str) -> Result<(), String> {
+/// Removes the key [id] and its secret - not the last one: nobody could get in. Returns the
+/// settings, for the page to take over.
+pub fn remove_key(core: &Core, id: &str) -> Result<amber_core::settings::Settings, String> {
+    known(core, id)?;
     if core.settings().phone.keys.len() <= 1 {
         return Err("That is the last key - add another first.".into());
     }
-    core.update_settings(|s| s.phone.keys.retain(|k| k.id != id));
-    core.set_key(id, None)
+    let after = core.update_settings(|s| s.phone.keys.retain(|k| k.id != id));
+    core.set_key(id, None)?;
+    Ok(after)
 }
 
 /// A key as the Phone page shows it: what it may, and its address.

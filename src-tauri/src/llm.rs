@@ -70,6 +70,12 @@ impl Llm {
         self.status.lock().unwrap().clone().unwrap_or(Status::of("stopped", None))
     }
 
+    fn status_if(&self, own: bool, app: &AppHandle, status: Status) {
+        if own {
+            self.set_status(app, status);
+        }
+    }
+
     fn set_status(&self, app: &AppHandle, status: Status) {
         *self.status.lock().unwrap() = Some(status.clone());
         let _ = app.emit("llm-status", status);
@@ -115,6 +121,8 @@ impl Llm {
     /// Like [ensure], with [model] instead of the configured one - what the phone chose, also
     /// while the PC itself cleans up in the cloud.
     pub fn ensure_model(&self, app: &AppHandle, model: Option<&str>) -> Result<Endpoint, String> {
+        // The Cleanup page and the retry pause are about the PC's own model, not a phone's.
+        let own = model.is_none();
         let mut running = self.running.lock().unwrap();
         let core = app.state::<Core>();
         let layout = &core.paths.layout;
@@ -125,7 +133,7 @@ impl Llm {
                 process::stop(&mut r.child);
                 crate::diag::info("cleanup model stopped");
             }
-            self.set_status(app, Status::of("stopped", None));
+            self.status_if(own, app, Status::of("stopped", None));
             return Err("The smart cleanup on this PC is off.".into());
         }
         let c = settings.cleanup;
@@ -152,25 +160,29 @@ impl Llm {
             *running = None;
         }
         if let Some(msg) = missing {
-            self.set_status(app, Status::of("failed", Some(msg.clone())));
+            self.status_if(own, app, Status::of("failed", Some(msg.clone())));
             return Err(msg);
         }
 
-        self.set_status(app, Status::of("starting", Some(format!("Loading {}…", model.label))));
+        self.status_if(own, app, Status::of("starting", Some(format!("Loading {}…", model.label))));
         let started = Instant::now();
         match self.spawn(layout, rt, model, &key) {
             Ok(r) => {
                 let endpoint = r.endpoint();
                 crate::diag::info(format!("cleanup model ready: {} on {} in {} ms", model.label, rt.label, started.elapsed().as_millis()));
                 *running = Some(r);
-                *self.failed_at.lock().unwrap() = None;
-                self.set_status(app, Status::of("ready", Some(format!("{} on {}", model.label, rt.label))));
+                if own {
+                    *self.failed_at.lock().unwrap() = None;
+                }
+                self.status_if(own, app, Status::of("ready", Some(format!("{} on {}", model.label, rt.label))));
                 Ok(endpoint)
             }
             Err(e) => {
                 crate::diag::error(format!("cleanup model failed to start: {e}"));
-                *self.failed_at.lock().unwrap() = Some(Instant::now());
-                self.set_status(app, Status::of("failed", Some(e.clone())));
+                if own {
+                    *self.failed_at.lock().unwrap() = Some(Instant::now());
+                }
+                self.status_if(own, app, Status::of("failed", Some(e.clone())));
                 Err(e)
             }
         }
@@ -300,11 +312,12 @@ pub fn cleaner(app: &AppHandle, s: &Settings, wait: bool) -> Result<ChatCleaner,
 pub fn cleaner_for(app: &AppHandle, s: &Settings, model: Option<&str>) -> Result<ChatCleaner, String> {
     let layout = &app.state::<Core>().paths.layout;
     let c = &s.cleanup;
+    // A downloaded local model - also the PC's own while its smart cleanup is off: the
+    // phone asked for it, the list offered it.
     if let Some(m) = model.and_then(local::llm_model).filter(|m| layout.llm_model_installed(m)) {
-        if !(c.engine == EngineKind::Local && c.local_model == m.id) {
-            let endpoint = app.state::<Core>().llm.ensure_model(app, Some(m.id))?;
-            return Ok(ChatCleaner::new(&endpoint.url, &endpoint.key, m.id, None));
-        }
+        let own = c.engine == EngineKind::Local && c.local_model == m.id;
+        let endpoint = app.state::<Core>().llm.ensure_model(app, (!own || !wants_local(s)).then_some(m.id))?;
+        return Ok(ChatCleaner::new(&endpoint.url, &endpoint.key, m.id, None));
     }
     if model.is_some_and(|id| id == c.model) && c.engine != EngineKind::Server {
         let mut cloud = s.clone();

@@ -326,13 +326,19 @@ impl Settings {
             }
         }
         // The key of 0.4.x first; a name and an id once each, a quota of at least one.
-        let mut names = std::collections::HashSet::new();
+        // A name given twice gets a number: a key is never dropped for its name.
         let mut ids = std::collections::HashSet::new();
-        self.phone.keys.retain(|k| {
-            !k.name.trim().is_empty() && k.id.starts_with("phone-api") && ids.insert(k.id.clone()) && names.insert(k.name.trim().to_lowercase())
-        });
+        self.phone.keys.retain(|k| !k.name.trim().is_empty() && k.id.starts_with("phone-api") && ids.insert(k.id.clone()));
+        let mut names = std::collections::HashSet::new();
         for k in &mut self.phone.keys {
-            k.name = k.name.trim().to_string();
+            let base = k.name.trim().to_string();
+            let mut name = base.clone();
+            let mut n = 2;
+            while !names.insert(name.to_lowercase()) {
+                name = format!("{base} {n}");
+                n += 1;
+            }
+            k.name = name;
             k.per_day = k.per_day.map(|d| d.max(1));
         }
         if self.phone.keys.is_empty() {
@@ -430,8 +436,12 @@ mod tests {
             PhoneKey { id: "phone-api-4".into(), name: "Laptop".into(), models: Some(vec![]), per_day: Some(0) },
         ];
         let s = s.sanitized();
-        assert_eq!(s.phone.keys.iter().map(|k| (k.id.as_str(), k.name.as_str())).collect::<Vec<_>>(), [("phone-api", "Phone"), ("phone-api-4", "Laptop")]);
-        assert_eq!(s.phone.keys[1].per_day, Some(1), "at least one a day");
+        // A name given twice gets a number - never a key silently lost (and its device locked out).
+        assert_eq!(
+            s.phone.keys.iter().map(|k| (k.id.as_str(), k.name.as_str())).collect::<Vec<_>>(),
+            [("phone-api", "Phone"), ("phone-api-2", "phone 2"), ("phone-api-4", "Laptop")]
+        );
+        assert_eq!(s.phone.keys[2].per_day, Some(1), "at least one a day");
     }
 
     #[test]

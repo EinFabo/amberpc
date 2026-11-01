@@ -71,6 +71,12 @@ impl Whisper {
         self.status.lock().unwrap().clone().unwrap_or(Status::of("stopped", None))
     }
 
+    fn status_if(&self, own: bool, app: &tauri::AppHandle, status: Status) {
+        if own {
+            self.set_status(app, status);
+        }
+    }
+
     fn set_status(&self, app: &tauri::AppHandle, status: Status) {
         use tauri::Emitter;
         *self.status.lock().unwrap() = Some(status.clone());
@@ -91,6 +97,8 @@ impl Whisper {
     /// model at a time: the PC's own dictations load theirs again on their next use.
     pub fn ensure_model(&self, app: &tauri::AppHandle, model: Option<&str>) -> Result<Served, String> {
         use tauri::Manager;
+        // The Engine page shows the PC's own model; a phone's switch is not its news.
+        let own = model.is_none();
         let mut running = self.running.lock().unwrap();
         let core = app.state::<crate::state::Core>();
         let layout = &core.paths.layout;
@@ -120,11 +128,11 @@ impl Whisper {
             *running = None;
         }
         if let Some(msg) = missing {
-            self.set_status(app, Status::of("failed", Some(msg.clone())));
+            self.status_if(own, app, Status::of("failed", Some(msg.clone())));
             return Err(msg);
         }
 
-        self.set_status(app, Status::of("starting", Some(format!("Loading {}…", model.label))));
+        self.status_if(own, app, Status::of("starting", Some(format!("Loading {}…", model.label))));
         // A cleanup model on the graphics card may have taken what is free there; the speech
         // model comes first - without it dictation itself breaks - and the other one reloads
         // after it, fitting itself into what is left.
@@ -156,12 +164,12 @@ impl Whisper {
                     }
                     format!("{} on {}", model.label, rt.label)
                 };
-                self.set_status(app, Status::of("ready", Some(message)));
+                self.status_if(own, app, Status::of("ready", Some(message)));
                 Ok(served)
             }
             Err(e) => {
                 crate::diag::error(format!("local engine failed to start: {e}"));
-                self.set_status(app, Status::of("failed", Some(e.clone())));
+                self.status_if(own, app, Status::of("failed", Some(e.clone())));
                 Err(e)
             }
         }
@@ -266,9 +274,10 @@ impl Whisper {
     /// The server died and the next dictation will restart it - or it is running fine.
     /// Never waits: while another thread loads a model (and holds the lock), the answer is
     /// simply "not ready".
-    pub fn is_ready(&self) -> bool {
+    /// Whether a server with [model] runs - not one the phone switched to.
+    pub fn is_ready(&self, model: &str) -> bool {
         match self.running.try_lock() {
-            Ok(mut running) => running.as_mut().map(|r| matches!(r.child.try_wait(), Ok(None))).unwrap_or(false),
+            Ok(mut running) => running.as_mut().map(|r| r.key.model == model && matches!(r.child.try_wait(), Ok(None))).unwrap_or(false),
             Err(_) => false,
         }
     }

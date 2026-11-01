@@ -185,7 +185,7 @@ pub fn start(app: &AppHandle) {
 
         // The local model loads while the user speaks, not after - on its own thread, so the
         // time limit below counts from the start of the recording.
-        if settings.engine == EngineKind::Local && !core.whisper.is_ready() {
+        if settings.engine == EngineKind::Local && !core.whisper.is_ready(&settings.local.model) {
             let app = app.clone();
             std::thread::spawn(move || {
                 let core = app.state::<Core>();
