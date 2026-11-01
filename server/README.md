@@ -65,6 +65,9 @@ a request for a model the server does not have gets the server's default.
 | `amber-server key new [<name>]` | a new secret for a key (the first if none named): its devices are locked out, the others go on |
 | `amber-server key remove <name>` | remove a key - not the last one |
 | `amber-server url --key <name>` | the address of that key |
+| `amber-server tunnel` | whether the tunnel is on and answers through Cloudflare |
+| `amber-server tunnel setup amber.example.com` | reach the server from anywhere (see below); the token is pasted, never typed on the command line |
+| `amber-server tunnel off` | the home network only again (the token is kept) |
 | `amber-server status` | settings, models, the service, and whether the server answers |
 | `amber-server logs` | the service's last lines |
 | `amber-server service install` / `uninstall` / `status` | the background service |
@@ -107,6 +110,23 @@ amber-server service install     # restart with it
 
 The server loads the model when it starts; the phone gives up on a cleanup after 12 seconds,
 so the first one right after a start may come back untidied.
+
+## From anywhere: a Cloudflare Tunnel
+
+Away from home the phone reaches the server through a Cloudflare Tunnel - no port opened in
+the router, HTTPS all the way to Cloudflare, your own domain:
+
+1. In Cloudflare: *Zero Trust -> Networks -> Tunnels -> Create a tunnel* (cloudflared), give it
+   a public hostname such as `amber.example.com`, service `http://localhost:8765` (the server's
+   port), and copy the token it shows (or the whole install command).
+2. On the server: `amber-server tunnel setup amber.example.com` and paste the token.
+   `tools/setup-tunnel.sh` from the repository does step 1 too and hands over a file:
+   `amber-server tunnel setup --from-file <file>`.
+
+The server downloads cloudflared (pinned, checksum-checked), keeps it running with the token in
+its environment, and tries again 30 s after it ends. `amber-server url` then shows every
+key's address from anywhere as well, and its QR code. The access key is what keeps strangers
+out - wrong keys are paused; keep the address like a password.
 
 ## Firewall
 

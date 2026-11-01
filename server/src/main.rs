@@ -12,6 +12,7 @@ mod paths;
 mod serve;
 mod service;
 mod setup;
+mod tunnel;
 mod speech;
 
 use clap::{Parser, Subcommand};
@@ -64,6 +65,11 @@ enum Command {
     Key {
         #[command(subcommand)]
         action: Option<KeyAction>,
+    },
+    /// Reachable from anywhere through a Cloudflare Tunnel: its state, or set it up or off
+    Tunnel {
+        #[command(subcommand)]
+        action: Option<TunnelAction>,
     },
     /// The background service
     Service {
@@ -128,6 +134,20 @@ enum KeyAction {
 }
 
 #[derive(Subcommand)]
+enum TunnelAction {
+    /// Use the tunnel made in Cloudflare (public hostname -> http://localhost:<port>); the token is read from the input
+    Setup {
+        /// The public hostname, e.g. amber.example.com
+        hostname: Option<String>,
+        /// The file tools/setup-tunnel.sh hands over (token and hostname), read and deleted
+        #[arg(long)]
+        from_file: Option<std::path::PathBuf>,
+    },
+    /// Switch the tunnel off (the token is kept)
+    Off,
+}
+
+#[derive(Subcommand)]
 enum ServiceAction {
     /// Start with the system (systemd user unit / Windows task at log-on)
     Install,
@@ -172,6 +192,7 @@ fn main() {
         Command::Models { action } => models_command(action),
         Command::Cleanup { action } => cleanup_command(action),
         Command::Service { action } => service_command(action),
+        Command::Tunnel { action } => tunnel_command(action),
     };
     if let Err(e) = result {
         eprintln!("amber-server: {e}");
@@ -257,6 +278,71 @@ fn key_command(action: Option<KeyAction>) -> Result<(), String> {
     restarted("Done.");
     let i = config.find_key(&name).expect("just added or renewed");
     print!("{}", info::describe(&config, &config.keys[i], &info::interfaces()));
+    Ok(())
+}
+
+fn tunnel_command(action: Option<TunnelAction>) -> Result<(), String> {
+    let (path, mut config) = set_up()?;
+    match action {
+        None => {
+            let token = tunnel::load_token(&tunnel::token_path()).is_some();
+            if !config.tunnel {
+                println!("The tunnel is off{}.", if token { " (its token is kept)" } else { "" });
+                println!("Reach this server from anywhere: make a tunnel in Cloudflare (Zero Trust -> Networks -> Tunnels), give it a public hostname pointing at http://localhost:{}, then: amber-server tunnel setup <hostname>", config.port);
+                return Ok(());
+            }
+            let base = format!("https://{}", config.public_host);
+            let answer = amber_core::engine::health(&base);
+            let state = match answer.as_ref().and_then(|h| h["service"].as_str()) {
+                Some("amber-server") => "answers through Cloudflare".to_string(),
+                Some(other) => format!("Cloudflare reaches {other}, not this server - check the public hostname's target"),
+                None => "not reachable yet - amber-server logs".to_string(),
+            };
+            println!("Tunnel on: {} - {state}", config.public_host);
+            if !token {
+                println!("No token - amber-server tunnel setup {}", config.public_host);
+            }
+            return Ok(());
+        }
+        Some(TunnelAction::Off) => {
+            config.tunnel = false;
+            config.save(&path)?;
+            restarted("The tunnel is off.");
+            return Ok(());
+        }
+        Some(TunnelAction::Setup { hostname, from_file }) => {
+            let (token, host, new_key) = match from_file {
+                Some(file) => {
+                    let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+                    let _ = std::fs::remove_file(&file);
+                    let i = amber_core::api::parse_tunnel_import(&text)?;
+                    (i.token, i.host, i.new_key)
+                }
+                None => {
+                    let host = amber_core::api::public_host(&hostname.ok_or("the public hostname: amber-server tunnel setup amber.example.com")?);
+                    if host.is_empty() {
+                        return Err("that is not a hostname - like amber.example.com".into());
+                    }
+                    eprintln!("Paste the tunnel's token (or the whole install command Cloudflare shows) and press Enter:");
+                    let mut pasted = String::new();
+                    std::io::stdin().read_line(&mut pasted).map_err(|e| e.to_string())?;
+                    let token = amber_core::api::tunnel_token(&pasted).ok_or("that is no tunnel token - it starts with eyJ")?;
+                    (token, host, false)
+                }
+            };
+            tunnel::ensure_cloudflared(&paths::data_dir())?;
+            tunnel::save_token(&tunnel::token_path(), &token)?;
+            if new_key {
+                let first = config.keys[0].name.clone();
+                config.renew_key(&first)?;
+            }
+            config.tunnel = true;
+            config.public_host = host;
+            config.save(&path)?;
+            restarted("The tunnel is set up.");
+            print!("{}", info::describe(&config, &config.keys[0], &info::interfaces()));
+        }
+    }
     Ok(())
 }
 

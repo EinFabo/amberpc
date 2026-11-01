@@ -69,6 +69,9 @@ fn start() -> Result<(), (i32, String)> {
             // The server runs on its own threads for as long as the process lives.
             std::mem::forget(_server);
             log(format!("Amber Server {} listening on port {} - the phone's address: amber-server url", env!("CARGO_PKG_VERSION"), config.port));
+            if config.tunnel {
+                crate::tunnel::keep_running(config.port, dirs.data.clone(), log);
+            }
             if let (Some(c), Some(id)) = (cleanup, config.cleanup.clone()) {
                 // Loaded now: the phone gives up on a cleanup after 12 s, a load can take longer.
                 std::thread::spawn(move || match c.warm(&id) {

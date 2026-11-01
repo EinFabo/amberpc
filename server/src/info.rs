@@ -9,19 +9,25 @@ use amber_core::local;
 use crate::config::{Config, KEYS};
 use crate::paths::{cleanup_dir, llm_ready, model_ready, speech_dir};
 
-/// The phone's addresses in the home network, the first as a QR code to scan.
+/// [key]'s addresses: in the home network, and from anywhere when the tunnel is on - as a QR
+/// code to scan, the one from anywhere where there is one (it works at home too).
 pub fn describe(config: &Config, key: &amber_core::api::AccessKey, interfaces: &[(String, IpAddr)]) -> String {
     let addresses = api::phone_addresses(interfaces);
-    let Some((_, first)) = addresses.first() else {
-        return "This machine has no address in a home network right now - is it connected?".into();
+    let public = (config.tunnel && !config.public_host.is_empty()).then(|| api::public_url(&config.public_host, &key.secret));
+    let to_scan = public.clone().or_else(|| addresses.first().map(|(_, ip)| api::phone_url(*ip, config.port, &key.secret)));
+    let Some(to_scan) = to_scan else {
+        return "This machine has no address in a home network right now - is it connected? (Or reach it from anywhere: amber-server tunnel)".into();
     };
     let mut out = String::from("In Amber on the phone: Engine -> Own server, this address:\n\n");
     for (name, ip) in &addresses {
         out += &format!("  {name:<12} {}\n", api::phone_url(*ip, config.port, &key.secret));
     }
+    if let Some(p) = &public {
+        out += &format!("  {:<12} {p}\n", "anywhere");
+    }
     use std::io::IsTerminal;
     out += "\n";
-    out += &qr(&api::phone_url(*first, config.port, &key.secret), std::io::stdout().is_terminal());
+    out += &qr(&to_scan, std::io::stdout().is_terminal());
     out
 }
 
@@ -87,6 +93,9 @@ pub fn status(path: &Path) -> String {
         None => out += "cleanup  off\n",
     }
     out += &format!("service  {}\n", crate::service::state());
+    if config.tunnel {
+        out += &format!("tunnel   on, {} - amber-server tunnel\n", config.public_host);
+    }
     let health = amber_core::engine::health(&format!("http://127.0.0.1:{}", config.port));
     out += &format!("server   {}\n", server_line(config.port, health.as_ref()));
     out
@@ -162,6 +171,20 @@ mod tests {
         let desktop = serde_json::json!({ "service": "amber-pc", "status": "ok" });
         assert_eq!(server_line(8765, Some(&desktop)), "not running - port 8765 is taken by amber-pc: amber-server config set port <number>");
         assert_eq!(server_line(8765, None), "not running");
+    }
+
+    #[test]
+    fn the_address_from_anywhere_is_shown_with_the_tunnel_on() {
+        let mut c = Config::with_key("abc");
+        let home = [("Ethernet".into(), "192.168.1.20".parse().unwrap())];
+        assert!(!describe(&c, &c.keys[0], &home).contains("https://"));
+        c.tunnel = true;
+        c.public_host = "amber.example.com".into();
+        let out = describe(&c, &c.keys[0], &home);
+        assert!(out.contains("https://amber.example.com/abc/v1"), "{out}");
+        // A server without a home network (a rented one): the tunnel's address all the same.
+        let away = describe(&c, &c.keys[0], &[]);
+        assert!(away.contains("https://amber.example.com/abc/v1") && away.contains('▀'), "{away}");
     }
 
     #[test]

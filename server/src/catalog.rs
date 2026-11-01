@@ -90,7 +90,7 @@ pub fn removable(default: Option<&str>, id: &str, command: &str) -> Result<(), S
 }
 
 /// A pinned download with a progress line on stderr.
-fn download(url: &str, sha256: &str, dest: &Path, label: &str) -> Result<(), String> {
+pub fn download(url: &str, sha256: &str, dest: &Path, label: &str) -> Result<(), String> {
     let cancel = AtomicBool::new(false);
     let mut last = u64::MAX;
     let result = local::download_verified(url, sha256, dest, &cancel, &mut |done, total| {

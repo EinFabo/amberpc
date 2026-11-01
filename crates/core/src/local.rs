@@ -466,6 +466,23 @@ pub const CLOUDFLARED: Tool = Tool {
     size_mb: 53,
 };
 
+/// cloudflared for Linux on x86-64 (Amber Server), the same release.
+pub const CLOUDFLARED_LINUX: Tool = Tool {
+    version: "2026.10.0",
+    url: "https://github.com/cloudflare/cloudflared/releases/download/2026.10.0/cloudflared-linux-amd64",
+    sha256: "d33ff2d14475178d2012c2c56beba87389ac5ded27649519f198a7d3134a99db",
+    size_mb: 39,
+};
+
+/// cloudflared for [os] ("linux", "windows").
+pub fn cloudflared_for(os: &str) -> Option<&'static Tool> {
+    match os {
+        "linux" => Some(&CLOUDFLARED_LINUX),
+        "windows" => Some(&CLOUDFLARED),
+        _ => None,
+    }
+}
+
 /// Where downloads live: `<root>/runtime/<id>/` and `<root>/models/<file>`.
 #[derive(Clone, Debug)]
 pub struct Layout {
@@ -721,6 +738,15 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloudflared_is_pinned_for_both_systems() {
+        let linux = cloudflared_for("linux").unwrap();
+        assert!(linux.url.ends_with("/2026.10.0/cloudflared-linux-amd64"));
+        assert_eq!(linux.sha256, "d33ff2d14475178d2012c2c56beba87389ac5ded27649519f198a7d3134a99db");
+        assert_eq!(cloudflared_for("windows").unwrap().sha256, CLOUDFLARED.sha256);
+        assert!(cloudflared_for("macos").is_none());
+    }
 
     #[test]
     fn a_shortened_context_runs_without_flash_attention() {

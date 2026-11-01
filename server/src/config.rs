@@ -34,6 +34,10 @@ pub struct Config {
     pub threads: u32,
     pub gpu: Gpu,
     pub rules: RulesConfig,
+    /// Reachable from anywhere through a Cloudflare Tunnel (`amber-server tunnel`).
+    pub tunnel: bool,
+    /// The tunnel's public hostname, "amber.example.com".
+    pub public_host: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +76,8 @@ impl Default for Config {
             threads: 0,
             gpu: Gpu::Auto,
             rules: RulesConfig::default(),
+            tunnel: false,
+            public_host: String::new(),
         }
     }
 }
