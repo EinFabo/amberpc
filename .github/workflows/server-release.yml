@@ -48,6 +48,8 @@ jobs:
       - name: Vulkan SDK (Linux)
         if: matrix.build == 'vulkan' && runner.os == 'Linux'
         run: |
+          # The SDK brings glslc and the headers; the loader to link against is the system's.
+          sudo apt-get install -y --no-install-recommends libvulkan-dev
           curl -fsSL "https://sdk.lunarg.com/sdk/download/$VULKAN_VERSION/linux/vulkansdk-linux-x86_64-$VULKAN_VERSION.tar.xz" -o "$RUNNER_TEMP/vulkan.tar.xz"
           mkdir -p "$RUNNER_TEMP/vulkan" && tar -xJf "$RUNNER_TEMP/vulkan.tar.xz" -C "$RUNNER_TEMP/vulkan"
           sdk="$RUNNER_TEMP/vulkan/$VULKAN_VERSION/x86_64"
@@ -65,10 +67,14 @@ jobs:
           "VULKAN_SDK=C:\VulkanSDK" >> $env:GITHUB_ENV
           "C:\VulkanSDK\Bin" >> $env:GITHUB_PATH
 
-      - name: libclang for the bindings (Windows)
+      - name: libclang and a short build path (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: '"LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV'
+        # The Vulkan shader generator builds so deep inside target\ that MSBuild passes
+        # Windows' 260-character path limit (FTK1011) - a short target folder keeps it under.
+        run: |
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          "CARGO_TARGET_DIR=C:/t" >> $env:GITHUB_ENV
 
       - name: Build
         shell: bash
@@ -80,7 +86,7 @@ jobs:
           os=${{ runner.os == 'Windows' && 'windows' || 'linux' }}
           ext=${{ runner.os == 'Windows' && '.exe' || '' }}
           mkdir out
-          cp "target/release/amber-server$ext" "out/amber-server-$os-x64-${{ matrix.build }}$ext"
+          cp "${CARGO_TARGET_DIR:-target}/release/amber-server$ext" "out/amber-server-$os-x64-${{ matrix.build }}$ext"
           "out/amber-server-$os-x64-${{ matrix.build }}$ext" --version
 
       - uses: actions/upload-artifact@v4
