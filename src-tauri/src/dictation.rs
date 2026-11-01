@@ -306,7 +306,8 @@ struct Asked {
 #[allow(clippy::too_many_arguments)]
 fn terminal(app: &AppHandle, settings: &Settings, session: u64, spoken: &str, program: Option<&str>, asked: &Asked, target: Option<Target>, spoken_ms: u64) -> bool {
     use amber_core::terminal::{self as term, Answer, Shell, ShellChoice};
-    if !settings.terminal.enabled {
+    // A snippet's phrase stays a snippet, also in a terminal.
+    if !settings.terminal.enabled || amber_core::snippets::find(&settings.snippets, spoken).is_some() {
         return false;
     }
     let prefixed = term::command_prefix(spoken, &settings.terminal.prefixes);
@@ -331,25 +332,41 @@ fn terminal(app: &AppHandle, settings: &Settings, session: u64, spoken: &str, pr
         return true;
     }
     let core = app.state::<Core>();
-    let _ = app.emit("dictation-state", StateEvent { state: Phase::Transcribing, message: None, expected_ms: None, command: true });
+    let emit = |command: bool| {
+        let _ = app.emit("dictation-state", StateEvent { state: Phase::Transcribing, message: None, expected_ms: None, command });
+    };
+    // An ordinary dictation after all - the ">_" goes.
+    let dictate = |why: &str| {
+        crate::diag::info(format!("terminal: {why} - typed as a dictation"));
+        emit(false);
+        false
+    };
+    emit(true);
     let command = match crate::llm::command(app, settings, &request, shell, &asked.title) {
         Ok(Answer::Command(c)) => c,
-        // Said into a terminal but meant as text: an ordinary dictation after all.
-        Ok(Answer::Text) if !explicit => {
-            crate::diag::info("terminal: no command asked - typed as a dictation");
-            return false;
-        }
+        // Said into a terminal (or starting with a start word, "Command-line tools are...") but
+        // meant as text.
+        Ok(Answer::Text) if !asked.command => return dictate("no command asked"),
         Ok(Answer::Text) => {
             fail(app, session, "That sounded like no command - nothing typed.".into(), false);
             return true;
         }
+        // No model, or it failed: a dictation into a terminal is not lost for it.
+        Err(e) if !explicit => return dictate(&format!("no command ({e})")),
         Err(e) => {
-            fail(app, session, e, true);
+            core.memory.remember(&core.settings(), &request, program.unwrap_or(""), "terminal", false, spoken_ms, 0);
+            let kept = if settings.history { " What you said is in the history." } else { "" };
+            fail(app, session, format!("{e}{kept}"), true);
             return true;
         }
     };
     let risk = term::risky(&command, shell);
     let typed = if risk.is_some() { term::comment_out(&command) } else { command.clone() };
+    // Never anything that could press Enter (command_from refuses it already).
+    if typed.chars().any(char::is_control) {
+        fail(app, session, "The command held control characters - nothing typed.".into(), true);
+        return true;
+    }
     {
         let mut inner = core.dictation.inner.lock().unwrap();
         if inner.session != session {
@@ -368,10 +385,18 @@ fn terminal(app: &AppHandle, settings: &Settings, session: u64, spoken: &str, pr
     if let Some(why) = risk {
         crate::notify(app, "Amber", &format!("Typed as a comment - it {why}. Remove the # to run it."));
     }
-    if let Err(e) = outcome {
-        let kept = if settings.history { " It is in the history." } else { "" };
-        fail(app, session, format!("The command could not be typed ({e}).{kept}"), true);
-        return true;
+    match outcome {
+        // An elevated window, or the focus moved: on the clipboard instead.
+        Ok(Outcome::OnClipboard(message)) => {
+            fail(app, session, message, true);
+            return true;
+        }
+        Err(e) => {
+            let kept = if settings.history { " It is in the history." } else { "" };
+            fail(app, session, format!("The command could not be typed ({e}).{kept}"), true);
+            return true;
+        }
+        Ok(_) => {}
     }
     {
         let mut inner = core.dictation.inner.lock().unwrap();

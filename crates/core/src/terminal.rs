@@ -61,12 +61,21 @@ const TERMINALS: [&str; 12] = [
 pub fn terminal_choice(profile: Option<&crate::profiles::Profile>, exe: &str) -> Option<ShellChoice> {
     use crate::profiles::TerminalMode;
     match profile.map_or(TerminalMode::Default, |p| p.terminal) {
-        TerminalMode::Default => TERMINALS.contains(&crate::profiles::exe_name(exe).as_str()).then_some(ShellChoice::Auto),
+        TerminalMode::Default => {
+            let exe = crate::profiles::exe_name(exe);
+            (TERMINALS.contains(&exe.as_str()) || wsl_launcher(&exe)).then_some(ShellChoice::Auto)
+        }
         TerminalMode::Off => None,
         TerminalMode::Auto => Some(ShellChoice::Auto),
         TerminalMode::Bash => Some(ShellChoice::Bash),
         TerminalMode::PowerShell => Some(ShellChoice::PowerShell),
     }
+}
+
+/// A WSL distribution's own launcher: "ubuntu.exe", "ubuntu2404.exe", "debian.exe".
+fn wsl_launcher(exe: &str) -> bool {
+    let name = exe.trim_end_matches(".exe").trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    ["ubuntu", "debian", "kali", "opensuse", "fedoraremix", "alpine", "archlinux"].contains(&name)
 }
 
 /// The shell a request in [exe]'s window (titled [title]) is for - None for cmd, which is not
@@ -79,23 +88,31 @@ pub fn shell_for(exe: &str, title: &str, choice: ShellChoice, fallback: Shell) -
     }
     let exe = crate::profiles::exe_name(exe);
     match exe.as_str() {
-        "wsl.exe" | "bash.exe" | "mintty.exe" | "putty.exe" | "kitty.exe" | "ubuntu.exe" | "debian.exe" => return Some(Shell::Bash),
+        "wsl.exe" | "bash.exe" | "mintty.exe" | "putty.exe" | "kitty.exe" => return Some(Shell::Bash),
         "powershell.exe" | "pwsh.exe" | "powershell_ise.exe" => return Some(Shell::PowerShell),
         "cmd.exe" => return None,
+        e if wsl_launcher(e) => return Some(Shell::Bash),
         _ => {}
     }
-    let t = title.trim().to_lowercase();
+    let lower = title.trim().to_lowercase();
+    // An elevated tab says so first: "Administrator: Windows PowerShell".
+    let t = lower.strip_prefix("administrator:").or_else(|| lower.strip_prefix("administrador:")).map_or(lower.as_str(), str::trim_start);
     if t.contains("eingabeaufforderung") || t.contains("command prompt") || t.ends_with("cmd.exe") {
         return None;
     }
-    if t.contains("powershell") || t.starts_with("ps ") {
+    let words: Vec<&str> = t.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    if t.contains("powershell") || t.starts_with("ps ") || words.contains(&"pwsh") {
         return Some(Shell::PowerShell);
     }
-    // "fabi@pc: ~/x" from a bash prompt, "pc: ### Amber" from a multiplexer - not "C:\\".
+    // "fabi@pc: ~/x" from a bash prompt, "pc: ### Amber" from a multiplexer - not "C:\".
     let user_at_host = regex::Regex::new(r"^([\w.-]+@[\w.-]+:|[\w.-]{2,}:\s)").expect("static regex");
-    let linux = ["ubuntu", "debian", "kali", "fedora", "arch", "opensuse", "alpine", "bash", "zsh", "mingw", "wsl"];
-    if user_at_host.is_match(&t) || linux.iter().any(|w| t.split(|c: char| !c.is_alphanumeric()).any(|word| word.starts_with(w))) {
+    let linux = ["ubuntu", "debian", "kali", "fedora", "arch", "opensuse", "alpine", "bash", "zsh", "wsl", "ssh"];
+    if user_at_host.is_match(t) || words.iter().any(|w| linux.contains(w) || w.starts_with("mingw")) {
         return Some(Shell::Bash);
+    }
+    // A Windows folder ("C:\\Users\\x") is no bash prompt.
+    if t.starts_with(|c: char| c.is_ascii_alphabetic()) && t.get(1..3) == Some(":\\") {
+        return Some(Shell::PowerShell);
     }
     // Windows Terminal opens PowerShell unless its tab says otherwise.
     Some(if exe == "windowsterminal.exe" { Shell::PowerShell } else { fallback })
@@ -184,9 +201,10 @@ const MAX_COMMAND_CHARS: usize = 400;
 pub fn command_from(reply: &str, shell: Shell) -> Result<Answer, String> {
     let think = regex::Regex::new(r"(?s)<think>.*?</think>").expect("static regex");
     let prompt_sign = regex::Regex::new(r"^(\$|>|PS(\s+[^>]*)?>)\s+").expect("static regex");
-    let text = think.replace_all(reply, "");
+    // Every kind of line break is one (a bare \r is Enter in a console), a tab a space.
+    let text = think.replace_all(reply, "").replace(['\r', '\u{85}', '\u{2028}', '\u{2029}'], "\n").replace('\t', " ");
     let lines: Vec<String> = text
-        .lines()
+        .split('\n')
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with("```"))
         .map(|l| prompt_sign.replace(l, "").trim().to_string())
@@ -196,16 +214,22 @@ pub fn command_from(reply: &str, shell: Shell) -> Result<Answer, String> {
         return Err("The model gave no command.".into());
     }
     let command = lines.join(shell.separator());
+    // Ctrl+O runs the line in bash, Escape starts sequences: nothing but printable text is typed.
+    if command.chars().any(char::is_control) {
+        return Err("The model's command holds control characters - nothing typed.".into());
+    }
     // "TEXT", also with the request echoed around it - a command never starts or ends so.
     let marker = |w: Option<&str>| w.is_some_and(|w| w.trim_matches(|c: char| !c.is_alphanumeric()) == "TEXT");
-    if command.trim_end_matches('.').eq_ignore_ascii_case("text") || marker(command.split_whitespace().next()) || marker(command.split_whitespace().last()) {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let echoed = words.len() >= 4 && (marker(words.first().copied()) || marker(words.last().copied()));
+    if command.trim_end_matches('.').eq_ignore_ascii_case("text") || marker(words.first().copied()) && words.len() > 1 && words[0].ends_with(':') || echoed {
         return Ok(Answer::Text);
     }
     if command.chars().count() > MAX_COMMAND_CHARS {
         return Err("The model's command ran on and on - nothing typed.".into());
     }
     // "Ich kann dir dabei leider nicht helfen." - a sentence, not a command.
-    let words = command.split_whitespace().count();
+    let words = words.len();
     let shellish = command.contains(|c: char| "-/|$*=<>\\~;&{}()[]'\"".contains(c));
     if words >= 4 && !shellish && command.ends_with(['.', '!', '?']) {
         return Err(format!("The model answered instead of giving a command: {command}"));
@@ -217,49 +241,53 @@ pub fn command_from(reply: &str, shell: Shell) -> Result<Answer, String> {
 /// shell, forcing git. Such a command is typed commented out ([comment_out]).
 pub fn risky(command: &str, shell: Shell) -> Option<&'static str> {
     let has = |pattern: &str| regex::Regex::new(pattern).expect("static regex").is_match(command);
-    let found = match shell {
-        Shell::Bash => [
-            (r"\b(rm|rmdir|shred)\b|-delete\b", "deletes files"),
-            (r"\bsudo\b|\bsu\b", "runs as administrator"),
-            (r"\|\s*(sudo\s+)?(sh|bash|zsh)\b", "runs a downloaded script"),
-            (r"\bdd\b|\bmkfs|\bfdisk\b|\bparted\b", "writes to a disk"),
-            (r"git\s+push\b.*(--force|\s-f\b)|git\s+reset\s+--hard|git\s+clean\b", "throws away git history or changes"),
-            (r"\b(chmod|chown)\s+-R\b", "changes rights of many files"),
-            (r"\b(shutdown|reboot|poweroff)\b|\bkill(all)?\b", "stops the machine or programs"),
-        ]
-        .iter()
-        .find(|(p, _)| has(p))
-        .map(|(_, why)| *why),
-        Shell::PowerShell => [
-            (r"(?i)\bremove-item\b|\b(rm|del|rmdir|ri|erase)\b", "deletes files"),
-            (r"(?i)\bformat-|\bclear-disk\b|\binitialize-disk\b", "writes to a disk"),
-            (r"(?i)\b(stop|restart)-computer\b|\bstop-process\b", "stops the machine or programs"),
-            (r"(?i)\bset-executionpolicy\b|\bstart-process\b.*-verb\s+runas", "changes security settings"),
-            (r"(?i)\b(clear-content|set-content|out-file)\b", "overwrites a file"),
-            (r"(?i)\biex\b|\binvoke-expression\b", "runs a downloaded script"),
-            (r"(?i)git\s+push\b.*(--force|\s-f\b)|git\s+reset\s+--hard|git\s+clean\b", "throws away git history or changes"),
-        ]
-        .iter()
-        .find(|(p, _)| has(p))
-        .map(|(_, why)| *why),
+    // Where a command starts: the line, after ; | & ( or a prefix like sudo, xargs, -exec.
+    const AT: &str = r"(?:^|[;|&(]\s*|\b(?:sudo|xargs|exec|env|nohup|time)\s+)";
+    let git = r"git\s+(push\b.*(--force|\s-f\b|\s\+\S)|reset\s+--hard|clean\b|checkout\s+(--\s|\.)|restore\b|branch\s+-D\b)";
+    let patterns: Vec<(String, &'static str)> = match shell {
+        Shell::Bash => vec![
+            (format!(r"{AT}(rm|rmdir|shred|unlink|truncate)\b|-delete\b"), "deletes files"),
+            (format!(r"{AT}(sudo|su|doas)\b"), "runs as administrator"),
+            (r"\|\s*(sudo\s+)?(sh|bash|zsh)\b|\b(sh|bash|zsh)\s+(-c\s+.*\$\(|<\()".into(), "runs a downloaded script"),
+            (format!(r"{AT}(dd|fdisk|parted|wipefs)\b|\bmkfs"), "writes to a disk"),
+            (git.into(), "throws away git history or changes"),
+            (r"\b(chmod|chown)\s+-R\b".into(), "changes rights of many files"),
+            (format!(r"{AT}(shutdown|reboot|poweroff|halt|kill|killall|pkill)\b"), "stops the machine or programs"),
+            (r"\|\s*tee\s+[^-\s]".into(), "overwrites a file"),
+        ],
+        Shell::PowerShell => vec![
+            (format!(r"(?i)\b(remove|uninstall|clear)-\w+|{AT}(rm|del|rmdir|rd|ri|erase)\b"), "deletes something"),
+            (r"(?i)\bformat-volume\b|\bclear-disk\b|\binitialize-disk\b".into(), "writes to a disk"),
+            (format!(r"(?i)\b(stop|restart)-(computer|process|service)\b|{AT}(kill|spps|taskkill|shutdown)\b"), "stops the machine or programs"),
+            (format!(r"(?i)\bset-executionpolicy\b|\bstart-process\b.*-verb\s+runas|{AT}sudo\b"), "runs as administrator or changes security settings"),
+            (r"(?i)\b(set-content|out-file)\b".into(), "overwrites a file"),
+            (r"(?i)\biex\b|\binvoke-expression\b".into(), "runs a downloaded script"),
+            (format!("(?i){git}"), "throws away git history or changes"),
+        ],
     };
-    found.or_else(|| overwrites(command).then_some("overwrites a file"))
+    patterns.iter().find(|(p, _)| has(p)).map(|(_, why)| *why).or_else(|| overwrites(command).then_some("overwrites a file"))
 }
 
-/// A `>` that empties a file: not `>>` (appends), not `2>`/`&>` onto /dev/null, not `$null`.
+/// A `>` that empties a file: not `>>` (appends), not into /dev/null or $null, not `>&2`, not
+/// inside quotes ("a > b").
 fn overwrites(command: &str) -> bool {
     let chars: Vec<char> = command.chars().collect();
-    for (i, c) in chars.iter().enumerate() {
-        if *c != '>' || chars.get(i + 1) == Some(&'>') || (i > 0 && chars[i - 1] == '>') {
+    let mut quote = None;
+    for (i, &c) in chars.iter().enumerate() {
+        match (quote, c) {
+            (None, '\'' | '"') => quote = Some(c),
+            (Some(q), _) if c == q => quote = None,
+            _ => {}
+        }
+        if quote.is_some() || c != '>' || chars.get(i + 1) == Some(&'>') || (i > 0 && chars[i - 1] == '>') {
             continue;
         }
-        if i > 0 && (chars[i - 1].is_ascii_digit() || chars[i - 1] == '&') {
+        let rest: String = chars[i + 1..].iter().collect();
+        let target: String = rest.trim_start().chars().take_while(|c| !c.is_whitespace()).collect();
+        if target.is_empty() || target.starts_with('&') || target == "/dev/null" || target.eq_ignore_ascii_case("$null") || target.eq_ignore_ascii_case("nul") {
             continue;
         }
-        let target: String = chars[i + 1..].iter().collect::<String>().trim_start().chars().take_while(|c| !c.is_whitespace()).collect();
-        if !(target.is_empty() || target == "/dev/null" || target.eq_ignore_ascii_case("$null")) {
-            return true;
-        }
+        return true;
     }
     false
 }
@@ -281,10 +309,12 @@ pub fn command_prefix(text: &str, words: &[String]) -> Option<String> {
             continue;
         }
         let rest: String = text.chars().skip(n).collect();
-        if rest.chars().next().is_some_and(char::is_alphanumeric) {
+        let mut next = rest.chars();
+        // "Befehlshaber", "Command-line": part of a longer word.
+        if next.next().is_some_and(|c| c.is_alphanumeric() || c == '-' && next.next().is_some_and(char::is_alphanumeric)) {
             continue;
         }
-        let rest = rest.trim_start_matches(|c: char| c == ':' || c == ',' || c == '.' || c == '-' || c.is_whitespace()).trim_end();
+        let rest = rest.trim_start_matches(|c: char| ":,.;!…-–".contains(c) || c.is_whitespace()).trim_end();
         return (!rest.is_empty()).then(|| rest.to_string());
     }
     None
@@ -293,6 +323,45 @@ pub fn command_prefix(text: &str, words: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_character_that_could_run_the_line_gets_through() {
+        let cmd = |reply: &str| match command_from(reply, Shell::Bash) {
+            Ok(Answer::Command(c)) => c,
+            other => panic!("{reply:?}: {other:?}"),
+        };
+        // A bare \r is Enter in a console: a line break like any other, joined.
+        assert_eq!(cmd("cd x\rls"), "cd x && ls");
+        assert_eq!(cmd("ls\u{2028}pwd\u{85}date"), "ls && pwd && date");
+        assert_eq!(cmd("ls\t-la"), "ls -la", "a tab would start completion");
+        for bad in ["ls\u{0f}", "ls\u{03}", "ls \u{1b}[2J", "echo \u{7f}"] {
+            assert!(command_from(bad, Shell::Bash).is_err(), "{bad:?}");
+        }
+        assert_eq!(cmd("mkdir TEXT"), "mkdir TEXT", "a folder named TEXT is a command");
+    }
+
+    #[test]
+    fn everyday_powershell_is_not_risky() {
+        for c in ["Get-Process | Format-Table", "Get-ChildItem | Format-List Name", "Select-String del notes.txt", "Get-ChildItem -Filter *.del", "Get-Date >&2"] {
+            assert_eq!(risky(c, Shell::PowerShell), None, "{c}");
+        }
+        for c in ["cd ~/su", "echo \"a > b\"", "git log --format='%h -> %s'", "echo hi >&2", "ls 2> /dev/null"] {
+            assert_eq!(risky(c, Shell::Bash), None, "{c}");
+        }
+    }
+
+    #[test]
+    fn more_harm_is_found() {
+        for c in ["pkill node", "bash <(curl -s x.sh)", "sh -c \"$(curl -fsSL x.sh)\"", "git push origin +main", "git checkout -- .", "git restore .",
+                  "git branch -D old", "make &> log.txt", "make 2> err.txt", "ls 1> out.txt", "truncate -s 0 x.log", "ls | tee out.txt", "xargs rm < list", "find . -exec rm {} +"] {
+            assert!(risky(c, Shell::Bash).is_some(), "{c}");
+        }
+        assert!(risky("ls | tee -a out.txt", Shell::Bash).is_none(), "tee -a appends");
+        for c in ["Format-Volume D", "rd build", "kill 123", "spps -Name node", "taskkill /f /im node.exe", "shutdown /s /t 0", "Stop-Service wuauserv",
+                  "Remove-ItemProperty -Path HKCU:\\x -Name y", "Remove-AppxPackage x", "Uninstall-Package x", "sudo winget install x", "Get-Date > notes.txt"] {
+            assert!(risky(c, Shell::PowerShell).is_some(), "{c}");
+        }
+    }
 
     #[test]
     fn the_shell_follows_the_program_and_the_title() {
@@ -312,6 +381,15 @@ mod tests {
         // A multiplexer's or a prompt's "host: what" (not a drive's "C:\\").
         assert_eq!(auto("windowsterminal.exe", "FabisGamingPC: ### Amber"), Some(Shell::Bash));
         assert_eq!(auto("windowsterminal.exe", "C:\\WINDOWS\\system32\\wsl.exe"), Some(Shell::Bash));
+        // An elevated tab is no "host:", folders are no distributions, pwsh is PowerShell.
+        assert_eq!(auto("windowsterminal.exe", "Administrator: pwsh in amberPC"), Some(Shell::PowerShell));
+        assert_eq!(auto("windowsterminal.exe", "Administrator: C:\\Users\\fabia"), Some(Shell::PowerShell));
+        assert_eq!(auto("windowsterminal.exe", "PS C:\\Users\\fabia\\Archiv"), Some(Shell::PowerShell));
+        assert_eq!(auto("windowsterminal.exe", "Archiv"), Some(Shell::PowerShell), "not arch");
+        assert_eq!(auto("tabby.exe", "pwsh in ~"), Some(Shell::PowerShell));
+        assert_eq!(auto("windowsterminal.exe", "ssh fabi@server"), Some(Shell::Bash));
+        assert_eq!(auto("windowsterminal.exe", "Ubuntu-24.04"), Some(Shell::Bash));
+        assert_eq!(auto("ubuntu2404.exe", ""), Some(Shell::Bash), "a WSL distribution's launcher");
         // Anywhere else (the hotkey): the title, else the fallback.
         assert_eq!(auto("code.exe", "main.rs - amberPC - Visual Studio Code"), Some(Shell::Bash));
         // A choice made for the program wins.
@@ -384,6 +462,7 @@ mod tests {
         assert_eq!(terminal_choice(None, "C:\\x\\WindowsTerminal.exe"), Some(ShellChoice::Auto));
         assert_eq!(terminal_choice(None, "mintty.exe"), Some(ShellChoice::Auto));
         assert_eq!(terminal_choice(None, "notepad.exe"), None);
+        assert_eq!(terminal_choice(None, "ubuntu2404.exe"), Some(ShellChoice::Auto));
         // cmd is no terminal for this: a dictation into it stays a dictation.
         assert_eq!(terminal_choice(None, "cmd.exe"), None);
         let with = |mode| Profile { exe: "windowsterminal.exe".into(), terminal: mode, ..Profile::default() };
@@ -403,5 +482,8 @@ mod tests {
         assert_eq!(command_prefix("Der Befehl war falsch.", &words), None, "only at the start");
         assert_eq!(command_prefix("Befehlshaber kommen", &words), None, "a whole word");
         assert_eq!(command_prefix("Befehl", &words), None, "nothing after it");
+        assert_eq!(command_prefix("Command-line tools are great.", &words), None, "a compound word");
+        assert_eq!(command_prefix("Befehl! zeig alles", &words).as_deref(), Some("zeig alles"));
+        assert_eq!(command_prefix("Befehl… zeig alles", &words).as_deref(), Some("zeig alles"));
     }
 }

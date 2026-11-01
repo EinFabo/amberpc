@@ -335,7 +335,11 @@ pub fn command(app: &AppHandle, s: &Settings, spoken: &str, shell: amber_core::t
         EngineKind::Local => c.local_model.as_str(),
         EngineKind::Server => c.model.as_str(),
     };
-    let cleaner = cleaner_for(app, s, Some(model)).map_err(|e| format!("Terminal commands need the cleanup's model (set it up under Cleanup): {e}"))?;
+    let layout = &app.state::<Core>().paths.layout;
+    if c.engine == EngineKind::Local && !local::llm_model(model).is_some_and(|m| layout.llm_model_installed(m)) {
+        return Err("Terminal commands need a language model - download one under Cleanup, or choose a provider there.".into());
+    }
+    let cleaner = cleaner_for(app, s, Some(model)).map_err(|e| format!("Terminal commands need the cleanup's model: {e}"))?;
     let (system, user) = amber_core::terminal::request(spoken, shell, title);
     let request = serde_json::json!({
         "messages": [{ "role": "system", "content": system }, { "role": "user", "content": user }],

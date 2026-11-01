@@ -28,11 +28,13 @@ export function HotkeysPage({ s, save }: PageProps) {
           <Segmented value={s.hotkey.mode} options={MODES} onChange={(m) => save((x) => (x.hotkey.mode = m))} />
         </Row>
       </Section>
-      <Section title="Terminal commands">
-        <Row label="Command hotkey" hint="Optional. Like the dictation hotkey, but what you say becomes a shell command, typed without Enter - in any window (set up on the Programs page).">
-          <HotkeyInput value={s.terminal.hotkey} onChange={(v) => save((x) => (x.terminal.hotkey = v))} />
-        </Row>
-      </Section>
+      {s.terminal.enabled && (
+        <Section title="Terminal commands">
+          <Row label="Command hotkey" hint="Optional. Like the dictation hotkey, but what you say becomes a shell command, typed without Enter - in any window (set up on the Programs page).">
+            <HotkeyInput value={s.terminal.hotkey} onChange={(v) => save((x) => (x.terminal.hotkey = v))} />
+          </Row>
+        </Section>
+      )}
       <Section title="Bubble">
         <Row label="Show / hide the bubble" hint="Optional.">
           <HotkeyInput value={s.hotkey.toggleBubble} onChange={(v) => save((x) => (x.hotkey.toggleBubble = v))} />

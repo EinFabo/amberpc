@@ -94,6 +94,30 @@ Between recognition and inserting (*Settings → Cleanup*):
   formal (mail), concise (notes) - an own instruction, and the smart cleanup as set, always
   or never. The program is the window the dictation started in.
 
+## Terminal commands
+
+In a terminal, what is said can be a request instead of text (*Settings → Programs*): "such
+mir alle Dateien, die mit CL anfangen" becomes `find . -name 'CL*'`, "list the five biggest
+files in my downloads folder" becomes `Get-ChildItem ~\Downloads -File | Sort-Object Length
+-Descending | Select-Object -First 5`. Amber **types the command at the prompt and never runs
+it** - no Enter, no line break; you read it and press Enter.
+
+- **When**: automatically in terminal programs (Windows Terminal, PowerShell, Git Bash,
+  PuTTY, WSL - per program on, off, or a fixed shell); anywhere with the command hotkey
+  (*Settings → Hotkeys*); or for one dictation that starts with a start word ("Befehl: ...",
+  "Command: ...").
+- **Which shell**: bash or PowerShell, told by the program and the window title
+  ("fabi@pc: ~/projects", "Windows PowerShell", "Ubuntu"); cmd is not supported. The title is
+  the only context - nothing of the terminal's content is read.
+- **The model**: the cleanup's (local Qwen3 4B, or the provider's), also while the smart
+  cleanup is off; examples of each shell in the prompt. When what was said is no command - a
+  message to Claude Code or an editor running in the terminal - it is dictated as usual;
+  titles of Claude Code and Vim skip the model.
+- **Risky commands** (deleting, overwriting, `sudo`, a script piped into a shell, forcing
+  git, disks, shutting down) come commented out (`# rm -rf build`): Enter does nothing, remove
+  the `#` to run it.
+- The bubble shows `>_`; the history keeps "request → command".
+
 ## History and statistics
 
 The last dictations - text, program, engine - are kept on this PC, encrypted for the

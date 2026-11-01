@@ -43,7 +43,9 @@ pub fn register(app: &AppHandle, settings: &Settings) -> Result<(), String> {
         }
     }
     let command = settings.terminal.hotkey.trim();
-    if settings.terminal.enabled && !command.is_empty() && !command.eq_ignore_ascii_case(dictate) && !command.eq_ignore_ascii_case(toggle) {
+    if settings.terminal.enabled && !command.is_empty() && (command.eq_ignore_ascii_case(dictate) || command.eq_ignore_ascii_case(toggle)) {
+        problems.push(format!("{command} is already one of Amber's hotkeys"));
+    } else if settings.terminal.enabled && !command.is_empty() {
         match command.parse::<Shortcut>() {
             Ok(sc) => {
                 if let Err(e) = gs.on_shortcut(sc, |app, _, event| on_command(app, event.state)) {

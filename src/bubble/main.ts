@@ -77,9 +77,9 @@ listen<DictationEvent>("dictation-state", (e) => {
     if (state === "error") chime("error");
   }
   canvas.title = state === "error" ? e.payload.message ?? "" : "";
-  // ">_" from the moment a request is known until the dictation ends.
+  // ">_" from the moment a request is known until the dictation ends - or turns out to be text.
   if (e.payload.command) commandMark.classList.add("on");
-  else if (state === "idle" || state === "recording" || state === "error") commandMark.classList.remove("on");
+  else if (state !== "inserting" && state !== "done") commandMark.classList.remove("on");
   fire.set(visualOf(state));
   if (e.payload.expectedMs) fire.expect(e.payload.expectedMs);
   // The opacity setting is for the bubble at rest; while it works, it is fully there.
