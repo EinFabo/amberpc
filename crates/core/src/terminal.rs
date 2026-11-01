@@ -78,6 +78,21 @@ fn wsl_launcher(exe: &str) -> bool {
     ["ubuntu", "debian", "kali", "opensuse", "fedoraremix", "alpine", "archlinux"].contains(&name)
 }
 
+/// Whether a dictation into [exe]'s window (titled [title]) is a request, and for which shell
+/// choice: [explicit] (the command hotkey, a start word) always while terminal mode is on; by
+/// itself in terminal programs while [settings] say automatic - not with Claude Code or an editor
+/// in front.
+pub fn wanted(settings: &crate::settings::TerminalSettings, profile: Option<&crate::profiles::Profile>, exe: &str, title: &str, explicit: bool) -> Option<ShellChoice> {
+    if !settings.enabled {
+        return None;
+    }
+    let choice = terminal_choice(profile, exe);
+    if explicit {
+        return Some(choice.unwrap_or(ShellChoice::Auto));
+    }
+    choice.filter(|_| settings.automatic && !app_in_front(title))
+}
+
 /// The shell a request in [exe]'s window (titled [title]) is for - None for cmd, which is not
 /// supported; [fallback] where neither says (the command hotkey outside a terminal).
 pub fn shell_for(exe: &str, title: &str, choice: ShellChoice, fallback: Shell) -> Option<Shell> {
@@ -292,6 +307,12 @@ fn overwrites(command: &str) -> bool {
     false
 }
 
+/// Whether Amber presses Enter after typing [typed]: only when [settings] say so, and never for
+/// a risky command - that one is typed commented out and waits for the user.
+pub fn runs(settings: &crate::settings::TerminalSettings, typed: &str, shell: Shell) -> bool {
+    settings.run_commands && !typed.trim_start().starts_with('#') && risky(typed, shell).is_none()
+}
+
 /// [command] so that Enter does nothing: a comment in bash and PowerShell alike - the user
 /// deletes the `#` to run it.
 pub fn comment_out(command: &str) -> String {
@@ -471,6 +492,45 @@ mod tests {
         assert_eq!(terminal_choice(Some(&with(TerminalMode::Bash)), "windowsterminal.exe"), Some(ShellChoice::Bash));
         let code = Profile { exe: "code.exe".into(), terminal: TerminalMode::PowerShell, ..Profile::default() };
         assert_eq!(terminal_choice(Some(&code), "code.exe"), Some(ShellChoice::PowerShell), "switched on for any program");
+    }
+
+    #[test]
+    fn automatic_requests_can_be_switched_off() {
+        use crate::settings::TerminalSettings;
+        let on = TerminalSettings::default();
+        assert!(on.automatic, "on by default");
+        let off = TerminalSettings { automatic: false, ..TerminalSettings::default() };
+        let none = TerminalSettings { enabled: false, ..TerminalSettings::default() };
+        let wt = "windowsterminal.exe";
+        assert_eq!(wanted(&on, None, wt, "Ubuntu", false), Some(ShellChoice::Auto));
+        assert_eq!(wanted(&off, None, wt, "Ubuntu", false), None, "only by hotkey or start word");
+        assert_eq!(wanted(&off, None, wt, "Ubuntu", true), Some(ShellChoice::Auto));
+        assert_eq!(wanted(&on, None, "notepad.exe", "", false), None);
+        assert_eq!(wanted(&on, None, "notepad.exe", "", true), Some(ShellChoice::Auto));
+        assert_eq!(wanted(&on, None, wt, "✳ Fix the login", false), None, "Claude Code gets text");
+        assert_eq!(wanted(&none, None, wt, "Ubuntu", true), None, "terminal mode off");
+        // A program's shell still counts for the hotkey and the start word.
+        use crate::profiles::{Profile, TerminalMode};
+        let bash = Profile { exe: wt.into(), terminal: TerminalMode::Bash, ..Profile::default() };
+        assert_eq!(wanted(&off, Some(&bash), wt, "Windows PowerShell", false), None);
+        assert_eq!(wanted(&off, Some(&bash), wt, "Windows PowerShell", true), Some(ShellChoice::Bash));
+        let silent = Profile { exe: wt.into(), terminal: TerminalMode::Off, ..Profile::default() };
+        assert_eq!(wanted(&on, Some(&silent), wt, "Ubuntu", true), Some(ShellChoice::Auto));
+    }
+
+    #[test]
+    fn only_a_harmless_command_runs_by_itself_and_only_when_switched_on() {
+        use crate::settings::TerminalSettings;
+        let off = TerminalSettings::default();
+        assert!(!off.run_commands, "off by default");
+        assert!(!runs(&off, "ls -la", Shell::Bash));
+        let on = TerminalSettings { run_commands: true, ..TerminalSettings::default() };
+        assert!(runs(&on, "ls -la", Shell::Bash));
+        assert!(runs(&on, "Get-ChildItem", Shell::PowerShell));
+        // A risky one never: it comes commented out, Enter would do nothing anyway.
+        assert!(!runs(&on, "rm -rf build", Shell::Bash));
+        assert!(!runs(&on, "Remove-Item -Recurse build", Shell::PowerShell));
+        assert!(!runs(&on, "# rm -rf build", Shell::Bash), "a comment is not run");
     }
 
     #[test]

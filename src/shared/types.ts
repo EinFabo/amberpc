@@ -68,7 +68,7 @@ export interface Settings {
   statistics: boolean;
   snippets: Snippet[];
   discord: { muteWhileDictating: boolean };
-  terminal: { enabled: boolean; hotkey: string; prefixes: string[] };
+  terminal: { enabled: boolean; automatic: boolean; runCommands: boolean; hotkey: string; prefixes: string[] };
   cleanup: {
     fillers: boolean;
     spokenPunctuation: boolean;

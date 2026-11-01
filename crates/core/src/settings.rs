@@ -222,6 +222,10 @@ impl Default for InsertSettings {
 #[serde(default, rename_all = "camelCase")]
 pub struct TerminalSettings {
     pub enabled: bool,
+    /// Requests by themselves in terminal programs; off: only by the hotkey or a start word.
+    pub automatic: bool,
+    /// Press Enter after a harmless command: it runs at once. Off by default, behind a warning.
+    pub run_commands: bool,
     /// A hotkey of its own: a request anywhere. Empty: none.
     pub hotkey: String,
     /// Words that make one dictation a request when it starts with them ("Befehl: ...").
@@ -230,7 +234,7 @@ pub struct TerminalSettings {
 
 impl Default for TerminalSettings {
     fn default() -> Self {
-        TerminalSettings { enabled: true, hotkey: String::new(), prefixes: vec!["Befehl".into(), "Command".into()] }
+        TerminalSettings { enabled: true, automatic: true, run_commands: false, hotkey: String::new(), prefixes: vec!["Befehl".into(), "Command".into()] }
     }
 }
 
@@ -453,7 +457,11 @@ mod tests {
     #[test]
     fn terminal_mode_is_on_with_its_prefixes() {
         let t = Settings::default().terminal;
-        assert!(t.enabled && t.hotkey.is_empty());
+        assert!(t.enabled && t.automatic && t.hotkey.is_empty());
+        // Settings of 0.4.5 without the switch: automatic, as they were.
+        let old: TerminalSettings = serde_json::from_str(r#"{"enabled":true,"hotkey":"","prefixes":["Befehl"]}"#).unwrap();
+        assert!(old.automatic);
+        assert!(!old.run_commands, "never on without being switched on");
         assert_eq!(t.prefixes, ["Befehl", "Command"]);
         let mut s = Settings::default();
         s.terminal.prefixes = vec![" Befehl ".into(), "".into(), "befehl".into(), "Kommando".into()];

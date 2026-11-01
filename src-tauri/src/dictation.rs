@@ -305,20 +305,18 @@ struct Asked {
 /// one commented out. True when it was handled (or failed) as a request.
 #[allow(clippy::too_many_arguments)]
 fn terminal(app: &AppHandle, settings: &Settings, session: u64, spoken: &str, program: Option<&str>, asked: &Asked, target: Option<Target>, spoken_ms: u64) -> bool {
-    use amber_core::terminal::{self as term, Answer, Shell, ShellChoice};
+    use amber_core::terminal::{self as term, Answer, Shell};
     // A snippet's phrase stays a snippet, also in a terminal.
     if !settings.terminal.enabled || amber_core::snippets::find(&settings.snippets, spoken).is_some() {
         return false;
     }
     let prefixed = term::command_prefix(spoken, &settings.terminal.prefixes);
     let profile = program.and_then(|p| amber_core::profiles::find(&settings.profiles, p));
-    let choice = term::terminal_choice(profile, program.unwrap_or(""));
     let explicit = asked.command || prefixed.is_some();
-    // Claude Code or an editor in the terminal: text, unless asked for a command.
-    if !explicit && (choice.is_none() || term::app_in_front(&asked.title)) {
+    let Some(choice) = term::wanted(&settings.terminal, profile, program.unwrap_or(""), &asked.title, explicit) else {
         return false;
-    }
-    let Some(shell) = term::shell_for(program.unwrap_or(""), &asked.title, choice.unwrap_or(ShellChoice::Auto), Shell::Bash) else {
+    };
+    let Some(shell) = term::shell_for(program.unwrap_or(""), &asked.title, choice, Shell::Bash) else {
         if explicit {
             fail(app, session, "Terminal commands are for PowerShell and bash, not cmd.".into(), false);
             return true;
@@ -397,6 +395,13 @@ fn terminal(app: &AppHandle, settings: &Settings, session: u64, spoken: &str, pr
             return true;
         }
         Ok(_) => {}
+    }
+    // Switched on behind a warning: a harmless command runs at once.
+    if term::runs(&settings.terminal, &typed, shell) {
+        match insert::press_enter(target) {
+            Ok(()) => crate::diag::info("terminal: command run (Enter pressed)"),
+            Err(e) => crate::diag::warn(format!("terminal: command not run - {e}")),
+        }
     }
     {
         let mut inner = core.dictation.inner.lock().unwrap();

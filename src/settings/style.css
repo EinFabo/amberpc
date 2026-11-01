@@ -602,3 +602,25 @@ textarea:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
+
+/* Settings that can do harm: a red frame and a confirmation before they switch on. */
+.danger-zone {
+  border: 1px solid var(--error);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--error) 7%, transparent);
+  padding: 4px 16px 12px;
+  margin: 0 0 24px;
+}
+
+.danger-zone h2 {
+  color: var(--error);
+}
+
+.danger-zone .confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: var(--error);
+  padding-top: 8px;
+}

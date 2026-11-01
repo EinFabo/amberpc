@@ -54,6 +54,7 @@ export function ProgramsPage({ s, save, go }: PageProps) {
         {s.cleanup.smart ? ", now on" : ", now off - “Always” below switches it on for one program"}). Programs without a profile get the text as spoken.
       </p>
       <TerminalSection s={s} save={save} />
+      {s.terminal.enabled && <RunCommands s={s} save={save} />}
       <Section title="Add a program">
         <div className="row">
           <select value={pick} onChange={(e) => setPick(e.target.value)} style={{ flex: 1 }}>
@@ -142,6 +143,11 @@ function TerminalSection({ s, save }: Pick<PageProps, "s" | "save">) {
         <Switch on={s.terminal.enabled} onChange={(v) => save((x) => (x.terminal.enabled = v))} />
       </Row>
       {s.terminal.enabled && (
+        <Row label="Automatically in terminals" hint="Off: a command only with the command hotkey or a start word - dictating into a terminal is ordinary text. A program's choice below then only sets the shell.">
+          <Switch on={s.terminal.automatic} onChange={(v) => save((x) => (x.terminal.automatic = v))} />
+        </Row>
+      )}
+      {s.terminal.enabled && (
         <Row label="Start words" hint="Starting a dictation with one of these makes it a command anywhere: “Befehl: zeig alle Dateien”. Comma-separated. The Hotkeys page has a command hotkey too.">
           <input
             type="text"
@@ -154,5 +160,33 @@ function TerminalSection({ s, save }: Pick<PageProps, "s" | "save">) {
         </Row>
       )}
     </Section>
+  );
+}
+
+/** Behind a warning: Amber presses Enter itself after a harmless command. */
+function RunCommands({ s, save }: Pick<PageProps, "s" | "save">) {
+  const [asking, setAsking] = useState(false);
+  const on = s.terminal.runCommands;
+  return (
+    <div className="danger-zone">
+      <h2>⚠ Danger zone</h2>
+      <Row
+        label="Run commands by themselves"
+        hint="Amber presses Enter after typing the command - it runs before you have read it. A language model can misunderstand you or pick the wrong folder. Risky commands (deleting, overwriting, sudo...) are never run: they still come commented out."
+      >
+        <Switch on={on} onChange={(v) => (v ? setAsking(true) : save((x) => (x.terminal.runCommands = false)))} />
+      </Row>
+      {asking && !on && (
+        <div className="confirm">
+          <span>Commands will run without you checking them first. Switch this on?</span>
+          <button className="btn danger" onClick={() => void save((x) => (x.terminal.runCommands = true)).then(() => setAsking(false))}>
+            Run them by themselves
+          </button>
+          <button className="btn" onClick={() => setAsking(false)}>
+            Cancel
+          </button>
+        </div>
+      )}
+    </div>
   );
 }

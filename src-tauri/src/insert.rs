@@ -336,6 +336,17 @@ mod win {
         set_clipboard(&mut cb, &text.replace("\r\n", "\n").replace('\n', "\r\n"))
     }
 
+    /// Enter in [target], after what was just typed there - only while it is still in front.
+    pub fn press_enter(target: Option<Target>) -> Result<(), String> {
+        if target.is_some_and(|t| !still_in_front(t)) {
+            return Err("you switched to another window".into());
+        }
+        // Lets the terminal take the typed line first.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        send(&[key(VK_RETURN, false), key(VK_RETURN, true)]);
+        Ok(())
+    }
+
     pub fn insert(text: &str, settings: &InsertSettings, target: Option<Target>) -> Result<Outcome, String> {
         // First: the hotkey's modifiers may still be down - or Alt for an Alt+Tab, whose
         // switch counts for the check below.
@@ -365,7 +376,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{exe_of_pid, insert, note_foreground, program_of_window, remember, running_programs, to_clipboard};
+pub use win::{exe_of_pid, insert, note_foreground, press_enter, program_of_window, remember, running_programs, to_clipboard};
 
 impl Target {
     /// The target window's title ("fabi@pc: ~/projects", "Windows PowerShell") - the terminal
@@ -404,6 +415,11 @@ pub fn to_clipboard(_text: &str) -> Result<(), String> {
 #[cfg(not(windows))]
 pub fn remember() -> Option<Target> {
     None
+}
+
+#[cfg(not(windows))]
+pub fn press_enter(_target: Option<Target>) -> Result<(), String> {
+    Err("Keystrokes are only implemented on Windows.".into())
 }
 
 #[cfg(not(windows))]

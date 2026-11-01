@@ -100,12 +100,13 @@ In a terminal, what is said can be a request instead of text (*Settings → Prog
 mir alle Dateien, die mit CL anfangen" becomes `find . -name 'CL*'`, "list the five biggest
 files in my downloads folder" becomes `Get-ChildItem ~\Downloads -File | Sort-Object Length
 -Descending | Select-Object -First 5`. Amber **types the command at the prompt and never runs
-it** - no Enter, no line break; you read it and press Enter.
+it** - no Enter, no line break; you read it and press Enter (unless the danger zone below
+says otherwise).
 
 - **When**: automatically in terminal programs (Windows Terminal, PowerShell, Git Bash,
-  PuTTY, WSL - per program on, off, or a fixed shell); anywhere with the command hotkey
-  (*Settings → Hotkeys*); or for one dictation that starts with a start word ("Befehl: ...",
-  "Command: ...").
+  PuTTY, WSL - per program on, off, or a fixed shell; or not automatically at all); anywhere
+  with the command hotkey (*Settings → Hotkeys*); or for one dictation that starts with a
+  start word ("Befehl: ...", "Command: ...").
 - **Which shell**: bash or PowerShell, told by the program and the window title
   ("fabi@pc: ~/projects", "Windows PowerShell", "Ubuntu"); cmd is not supported. The title is
   the only context - nothing of the terminal's content is read.
@@ -116,6 +117,9 @@ it** - no Enter, no line break; you read it and press Enter.
 - **Risky commands** (deleting, overwriting, `sudo`, a script piped into a shell, forcing
   git, disks, shutting down) come commented out (`# rm -rf build`): Enter does nothing, remove
   the `#` to run it.
+- **Danger zone** (off by default, switched on only after a confirmation): Amber presses Enter
+  itself, so a harmless command runs at once. A risky one never does - it still comes
+  commented out.
 - The bubble shows `>_`; the history keeps "request → command".
 
 ## History and statistics
