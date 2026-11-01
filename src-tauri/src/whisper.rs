@@ -84,12 +84,18 @@ impl Whisper {
     /// the newer one loaded. A running server is only replaced once its successor is fully
     /// downloaded - choosing a model that is still on its way keeps the old one working.
     pub fn ensure(&self, app: &tauri::AppHandle) -> Result<Served, String> {
+        self.ensure_model(app, None)
+    }
+
+    /// Like [ensure], with [model] instead of the configured one - what the phone chose. One
+    /// model at a time: the PC's own dictations load theirs again on their next use.
+    pub fn ensure_model(&self, app: &tauri::AppHandle, model: Option<&str>) -> Result<Served, String> {
         use tauri::Manager;
         let mut running = self.running.lock().unwrap();
         let core = app.state::<crate::state::Core>();
         let layout = &core.paths.layout;
         let settings = core.settings().local;
-        let key = Key { runtime: settings.runtime.clone(), model: settings.model.clone(), threads: settings.threads };
+        let key = Key { runtime: settings.runtime.clone(), model: model.unwrap_or(&settings.model).to_string(), threads: settings.threads };
 
         let rt = local::runtime(&key.runtime).ok_or("Unknown runtime.")?;
         let model = local::model(&key.model).ok_or("Unknown model.")?;

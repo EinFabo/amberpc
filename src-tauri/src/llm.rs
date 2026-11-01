@@ -109,11 +109,17 @@ impl Llm {
     /// settings are read under the lock, and a running server is only replaced once its
     /// successor is fully downloaded.
     pub fn ensure(&self, app: &AppHandle) -> Result<Endpoint, String> {
+        self.ensure_model(app, None)
+    }
+
+    /// Like [ensure], with [model] instead of the configured one - what the phone chose, also
+    /// while the PC itself cleans up in the cloud.
+    pub fn ensure_model(&self, app: &AppHandle, model: Option<&str>) -> Result<Endpoint, String> {
         let mut running = self.running.lock().unwrap();
         let core = app.state::<Core>();
         let layout = &core.paths.layout;
         let settings = core.settings();
-        if !wants_local(&settings) {
+        if model.is_none() && !wants_local(&settings) {
             // Switched off (or to a server) while this waited for the lock.
             if let Some(mut r) = running.take() {
                 process::stop(&mut r.child);
@@ -123,7 +129,7 @@ impl Llm {
             return Err("The smart cleanup on this PC is off.".into());
         }
         let c = settings.cleanup;
-        let key = Key { runtime: c.local_runtime.clone(), model: c.local_model.clone() };
+        let key = Key { runtime: c.local_runtime.clone(), model: model.unwrap_or(&c.local_model).to_string() };
         let rt = local::llm_runtime(&key.runtime).ok_or("Unknown runtime.")?;
         let model = local::llm_model(&key.model).ok_or("Unknown model.")?;
         let missing = if !layout.llm_runtime_installed(rt) {
@@ -287,6 +293,25 @@ pub fn cleaner(app: &AppHandle, s: &Settings, wait: bool) -> Result<ChatCleaner,
             Ok(ChatCleaner::new(&base, &key, &c.model, extra))
         }
     }
+}
+
+/// The cleaner for a chat request that names [model]: a downloaded local model, the cloud
+/// model set in the app, or else the PC's own.
+pub fn cleaner_for(app: &AppHandle, s: &Settings, model: Option<&str>) -> Result<ChatCleaner, String> {
+    let layout = &app.state::<Core>().paths.layout;
+    let c = &s.cleanup;
+    if let Some(m) = model.and_then(local::llm_model).filter(|m| layout.llm_model_installed(m)) {
+        if !(c.engine == EngineKind::Local && c.local_model == m.id) {
+            let endpoint = app.state::<Core>().llm.ensure_model(app, Some(m.id))?;
+            return Ok(ChatCleaner::new(&endpoint.url, &endpoint.key, m.id, None));
+        }
+    }
+    if model.is_some_and(|id| id == c.model) && c.engine != EngineKind::Server {
+        let mut cloud = s.clone();
+        cloud.cleanup.engine = EngineKind::Server;
+        return cleaner(app, &cloud, true);
+    }
+    cleaner(app, s, true)
 }
 
 /// What the dictation gets: a snippet if the dictation is its phrase; else the rules (fillers,

@@ -624,13 +624,35 @@ fn local_ready(core: &Core, s: &Settings) -> bool {
 /// The local whisper server - with a short encoder context when the model it runs (which may
 /// still be the previous one while the chosen one downloads) was tuned for it.
 fn local(app: &AppHandle) -> Result<Picked, String> {
-    let served = app.state::<Core>().whisper.ensure(app)?;
+    local_model(app, None)
+}
+
+/// The local engine with [model] instead of the configured one (the phone's choice).
+fn local_model(app: &AppHandle, model: Option<&str>) -> Result<Picked, String> {
+    let served = app.state::<Core>().whisper.ensure_model(app, model)?;
     let slack = local::model(&served.model).filter(|m| m.short_context).map(|m| m.context_slack);
     Ok(Picked {
         transcriber: Box::new(WhisperServerTranscriber::new(&served.url, slack)),
         label: format!("local {}/{}", served.runtime, served.model),
         estimate_key: estimate::key("local", &served.runtime, &served.model),
     })
+}
+
+/// The engine for a phone request naming [model]: a downloaded local model, the cloud model
+/// set in the app, or else the PC's own. One local model at a time.
+pub fn transcriber_for(app: &AppHandle, settings: &Settings, model: Option<&str>) -> Result<Picked, String> {
+    let layout = &app.state::<Core>().paths.layout;
+    if let Some(m) = model.and_then(local::model).filter(|m| layout.model_installed(m)) {
+        if !(settings.engine == EngineKind::Local && settings.local.model == m.id) {
+            return local_model(app, Some(m.id));
+        }
+    }
+    if model.is_some_and(|id| id == settings.server.model) && settings.engine != EngineKind::Server {
+        let mut cloud = settings.clone();
+        cloud.engine = EngineKind::Server;
+        return transcriber(app, &cloud);
+    }
+    transcriber(app, settings)
 }
 
 /// The engine the settings ask for, ready to use - or why not.

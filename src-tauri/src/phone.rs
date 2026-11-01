@@ -54,10 +54,11 @@ pub fn sync(app: &AppHandle) {
         service: "amber-pc",
         version: env!("CARGO_PKG_VERSION"),
         // Read per request, so a new key takes effect at once.
-        keys: Arc::new(move || vec![api::AccessKey::new("Phone", &k.state::<Core>().key(KEY_ID).unwrap_or_default())]),
+        keys: Arc::new(move || access_keys(&k.state::<Core>())),
         // The PC keeps one speech model loaded for its own dictations: whatever the phone names,
         // it gets that one.
-        engine: Arc::new(move |_model| crate::dictation::transcriber(&e, &e.state::<Core>().settings()).map(|p| p.transcriber)),
+        // The model the phone chose (already one its key may use), or the PC's own.
+        engine: Arc::new(move |model| crate::dictation::transcriber_for(&e, &e.state::<Core>().settings(), model).map(|p| p.transcriber)),
         models: Arc::new(move || models(&m.state::<Core>())),
         // Like the PC's own dictations: fillers out, the model's tidy-up if it is on and
         // ready - never a wait for a model that is still loading.
@@ -81,7 +82,7 @@ pub fn sync(app: &AppHandle) {
         // takes longer than it waits.
         chat: Arc::new(move |request| {
             let settings = c.state::<Core>().settings();
-            let cleaner = crate::llm::cleaner(&c, &settings, true).map_err(|e| (503, e))?;
+            let cleaner = crate::llm::cleaner_for(&c, &settings, request["model"].as_str()).map_err(|e| (503, e))?;
             cleaner.forward(request).map_err(|e| {
                 let status = match e.kind {
                     ErrorKind::Timeout => 504,
@@ -111,16 +112,31 @@ pub fn sync(app: &AppHandle) {
     }
 }
 
-/// The access key, created on first use.
+/// The first access key's secret (the one of 0.4.x), created on first use.
 fn key(core: &Core) -> String {
-    if let Some(k) = core.key(KEY_ID) {
+    secret(core, KEY_ID)
+}
+
+/// A key's secret from the PC's secret store, created on first use.
+fn secret(core: &Core, id: &str) -> String {
+    if let Some(k) = core.key(id) {
         return k;
     }
     let k = api::new_key();
-    if let Err(e) = core.set_key(KEY_ID, Some(k.clone())) {
+    if let Err(e) = core.set_key(id, Some(k.clone())) {
         crate::diag::error(format!("phone API key not saved: {e}"));
     }
     k
+}
+
+/// The ways in: the keys in the settings with their secrets.
+fn access_keys(core: &Core) -> Vec<api::AccessKey> {
+    core.settings()
+        .phone
+        .keys
+        .iter()
+        .map(|k| api::AccessKey { name: k.name.clone(), secret: secret(core, &k.id), models: k.models.clone(), per_day: k.per_day })
+        .collect()
 }
 
 pub fn new_key(core: &Core) -> Result<(), String> {
@@ -182,44 +198,25 @@ pub fn info(core: &Core) -> Info {
     }
 }
 
-/// What the phone's choice of models shows: the speech model and the cleanup model this PC
-/// uses - the cleanup only once it can run.
+/// What the phone may choose among: every downloaded model and the cloud models set in the
+/// app (when they can run), the PC's own as the default.
 fn models(core: &Core) -> Vec<api::ModelInfo> {
     use amber_core::local;
     use amber_core::providers;
-    use amber_core::settings::EngineKind;
     let s = core.settings();
     let layout = &core.paths.layout;
-    let mut out = Vec::new();
-    let speech = match s.engine {
-        EngineKind::Local => local::model(&s.local.model).map(|m| {
-            let on = local::runtime(&s.local.runtime).map_or("this PC", |r| r.label);
-            (m.id.to_string(), m.label.to_string(), format!("on this PC · {on}"))
-        }),
-        EngineKind::Server => providers::by_id(&s.server.provider).map(|p| (s.server.model.clone(), s.server.model.clone(), format!("through this PC · {}", p.name))),
+    let rt = local::runtime(&s.local.runtime).filter(|rt| layout.runtime_installed(rt));
+    let llm_rt = local::llm_runtime(&s.cleanup.local_runtime).filter(|rt| layout.llm_runtime_installed(rt));
+    let ready = |provider: &str| providers::by_id(provider).is_some_and(|p| !p.needs_key || core.has_key(p.id));
+    let installed = amber_core::offer::Installed {
+        speech: if rt.is_some() { local::MODELS.iter().filter(|m| layout.model_installed(m)).map(|m| m.id.to_string()).collect() } else { Vec::new() },
+        speech_runtime: rt.map_or("this PC", |r| r.label).to_string(),
+        llms: if llm_rt.is_some() { local::LLM_MODELS.iter().filter(|m| layout.llm_model_installed(m)).map(|m| m.id.to_string()).collect() } else { Vec::new() },
+        llm_runtime: llm_rt.map_or("this PC", |r| r.label).to_string(),
+        cloud_speech: ready(&s.server.provider),
+        cloud_cleanup: ready(&s.cleanup.provider),
     };
-    if let Some((id, label, note)) = speech {
-        out.push(api::ModelInfo { id, kind: api::ModelKind::Speech, label, note, default: true });
-    }
-    let c = &s.cleanup;
-    let cleanup = match c.engine {
-        EngineKind::Local => match (local::llm_runtime(&c.local_runtime), local::llm_model(&c.local_model)) {
-            (Some(rt), Some(m)) if layout.llm_runtime_installed(rt) && layout.llm_model_installed(m) => {
-                Some((m.id.to_string(), m.label.to_string(), format!("on this PC · {}", rt.label)))
-            }
-            _ => None,
-        },
-        EngineKind::Server => providers::by_id(&c.provider)
-            .filter(|p| !c.model.trim().is_empty() && (!p.needs_key || core.has_key(p.id)))
-            .map(|p| {
-                let label = p.chat_model(&c.model).map_or(c.model.clone(), |m| m.label.to_string());
-                (c.model.clone(), label, format!("through this PC · {}", p.name))
-            }),
-    };
-    if let Some((id, label, note)) = cleanup {
-        out.push(api::ModelInfo { id, kind: api::ModelKind::Cleanup, label, note, default: true });
-    }
-    out
+    amber_core::offer::pc_models(&s, &installed)
 }
 
 fn qr_svg(text: &str) -> Option<String> {
