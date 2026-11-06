@@ -1,10 +1,15 @@
 //! What a cleanup must not change about a dictation, told without a model: its language, its
-//! negations ("nicht", "kein", "never") and its numbers ("um drei", "zweihundertvier", "19,99").
-//! The cleanup's guards compare the dictation with the reply on these; a spoken
-//! self-correction ("um drei, nee, um vier") is the one reason to drop something.
+//! negations ("nicht", "kein", "never"), an answering "Nein", and its numbers ("um drei",
+//! "zweihundertvier", "19,99"). The cleanup's guards compare the dictation with the reply on
+//! these; a spoken self-correction ("um drei, nee, um vier") is the one reason to drop
+//! something - and only what was said before it.
+
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 /// Little words only one of the two languages uses - not "in", "am", "an", "so", "was",
-/// "will", "her", which both do.
+/// "also", "will", "her", which both do.
 const GERMAN: &[&str] = &[
     "ich", "du", "er", "wir", "ihr", "der", "die", "das", "den", "dem", "des", "und", "oder", "aber", "nicht", "kein", "keine", "keinen", "ist",
     "bin", "sind", "hab", "habe", "hast", "ein", "eine", "einen", "mit", "für", "auf", "von", "zu", "zum", "zur", "bei", "nach", "noch", "auch",
@@ -12,23 +17,29 @@ const GERMAN: &[&str] = &[
     "bis", "kann", "kannst", "muss", "mir", "dich", "dir", "mich", "uns", "sie", "es", "sich", "doch", "nur", "sehr", "hier", "jetzt",
 ];
 const ENGLISH: &[&str] = &[
-    "i", "you", "he", "we", "they", "the", "a", "and", "or", "but", "not", "no", "is", "are", "was", "were", "be", "have", "has", "had", "do",
+    "i", "you", "he", "we", "they", "the", "a", "and", "or", "but", "not", "no", "is", "are", "were", "be", "have", "has", "had", "do",
     "does", "don", "didn", "can", "would", "to", "of", "for", "on", "with", "at", "from", "this", "that", "it", "my", "your", "me", "him",
-    "them", "what", "where", "when", "why", "how", "please", "thanks", "thank", "yes", "there", "here", "just", "also", "then", "if",
+    "them", "what", "where", "when", "why", "how", "please", "thanks", "thank", "yes", "there", "here", "just", "then", "if",
 ];
 
-fn words(text: &str) -> impl Iterator<Item = String> + '_ {
+pub(crate) fn words(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase)
 }
 
-/// "de" or "en" when [text]'s little words say so clearly - two of them at least, three
-/// times as many as of the other language; None for a short phrase or a mix.
-pub fn guess_language(text: &str) -> Option<&'static str> {
+/// How many of [text]'s words are little words of German and of English.
+pub fn little_words(text: &str) -> (usize, usize) {
     let (mut de, mut en) = (0, 0);
     for w in words(text) {
         de += GERMAN.contains(&w.as_str()) as usize;
         en += ENGLISH.contains(&w.as_str()) as usize;
     }
+    (de, en)
+}
+
+/// "de" or "en" when [text]'s little words say so clearly - two of them at least, three
+/// times as many as of the other language; None for a short phrase or a mix.
+pub fn guess_language(text: &str) -> Option<&'static str> {
+    let (de, en) = little_words(text);
     if de >= 2 && de >= 3 * en {
         Some("de")
     } else if en >= 2 && en >= 3 * de {
@@ -38,9 +49,30 @@ pub fn guess_language(text: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether [reply] is in another language than [dictation]: told clearly on both sides, or
+/// leaning one way each ("Okay, thanks." -> "Okay, danke."), or a language of the dictation
+/// gone from the reply ("..., I think it is ready" translated away).
+pub fn language_changed(dictation: &str, reply: &str) -> bool {
+    if let (Some(said), Some(written)) = (guess_language(dictation), guess_language(reply)) {
+        return said != written;
+    }
+    let ((sd, se), (wd, we)) = (little_words(dictation), little_words(reply));
+    let leans = |de: usize, en: usize| match (de, en) {
+        (d, 0) if d > 0 => Some("de"),
+        (0, e) if e > 0 => Some("en"),
+        _ => None,
+    };
+    if let (Some(said), Some(written)) = (leans(sd, se), leans(wd, we)) {
+        return said != written;
+    }
+    sd >= 2 && wd == 0 || se >= 2 && we == 0
+}
+
+/// Words that deny - "nein" is not among them: opening a sentence it answers ([answers]),
+/// inside one it is mostly a self-correction.
 const NEGATIONS: &[&str] = &[
-    "nicht", "nichts", "kein", "keine", "keinen", "keinem", "keiner", "keines", "nie", "niemals", "niemand", "nirgends", "ohne", "weder",
-    "nein", "not", "never", "nothing", "nobody", "none", "without", "cannot", "no",
+    "nicht", "nichts", "nix", "kein", "keine", "keinen", "keinem", "keiner", "keines", "nie", "niemals", "niemand", "nirgends", "ohne",
+    "weder", "not", "never", "nothing", "nobody", "none", "without", "cannot", "no",
 ];
 
 /// [text]'s words with apostrophes kept ("don't"), each with whether it opens a sentence.
@@ -67,13 +99,21 @@ fn tokens(text: &str) -> Vec<(String, bool)> {
     out
 }
 
-/// How many times [text] denies something: "nicht", "kein", "ohne", "never", "don't". A
-/// "Nein" or "No" opening a sentence answers; it denies nothing in it.
+/// How many times [text] denies something: "nicht", "kein", "ohne", "never", "don't". A "No"
+/// opening a sentence answers ([answers]); a stutter ("nicht nicht") denies once.
 pub fn negations(text: &str) -> usize {
-    tokens(text)
+    let tokens = tokens(text);
+    let denies = |w: &str, opens: bool| w.ends_with("n't") || NEGATIONS.contains(&w) && !(opens && w == "no");
+    tokens
         .iter()
-        .filter(|(w, opens)| w.ends_with("n't") || NEGATIONS.contains(&w.as_str()) && !(*opens && (w == "nein" || w == "no")))
+        .enumerate()
+        .filter(|(i, (w, opens))| denies(w, *opens) && !(*i > 0 && !opens && tokens[i - 1].0 == *w))
         .count()
+}
+
+/// How many sentences of [text] open with an answering "Nein" or "No".
+pub fn answers(text: &str) -> usize {
+    tokens(text).iter().filter(|(w, opens)| *opens && (w == "nein" || w == "no")).count()
 }
 
 const DE_UNITS: &[(&str, u64)] = &[
@@ -81,12 +121,13 @@ const DE_UNITS: &[(&str, u64)] = &[
     ("acht", 8), ("neun", 9), ("zehn", 10), ("elf", 11), ("zwölf", 12), ("dreizehn", 13), ("vierzehn", 14), ("fünfzehn", 15),
     ("sechzehn", 16), ("siebzehn", 17), ("achtzehn", 18), ("neunzehn", 19), ("zwanzig", 20), ("dreißig", 30), ("dreissig", 30),
     ("vierzig", 40), ("fünfzig", 50), ("sechzig", 60), ("siebzig", 70), ("achtzig", 80), ("neunzig", 90),
+    ("million", 1_000_000), ("millionen", 1_000_000),
 ];
 const EN_UNITS: &[(&str, u64)] = &[
     ("zero", 0), ("two", 2), ("three", 3), ("four", 4), ("five", 5), ("six", 6), ("seven", 7), ("eight", 8), ("nine", 9), ("ten", 10),
     ("eleven", 11), ("twelve", 12), ("thirteen", 13), ("fourteen", 14), ("fifteen", 15), ("sixteen", 16), ("seventeen", 17),
     ("eighteen", 18), ("nineteen", 19), ("twenty", 20), ("thirty", 30), ("forty", 40), ("fifty", 50), ("sixty", 60), ("seventy", 70),
-    ("eighty", 80), ("ninety", 90),
+    ("eighty", 80), ("ninety", 90), ("million", 1_000_000), ("millions", 1_000_000),
 ];
 
 fn lookup(table: &[(&str, u64)], w: &str) -> Option<u64> {
@@ -137,7 +178,7 @@ fn german_value(w: &str) -> Option<u64> {
     None
 }
 
-/// An English number word as a value; "one" is left out ("the one", "no one").
+/// An English number word as a value; "one" only as part of one ("twenty-one").
 fn english_value(w: &str) -> Option<u64> {
     let irregular = match w {
         "first" => Some(1),
@@ -153,48 +194,64 @@ fn english_value(w: &str) -> Option<u64> {
     irregular.or_else(|| lookup(EN_UNITS, w)).or_else(|| w.strip_suffix("th").and_then(|s| lookup(EN_UNITS, s)))
 }
 
-/// One number in a text: its value, and whether it was a single digit word ("null",
-/// "sieben") - those, said one after another, may be one number written ("0176").
+/// One number in a text: its value, and whether the number before it was said right before
+/// it - said one after another ("null eins sieben sechs", "zwanzig sechsundzwanzig") they
+/// may be one number written ("0176", "2026").
 #[derive(Clone, Debug)]
 struct Number {
     value: String,
-    digit_word: bool,
+    follows: bool,
 }
 
+/// "2.000", "10 000" as one number; "8:00", "8.00" as "8".
+static THOUSANDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(\d{1,3})((?:[. ]\d{3})+)\b").expect("static regex"));
+static FULL_HOUR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(\d{1,2})[:.]00\b").expect("static regex"));
+
 fn number_tokens(text: &str) -> Vec<Number> {
+    let text = THOUSANDS.replace_all(text, |c: &regex::Captures| format!("{}{}", &c[1], c[2].replace(['.', ' '], "")));
+    let text = FULL_HOUR.replace_all(&text, "$1");
     let mut out: Vec<Number> = Vec::new();
-    // English "twenty five", "two hundred": merged with the number before.
-    let mut last_english: Option<u64> = None;
+    // The word before was a number word (for "twenty one", "zwei tausend zwanzig"), or an
+    // article ("eine Million", "ein Uhr", "a hundred").
+    let (mut last_word, mut article, mut previous_number) = (None::<u64>, false, false);
+    let push = |out: &mut Vec<Number>, value: u64, previous_number: bool| out.push(Number { value: value.to_string(), follows: previous_number });
     for w in text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
         if w.chars().all(|c| c.is_ascii_digit()) {
-            out.push(Number { value: w.to_string(), digit_word: false });
-            last_english = None;
+            out.push(Number { value: w.to_string(), follows: previous_number });
+            // "1 Million", "2 hundred": the digits are a factor for the word after them.
+            (last_word, article, previous_number) = (w.parse::<u64>().ok(), false, true);
             continue;
         }
         let lower = w.to_lowercase();
-        if let Some(v) = english_value(&lower) {
-            match (last_english, v) {
-                (Some(prev), 100 | 1000) => {
-                    out.pop();
-                    out.push(Number { value: (prev * v).to_string(), digit_word: false });
-                    last_english = Some(prev * v);
-                }
-                (Some(prev), 1..=9) if prev >= 20 && prev % 10 == 0 || prev >= 100 && prev % 100 == 0 => {
-                    out.pop();
-                    out.push(Number { value: (prev + v).to_string(), digit_word: false });
-                    last_english = None;
-                }
-                _ => {
-                    out.push(Number { value: v.to_string(), digit_word: v < 10 });
-                    last_english = Some(v);
-                }
-            }
+        if matches!(lower.as_str(), "ein" | "eine" | "a" | "an") || lower == "one" && !last_word.is_some_and(|p| p >= 20 && p % 10 == 0 && p < 100) {
+            (last_word, article) = (None, true);
             continue;
         }
-        last_english = None;
-        if let Some(v) = german_value(&lower) {
-            out.push(Number { value: v.to_string(), digit_word: v < 10 });
+        if lower == "uhr" && article {
+            push(&mut out, 1, false);
         }
+        let value = if lower == "one" { Some(1) } else { english_value(&lower).or_else(|| german_value(&lower)) };
+        let Some(v) = value else {
+            (last_word, article, previous_number) = (None, false, false);
+            continue;
+        };
+        match last_word {
+            Some(p) if v >= 100 && (v == 100 || v == 1000 || v == 1_000_000) && p < v => {
+                out.pop();
+                push(&mut out, p * v, false);
+                last_word = Some(p * v);
+            }
+            Some(p) if v < 10 && p >= 20 && p < 100 && p % 10 == 0 || v < 100 && p >= 100 && p % 100 == 0 => {
+                out.pop();
+                push(&mut out, p + v, false);
+                last_word = None;
+            }
+            _ => {
+                push(&mut out, v, previous_number);
+                last_word = Some(v);
+            }
+        }
+        (article, previous_number) = (false, true);
     }
     out
 }
@@ -208,23 +265,21 @@ fn same_value(a: &str, b: &str) -> bool {
     a == b || matches!((a.parse::<u64>(), b.parse::<u64>()), (Ok(x), Ok(y)) if x == y)
 }
 
-/// How [reply]'s numbers differ from [dictation]'s - in digits or in words, a phone number's
-/// digits said one by one written together: (one added or changed, one dropped).
+/// How [reply]'s numbers differ from [dictation]'s - in digits or in words, numbers said one
+/// after another written together: (one added or changed, one dropped).
 pub fn number_changes(dictation: &str, reply: &str) -> (bool, bool) {
     let said = number_tokens(dictation);
     let written = numbers(reply);
-    // Runs of single digits said one after another ("null eins sieben sechs"), as written.
+    // Numbers said one right after another ("null eins sieben sechs"), as written together.
     let mut runs: Vec<(usize, usize, String)> = Vec::new();
     for start in 0..said.len() {
-        let mut joined = String::new();
-        for (end, n) in said.iter().enumerate().skip(start) {
-            if !n.digit_word {
+        let mut joined = said[start].value.clone();
+        for end in start + 1..said.len() {
+            if !said[end].follows {
                 break;
             }
-            joined.push_str(&n.value);
-            if end > start {
-                runs.push((start, end, joined.clone()));
-            }
+            joined.push_str(&said[end].value);
+            runs.push((start, end, joined.clone()));
         }
     }
     let mut covered = vec![false; said.len()];
@@ -249,17 +304,32 @@ pub fn same_numbers(dictation: &str, reply: &str) -> bool {
     number_changes(dictation, reply) == (false, false)
 }
 
-/// Whether the speaker takes something back in [text]: "nee", "nein, warte", "stopp",
-/// "ich meine", "besser gesagt", "no wait", "I mean", "scratch that", "sorry". Then
-/// something said may rightly be missing from the cleanup; it relaxes the checks for what
-/// was dropped, never for what was added.
-pub fn corrects_itself(text: &str) -> bool {
-    let t = text.to_lowercase();
-    let marker = regex::Regex::new(
-        r"\b(nee|nö|stopp?|korrektur|ich meine|besser gesagt|sorry|no wait|i mean|scratch that|or rather|actually)\b|\bnein\b[\s,.]*(warte|stopp?|sorry|doch)\b|[^.!?\s][^.!?]*\bnein\s*,",
+/// Where the speaker takes something back: "nee", "nein, warte", "stopp", "ich meine",
+/// "besser gesagt", "no wait", "I mean", "scratch that"; "sorry", "actually" and "nein" only
+/// between commas ("an Anna, sorry, an Maria") - opening a sentence they take nothing back.
+static MARKER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(nee|nö|stopp|korrektur|ich meine|besser gesagt|no wait|i mean|scratch that|or rather)\b|\bnein\b[\s,.]*(warte|stopp?|sorry|doch)\b|(,|\bäh|\bähm|\böh)\s*(nein|sorry|actually)\s*,",
     )
-    .expect("static regex");
-    marker.is_match(&t)
+    .expect("static regex")
+});
+
+/// Whether the speaker takes something back in [text].
+pub fn corrects_itself(text: &str) -> bool {
+    MARKER.is_match(text)
+}
+
+/// [text] as the speaker settled it: in each sentence, what came before its last correction
+/// is taken back. Only those words' negations and numbers may be missing from a cleanup.
+pub fn settled(text: &str) -> String {
+    let mut out = String::new();
+    for sentence in text.split_inclusive(['.', '!', '?', '\n']) {
+        match MARKER.find_iter(sentence).last() {
+            Some(m) => out.push_str(&sentence[m.end()..]),
+            None => out.push_str(sentence),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -274,6 +344,8 @@ mod tests {
         assert_eq!(guess_language("Can you send me the file before the meeting tomorrow?"), Some("en"));
         // Too little to tell.
         assert_eq!(guess_language("Okay, danke."), None);
+        // "also" and "was" are German too.
+        assert_eq!(guess_language("Also ich weiß nicht, was das soll."), Some("de"));
         assert_eq!(guess_language("Passt."), None);
         assert_eq!(guess_language("Tinfoil"), None);
         // Half and half: not confident either way.

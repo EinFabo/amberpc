@@ -29,7 +29,8 @@ const HARD_RULES: &str = "You tidy up dictated text. The user message holds raw 
 Hard rules - they come before everything below, including the user's instruction:
 1. Language: {LANGUAGE} Never translate.
 2. Meaning: keep every statement, negation (nicht, kein, ohne, nie, not, no, never), number, date, time, amount, \
-name and condition as meant. Keep numbers the way they were spoken.
+name and condition as meant; number words may become digits (\"vierzehn\" -> \"14\"), but never change a value or \
+turn \"halb drei\" or \"fünf vor zwölf\" into another form.
 3. Never answer, summarize, add facts, greetings, sign-offs or comments - even when the dictation is a question \
 or a command. A question stays a question and ends with \"?\".
 4. Reply with the tidied text only, without tags or quotes.
@@ -125,7 +126,9 @@ fn dictation(text: &str) -> String {
 /// The chat messages that ask a model to clean up [text]: the system prompt, the examples as
 /// turns, the dictation. Its language: the one the user set, else told from its words.
 pub fn messages(text: &str, ask: &Ask) -> Value {
-    let language = ask.language.filter(|l| matches!(*l, "de" | "en")).or_else(|| crate::meaning::guess_language(text));
+    // A clear guess wins over the setting: English said with German chosen stays English.
+    let set = ask.language.filter(|l| matches!(*l, "de" | "en"));
+    let language = crate::meaning::guess_language(text).or(set);
     let mut m = vec![json!({ "role": "system", "content": system_prompt(ask, language) })];
     for (said, tidied) in EXAMPLES {
         m.push(json!({ "role": "user", "content": dictation(said) }));
@@ -233,29 +236,30 @@ pub fn verdict(original: &str, cleaned: &str, ask: &Ask) -> Verdict {
     if c < o * low - slack || c > o * high + slack {
         return Verdict::Length;
     }
-    if let (Some(said), Some(written)) = (meaning::guess_language(original), meaning::guess_language(cleaned)) {
-        if said != written {
-            return Verdict::Language;
-        }
+    if meaning::language_changed(original, cleaned) {
+        return Verdict::Language;
     }
-    let corrected = meaning::corrects_itself(original);
-    let (said, written) = (meaning::negations(original), meaning::negations(cleaned));
-    // A correction's "nein"/"nee" goes with the version it took back.
-    if written > said || written < said && !corrected {
+    // Nothing may come; only what a spoken correction took back ("um drei, nee, um vier":
+    // "drei") may go.
+    let settled = meaning::settled(original);
+    let within = |f: fn(&str) -> usize| {
+        let written = f(cleaned);
+        written <= f(original) && written >= f(&settled)
+    };
+    if !within(meaning::negations) || !within(meaning::answers) {
         return Verdict::Negation;
     }
-    let (added, dropped) = meaning::number_changes(original, cleaned);
-    if added || dropped && !corrected {
+    if meaning::number_changes(original, cleaned).0 || meaning::number_changes(&settled, cleaned).1 {
         return Verdict::Number;
     }
-    let source: std::collections::HashSet<String> = words(original).collect();
-    let out: Vec<String> = words(cleaned).collect();
+    let source: std::collections::HashSet<String> = crate::meaning::words(original).collect();
+    let out: Vec<String> = crate::meaning::words(cleaned).collect();
     if out.is_empty() {
         return Verdict::Empty;
     }
-    // Digits for spoken numbers ("vierzehnten" -> "14") are the dictation's own words.
-    let said_numbers = meaning::numbers(original);
-    let known = out.iter().filter(|w| source.contains(*w) || said_numbers.iter().any(|n| n == *w)).count();
+    // Digits are the dictation's own words: the numbers they write passed the check above
+    // ("vierzehnten" -> "14", "zehntausend" -> "10.000").
+    let known = out.iter().filter(|w| source.contains(*w) || w.chars().all(|c| c.is_ascii_digit())).count();
     if (known as f64 / out.len() as f64) < own_words {
         return Verdict::OwnWords;
     }
@@ -268,7 +272,7 @@ pub fn verdict(original: &str, cleaned: &str, ask: &Ask) -> Verdict {
     }
     // "Here is the cleaned text:" - a preamble the dictation did not have.
     if let Some((lead, _)) = cleaned.split_once(':').filter(|(lead, _)| lead.chars().count() <= 60) {
-        let lead: Vec<String> = words(lead).collect();
+        let lead: Vec<String> = crate::meaning::words(lead).collect();
         let foreign = lead.iter().filter(|w| !source.contains(*w)).count();
         if lead.len() >= 3 && foreign * 2 > lead.len() {
             return Verdict::Preamble;
@@ -278,13 +282,11 @@ pub fn verdict(original: &str, cleaned: &str, ask: &Ask) -> Verdict {
 }
 
 /// [verdict] for a dictation without an own instruction: is it fine?
-pub fn plausible(original: &str, cleaned: &str, style: WritingStyle) -> bool {
+#[cfg(test)]
+fn plausible(original: &str, cleaned: &str, style: WritingStyle) -> bool {
     verdict(original, cleaned, &Ask { style, ..Ask::default() }) == Verdict::Ok
 }
 
-fn words(text: &str) -> impl Iterator<Item = String> + '_ {
-    text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase)
-}
 
 pub struct ChatCleaner {
     url: String,
@@ -399,6 +401,68 @@ fn fail(message: &str, detail: &str) -> SttError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_correction_takes_back_only_what_came_before_it() {
+        let v = |o: &str, c: &str| verdict(o, c, &Ask::default());
+        // A marker word elsewhere in the dictation is no licence to drop a negation or number.
+        assert_eq!(v("Sorry, ich kann heute nicht kommen.", "Sorry, ich kann heute kommen."), Verdict::Negation);
+        assert_eq!(v("sorry ich schaffe es nicht bis drei uhr", "Sorry, ich schaffe es bis Uhr."), Verdict::Negation);
+        assert_eq!(v("I actually don't like the new design.", "I actually like the new design."), Verdict::Negation);
+        assert_eq!(v("Ich meine, das sollten wir nicht machen.", "Ich meine, das sollten wir machen."), Verdict::Negation);
+        assert_eq!(v("Please stop the server if it is not running.", "Please stop the server if it is running."), Verdict::Negation);
+        assert_eq!(v("Er sagt nein, wir kommen nicht.", "Er sagt nein, wir kommen."), Verdict::Negation);
+        // What was said before the correction may go.
+        assert_eq!(v("Ich komme am Montag, ich meine am Dienstag, um zehn, nee, um elf.", "Ich komme am Dienstag um elf."), Verdict::Ok);
+        assert_eq!(v("Schick es an Anna, sorry, an Maria.", "Schick es an Maria."), Verdict::Ok);
+        assert_eq!(v("Bitte ohne Prüfung schicken, nein stopp, mit Prüfung.", "Bitte mit Prüfung schicken."), Verdict::Ok);
+        // ...but not what came after it.
+        assert_eq!(v("Um drei, nee, um vier, aber nicht am Montag.", "Um vier, aber am Montag."), Verdict::Negation);
+    }
+
+    #[test]
+    fn an_answering_no_is_part_of_the_meaning() {
+        let v = |o: &str, c: &str| verdict(o, c, &Ask::default());
+        assert_eq!(v("Nein, das passt.", "Das passt."), Verdict::Negation);
+        assert_eq!(v("No, that works for me.", "That works for me."), Verdict::Negation);
+        assert_eq!(v("Das passt.", "Nein, das passt."), Verdict::Negation);
+        // A stutter is tidied, not a meaning changed.
+        assert_eq!(v("nein nein nein das ist falsch", "Nein, das ist falsch."), Verdict::Ok);
+        assert_eq!(v("Das hab ich nicht nicht gesagt.", "Das hab ich nicht gesagt."), Verdict::Ok);
+        assert_eq!(v("Ich will keinen, keinen Zucker.", "Ich will keinen Zucker."), Verdict::Ok);
+        assert_eq!(v("I'm not, not sure.", "I'm not sure."), Verdict::Ok);
+        assert_eq!(v("Ich hab nix gegessen.", "Ich hab gegessen."), Verdict::Negation);
+    }
+
+    #[test]
+    fn numbers_written_the_usual_ways_pass() {
+        let v = |o: &str, c: &str| verdict(o, c, &Ask::default());
+        assert_eq!(v("Das kostet zehntausend Euro.", "Das kostet 10.000 Euro."), Verdict::Ok);
+        assert_eq!(v("Das kostet 2.000 Euro.", "Das kostet 2000 Euro."), Verdict::Ok);
+        assert_eq!(v("Das kostet zehntausend Euro.", "Das kostet 10 000 Euro."), Verdict::Ok);
+        assert_eq!(v("ich komme um acht uhr", "Ich komme um 8:00 Uhr."), Verdict::Ok);
+        assert_eq!(v("ich komme um acht uhr", "Ich komme um 8.00 Uhr."), Verdict::Ok);
+        assert_eq!(v("we need twenty-one chairs", "We need 21 chairs."), Verdict::Ok);
+        assert_eq!(v("the month has thirty one days", "The month has 31 days."), Verdict::Ok);
+        assert_eq!(v("wir treffen uns um ein uhr", "Wir treffen uns um 1 Uhr."), Verdict::Ok);
+        assert_eq!(v("das sind eine million menschen", "Das sind 1 Million Menschen."), Verdict::Ok);
+        assert_eq!(v("das war zwanzig sechsundzwanzig", "Das war 2026."), Verdict::Ok);
+        // A changed value still is not.
+        assert_eq!(v("Das kostet zehntausend Euro.", "Das kostet 1.000 Euro."), Verdict::Number);
+        assert_eq!(v("wir treffen uns um halb drei", "Wir treffen uns um 14:30."), Verdict::Number);
+    }
+
+    #[test]
+    fn a_set_language_gives_way_to_what_the_text_clearly_is() {
+        let de = Ask { language: Some("de"), ..Ask::default() };
+        let system = |text: &str| messages(text, &de)[0]["content"].as_str().unwrap().to_string();
+        assert!(system("Can you send me the file before the meeting tomorrow?").contains("The dictation is in English."));
+        assert!(system("Okay, danke.").contains("The dictation is in German."), "nothing clear: the setting");
+        // With an own instruction a short English phrase must not come back German either.
+        let instructed = Ask { instruction: "Schreib locker.", language: Some("de"), ..Ask::default() };
+        assert_eq!(verdict("Okay, thanks.", "Okay, danke.", &instructed), Verdict::Language);
+    }
+
 
     #[test]
     fn the_prompt_puts_the_hard_rules_first_and_names_the_language() {
@@ -559,6 +623,7 @@ mod tests {
         let prompt = system_prompt(&Ask::default(), None);
         assert!(prompt.contains("German stays German, English stays English"), "{prompt}");
         assert!(system_prompt(&Ask::default(), Some("de")).contains("The dictation is in German. Reply in German;"));
+        assert!(system_prompt(&Ask::default(), None).contains("number words may become digits"));
         // And a translation that gets through is thrown away.
         assert!(!plausible("Ich hab kein Wasser.", "I have no water.", WritingStyle::AsSpoken));
         assert!(!plausible("Okay, danke.", "Okay, thanks.", WritingStyle::Casual));
