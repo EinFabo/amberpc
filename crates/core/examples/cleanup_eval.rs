@@ -96,7 +96,7 @@ fn main() {
         let case: Value = serde_json::from_str(line).unwrap();
         let input = case["input"].as_str().unwrap();
         let style: WritingStyle = serde_json::from_value(case["style"].clone()).unwrap_or_default();
-        let ask = Ask { style, instruction: case["instruction"].as_str().unwrap_or(""), vocabulary: case["vocabulary"].as_str().unwrap_or("") };
+        let ask = Ask { style, instruction: case["instruction"].as_str().unwrap_or(""), vocabulary: case["vocabulary"].as_str().unwrap_or(""), language: case["language"].as_str() };
         let messages = if variant == "a" { messages_a(input, &ask) } else { cleanup::messages(input, &ask) };
         let body = json!({ "model": model, "temperature": 0, "max_tokens": 512, "messages": messages });
         let started = Instant::now();

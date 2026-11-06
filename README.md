@@ -86,10 +86,17 @@ Between recognition and inserting (*Settings → Cleanup*):
   stopp, um vier" → "um vier"), false starts and punctuation. Locally with llama.cpp
   `b11981` and Qwen3 4B Instruct 2507 (Apache 2.0; CUDA 641 MB + model 2.4 GB, ~3 GB of
   graphics memory), or through Groq, OpenAI or an own server with the Engine page's key.
-  The prompt and the guards come from Amber for Android: the dictation is data, never
-  instructions; a reply that is cut off, empty, of implausible length or made of words that
-  were not dictated (an answer instead of a cleanup) is thrown away and the text goes in as
-  recognized. A dictation never waits for a model that is still loading.
+  The prompt puts hard rules first - the dictation's language (named when one is chosen or
+  clear from its words), every negation, number, name and condition kept, never an answer -
+  then what to fix, self-corrections ("um drei, nee, um vier" → "um vier"), the style with
+  what it may not change, and the program's own instruction, fenced: tone and form only. A
+  few example dictations go before the real one. A reply is thrown away and the text goes
+  in as recognized when it is cut off, empty, of implausible length, made of words that were
+  not dictated, in another language, or has lost or gained a negation or a number (what a
+  spoken self-correction took back may go) - the log names the reason. Measured with
+  `tools/cleanup-eval` (76 cases, Qwen3 4B): the prompt of 0.4.6 got 7 wrong and 5 of them
+  through; this one gets 1 wrong and none through. A dictation never waits for a model that
+  is still loading.
 - **Per program** (*Settings → Programs*): a writing style - as spoken, casual (chats),
   formal (mail), concise (notes) - an own instruction, and the smart cleanup as set, always
   or never. The program is the window the dictation started in.

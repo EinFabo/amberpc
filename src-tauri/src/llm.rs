@@ -369,10 +369,13 @@ pub fn tidy(app: &AppHandle, s: &Settings, recognized: &str, profile: Option<&Pr
         return (text, None);
     }
     let started = Instant::now();
+    // One language chosen for recognition: the cleanup is told it; several: it tells by itself.
+    let languages = amber_core::engine::TranscribeOptions::new(&s.language, "");
     let ask = Ask {
         style: profile.map(|p| p.style).unwrap_or_default(),
         instruction: profile.map(|p| p.instruction.as_str()).unwrap_or(""),
         vocabulary: &s.vocabulary,
+        language: languages.fixed(),
     };
     // Never waits for a model that is still loading: the text goes in as recognized.
     match cleaner(app, s, false).and_then(|c| c.clean(&text, &ask).map_err(|e| format!("{} ({})", e.message, e.detail))) {

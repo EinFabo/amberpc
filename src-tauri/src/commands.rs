@@ -691,7 +691,8 @@ pub async fn cleanup_preview(app: AppHandle, text: String, style: amber_core::pr
             return Preview { fillers, smart: None, error: None, ms: 0 };
         }
         let t0 = Instant::now();
-        let ask = amber_core::cleanup::Ask { style, instruction: "", vocabulary: &s.vocabulary };
+        let languages = amber_core::engine::TranscribeOptions::new(&s.language, "");
+        let ask = amber_core::cleanup::Ask { style, instruction: "", vocabulary: &s.vocabulary, language: languages.fixed() };
         let result = crate::llm::cleaner(&app, &s, true).and_then(|c| c.clean(&fillers, &ask).map_err(|e| e.message));
         let ms = t0.elapsed().as_millis() as u64;
         match result {
