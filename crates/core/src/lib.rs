@@ -13,6 +13,7 @@ pub mod gesture;
 pub mod history;
 pub mod http;
 pub mod local;
+pub mod meaning;
 pub mod offer;
 pub mod profiles;
 pub mod providers;

@@ -72,6 +72,14 @@ pub fn system_prompt(ask: &Ask) -> String {
     p
 }
 
+/// The chat messages that ask a model to clean up [text].
+pub fn messages(text: &str, ask: &Ask) -> Value {
+    json!([
+        { "role": "system", "content": system_prompt(ask) },
+        { "role": "user", "content": format!("<dictation>\n{text}\n</dictation>") },
+    ])
+}
+
 pub fn chat_url(base_url: &str) -> String {
     let trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.ends_with("/chat/completions") {
@@ -103,52 +111,120 @@ pub fn unwrap(reply: &str) -> String {
     t.to_string()
 }
 
-/// A tidy-up neither halves nor doubles a text, and brings hardly any words of its own: a
-/// self-correction only deletes, a recognition fix changes a word here and there. A model
-/// that answered the dictation instead ("Wie spät ist es?" -> "Es ist drei Uhr.") fails the
-/// word test even when the length looks fine. A formal message may grow and rephrase, a note
-/// may shrink - the bounds follow the style.
-pub fn plausible(original: &str, cleaned: &str, style: WritingStyle) -> bool {
-    if cleaned.trim().is_empty() {
-        return false;
+/// Why a reply was refused - or that it was not. The reason goes to the log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Ok,
+    Empty,
+    /// Halved or doubled: an answer, a summary, text lost.
+    Length,
+    /// In another language than the dictation.
+    Language,
+    /// A negation ("nicht", "kein", "never") dropped or added - the meaning flipped.
+    Negation,
+    /// A number changed, added or dropped.
+    Number,
+    /// Too many words the dictation did not have: an answer or a rewrite.
+    OwnWords,
+    /// A question came back without its question mark: answered, not tidied.
+    Question,
+    /// A spoken line break lost.
+    LineBreaks,
+    /// "Here is the cleaned text:" in front.
+    Preamble,
+}
+
+impl Verdict {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Verdict::Ok => "ok",
+            Verdict::Empty => "empty",
+            Verdict::Length => "length changed too much",
+            Verdict::Language => "another language",
+            Verdict::Negation => "a negation dropped or added",
+            Verdict::Number => "a number changed",
+            Verdict::OwnWords => "too many words of its own",
+            Verdict::Question => "question answered",
+            Verdict::LineBreaks => "line breaks lost",
+            Verdict::Preamble => "a preamble added",
+        }
     }
-    let (low, high, own_words) = match style {
+}
+
+/// Whether [cleaned] is a tidy-up of [original] and nothing else. A tidy-up neither halves
+/// nor doubles a text and brings hardly any words of its own: a self-correction only deletes,
+/// a recognition fix changes a word here and there. A model that answered the dictation
+/// ("Wie spät ist es?" -> "Es ist drei Uhr.") fails the word test even when the length looks
+/// fine. The meaning is checked where a model turns it around with every other word kept: the
+/// language, the negations, the numbers - what a spoken self-correction took back may go,
+/// nothing may come. A formal message may grow, a note shrink; an own instruction may change
+/// more words, never the language or the meaning.
+pub fn verdict(original: &str, cleaned: &str, ask: &Ask) -> Verdict {
+    use crate::meaning;
+    if cleaned.trim().is_empty() {
+        return Verdict::Empty;
+    }
+    let (low, high, mut own_words) = match ask.style {
         WritingStyle::AsSpoken | WritingStyle::Casual => (0.4, 1.5, 0.7),
         WritingStyle::Formal => (0.4, 2.0, 0.5),
         WritingStyle::Concise => (0.25, 1.2, 0.6),
     };
+    if !ask.instruction.trim().is_empty() {
+        own_words = f64::min(own_words, 0.4);
+    }
     // A list's "- " and line breaks are layout, not growth.
     let (o, c) = (original.chars().count() as f64, cleaned.replace("\n- ", " ").chars().count() as f64);
     let slack = if o < 40.0 { 10.0 } else { 0.0 };
     if c < o * low - slack || c > o * high + slack {
-        return false;
+        return Verdict::Length;
+    }
+    if let (Some(said), Some(written)) = (meaning::guess_language(original), meaning::guess_language(cleaned)) {
+        if said != written {
+            return Verdict::Language;
+        }
+    }
+    let corrected = meaning::corrects_itself(original);
+    let (said, written) = (meaning::negations(original), meaning::negations(cleaned));
+    // A correction's "nein"/"nee" goes with the version it took back.
+    if written > said || written < said && !corrected {
+        return Verdict::Negation;
+    }
+    let (added, dropped) = meaning::number_changes(original, cleaned);
+    if added || dropped && !corrected {
+        return Verdict::Number;
     }
     let source: std::collections::HashSet<String> = words(original).collect();
     let out: Vec<String> = words(cleaned).collect();
     if out.is_empty() {
-        return false;
+        return Verdict::Empty;
     }
-    let known = out.iter().filter(|w| source.contains(*w)).count();
+    // Digits for spoken numbers ("vierzehnten" -> "14") are the dictation's own words.
+    let said_numbers = meaning::numbers(original);
+    let known = out.iter().filter(|w| source.contains(*w) || said_numbers.iter().any(|n| n == *w)).count();
     if (known as f64 / out.len() as f64) < own_words {
-        return false;
+        return Verdict::OwnWords;
     }
-    // A question that came back without its question mark was answered, not tidied.
     if original.contains('?') && !cleaned.contains('?') {
-        return false;
+        return Verdict::Question;
     }
     // Spoken line breaks are the user's; a tidy-up keeps them.
     if cleaned.matches('\n').count() < original.matches('\n').count() {
-        return false;
+        return Verdict::LineBreaks;
     }
     // "Here is the cleaned text:" - a preamble the dictation did not have.
     if let Some((lead, _)) = cleaned.split_once(':').filter(|(lead, _)| lead.chars().count() <= 60) {
         let lead: Vec<String> = words(lead).collect();
         let foreign = lead.iter().filter(|w| !source.contains(*w)).count();
         if lead.len() >= 3 && foreign * 2 > lead.len() {
-            return false;
+            return Verdict::Preamble;
         }
     }
-    true
+    Verdict::Ok
+}
+
+/// [verdict] for a dictation without an own instruction: is it fine?
+pub fn plausible(original: &str, cleaned: &str, style: WritingStyle) -> bool {
+    verdict(original, cleaned, &Ask { style, ..Ask::default() }) == Verdict::Ok
 }
 
 fn words(text: &str) -> impl Iterator<Item = String> + '_ {
@@ -189,10 +265,7 @@ impl ChatCleaner {
             "temperature": 0,
             // About as long as the dictation; bounds the bill if a model runs on.
             "max_tokens": text.chars().count() / 2 + 256 + REASONING_HEADROOM,
-            "messages": [
-                { "role": "system", "content": system_prompt(ask) },
-                { "role": "user", "content": format!("<dictation>\n{text}\n</dictation>") },
-            ],
+            "messages": messages(text, ask),
         });
         let reply = self.post(body)?;
         let choice = reply.pointer("/choices/0").ok_or_else(|| fail("The cleanup answer was empty.", ""))?;
@@ -207,10 +280,11 @@ impl ChatCleaner {
         let lead: String = text.chars().take_while(|c| *c == '\n').collect();
         let trail: String = text.chars().rev().take_while(|c| *c == '\n').collect();
         let cleaned = format!("{lead}{}{trail}", unwrap(content));
-        if !plausible(text, &cleaned, ask.style) {
+        let verdict = verdict(text, &cleaned, ask);
+        if verdict != Verdict::Ok {
             return Err(fail(
                 "The cleanup changed too much; kept the original.",
-                &format!("in={} out={}", text.chars().count(), cleaned.chars().count()),
+                &format!("rejected: {} (in={} out={})", verdict.reason(), text.chars().count(), cleaned.chars().count()),
             ));
         }
         Ok(cleaned)
@@ -270,6 +344,41 @@ fn fail(message: &str, detail: &str) -> SttError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reply_that_changes_the_meaning_is_refused_with_its_reason() {
+        let ask = Ask::default();
+        let v = |o: &str, c: &str| verdict(o, c, &ask);
+        // A negation dropped or added flips the meaning, every other word may stay.
+        assert_eq!(v("Ich komme heute nicht, aber morgen.", "Ich komme heute, aber morgen."), Verdict::Negation);
+        assert_eq!(v("Ich komme heute.", "Ich komme heute nicht."), Verdict::Negation);
+        // A number changed, added or dropped.
+        assert_eq!(v("Lass uns um drei treffen.", "Lass uns um vier treffen."), Verdict::Number);
+        assert_eq!(v("Wir brauchen fünf Stühle und zwei Tische.", "Wir brauchen fünf Stühle und Tische."), Verdict::Number);
+        // Another language.
+        assert_eq!(v("Ich hab kein Wasser, kannst du mir was bringen?", "I have no water, can you bring me some?"), Verdict::Language);
+        // A self-correction may drop the version taken back - also its number or negation.
+        assert_eq!(v("Lass uns um drei treffen, nee stopp, um vier.", "Lass uns um vier treffen."), Verdict::Ok);
+        assert_eq!(v("Bitte ohne Prüfung schicken, nein stopp, mit Prüfung.", "Bitte mit Prüfung schicken."), Verdict::Ok);
+        // ...but never add one.
+        assert_eq!(v("Lass uns um drei treffen, nee stopp, um vier.", "Lass uns nicht um vier treffen."), Verdict::Negation);
+        // Digits for number words, an answering "Nein" kept: fine.
+        assert_eq!(v("am vierzehnten in raum zweihundertvier", "Am 14. in Raum 204."), Verdict::Ok);
+        assert_eq!(v("nein ich habe keine zeit", "Nein, ich habe keine Zeit."), Verdict::Ok);
+    }
+
+    #[test]
+    fn an_own_instruction_may_change_more_words_but_not_the_meaning() {
+        let original = "kannst du mir bitte die unterlagen schicken";
+        let formal = "Könnten Sie mir bitte die Unterlagen senden?";
+        assert_eq!(verdict(original, formal, &Ask::default()), Verdict::OwnWords);
+        let sie = Ask { instruction: "Sie-Form verwenden", ..Ask::default() };
+        assert_eq!(verdict(original, formal, &sie), Verdict::Ok);
+        // The language, negations and numbers stay guarded with an instruction too.
+        let english = Ask { instruction: "Always reply in English.", ..Ask::default() };
+        assert_eq!(verdict("Ich hab kein Wasser, kannst du mir was bringen?", "I have no water, can you bring me some?", &english), Verdict::Language);
+    }
+
     use crate::engine::testserver::serve;
 
     fn reply(content: &str, finish: &str) -> (u16, &'static str, Vec<u8>) {
