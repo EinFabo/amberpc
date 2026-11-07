@@ -78,7 +78,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     if !settings.onboarded {
         bubble::open_settings(app, Some("welcome"));
     } else if !autostarted {
-        bubble::open_settings(app, None);
+        bubble::open_settings(app, amber_core::autostart::settings_page(&std::env::args().collect::<Vec<_>>()).as_deref());
     }
     control::start(app);
     if settings.phone.enabled {
@@ -101,7 +101,8 @@ pub fn run() {
         // setup (tools/setup-tunnel.sh).
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| match tunnel::import_path(&args) {
             Some(path) => tunnel::import(app, &path),
-            None => bubble::open_settings(app, None),
+            // `amber.exe --settings phone`: on that page (tools/screenshot.ps1 uses it).
+            None => bubble::open_settings(app, amber_core::autostart::settings_page(&args).as_deref()),
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())

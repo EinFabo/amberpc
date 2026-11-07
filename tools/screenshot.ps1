@@ -1,6 +1,7 @@
-# Saves a screenshot for checking the app by eye: the window titled "Amber" (the settings),
-# with -Screen the whole primary screen, with -Region x,y,w,h a part of it; at most 1600 px wide.
-param([string]$Out = "$PSScriptRoot\..\shot.png", [switch]$Screen, [int[]]$Region)
+# Saves a screenshot for checking the app by eye: the window titled "Amber" (the settings) -
+# with -Page phone opened on that page first (amber.exe --settings phone) -, with -Screen the
+# whole primary screen, with -Region x,y,w,h a part of it; at most 1600 px wide.
+param([string]$Out = "$PSScriptRoot\..\shot.png", [switch]$Screen, [int[]]$Region, [string]$Page)
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
@@ -41,6 +42,10 @@ if ($Region) {
   $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
   $x = $b.Left; $y = $b.Top; $w = $b.Width; $h = $b.Height
 } else {
+  if ($Page) {
+    Start-Process -FilePath "$env:LOCALAPPDATA\Amber\amber.exe" -ArgumentList "--settings", $Page
+    Start-Sleep -Milliseconds 2000
+  }
   $proc = Get-Process -Name amber -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $proc) { Write-Output "Amber is not running"; exit 1 }
   $hwnd = [AmberUi]::Largest([uint32]$proc.Id)
