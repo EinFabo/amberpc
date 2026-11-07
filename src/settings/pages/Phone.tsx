@@ -54,8 +54,8 @@ export function PhonePage(props: PageProps) {
           label="Let Amber on the phone use this PC"
           hint={
             s.phone.tunnel
-              ? "Opens a port in your home network, and the tunnel below reaches it from the internet: whoever has the address with its key gets in - keep it like a password."
-              : "Opens a port in your home network. Only devices in your own network with the address below get in."
+              ? "Opens a port in your home network, and the tunnel below reaches it from the internet: whoever has an API key gets in - keep it like a password; the address alone opens nothing."
+              : "Opens a port in your home network. Only devices in your own network with the address and an API key below get in."
           }
         >
           <Switch on={s.phone.enabled} onChange={(v) => save((x) => (x.phone.enabled = v))} />

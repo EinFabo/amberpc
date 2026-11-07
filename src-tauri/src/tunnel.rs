@@ -5,9 +5,9 @@
 //! as an environment variable, never on its command line; cloudflared ends with Amber (the
 //! job object in `process`).
 //!
-//! Requests come through cloudflared from 127.0.0.1. What keeps strangers out is the access
-//! key in the address: 20 random characters, compared in constant time - and HTTPS all the
-//! way to Cloudflare.
+//! Requests come through cloudflared from 127.0.0.1. What keeps strangers out is the API key
+//! (a Bearer header, or in older phones' paths): 20 random characters, compared in constant
+//! time - and HTTPS all the way to Cloudflare.
 
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
