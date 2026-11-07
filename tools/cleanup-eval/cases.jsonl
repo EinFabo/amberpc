@@ -74,3 +74,15 @@
 {"id":"long-zocken","style":"casual","input":"boah ich hab heute echt keinen bock mehr auf arbeit lass uns später zocken","must":["keinen bock|kein bock","später","zocken"]}
 {"id":"long-rechnung","style":"formal","input":"kannst du mir sagen ob die rechnung schon bezahlt wurde oder ob ich das noch machen muss","must":["rechnung","bezahlt","noch"],"must_not":["ihnen","sehr geehrte"]}
 {"id":"long-ordner","input":"ich hab die datei in den ordner verschoben aber sie ist jetzt wieder weg","must":["verschoben","wieder weg"]}
+{"id":"tech-parakeet","input":"Okay, erzähl mir vorher nur ein bisschen. Warum Parakeet TDT? Besser als Whisper lokal?","must":["erzähl","warum","besser als"],"must_not":["tell me","why","better than"],"lang":"de"}
+{"id":"tech-build","input":"kannst du den build nochmal starten und mir sagen ob die tests durchlaufen","must":["build","tests"],"must_not":["can you","tell me"],"lang":"de"}
+{"id":"tech-review","input":"mach bitte einen review subagent und guck ob der code passt","must":["review","code"],"must_not":["please","check if"],"lang":"de"}
+{"id":"tech-release","input":"okay dann committe und release die null punkt vier punkt sieben","must":["committe|commit","release"],"must_not":["then commit"],"lang":"de"}
+{"id":"tech-model","input":"welches cleanup model ist besser für cpu only qwen oder gemma","must":["welches","besser"],"must_not":["which","better"],"lang":"de"}
+{"id":"tech-tunnel","input":"der cloudflare tunnel ist irgendwie langsam woran liegt das","must":["tunnel","langsam"],"must_not":["slow","why"],"lang":"de"}
+{"id":"tech-short-1","input":"Ja, mach das.","must":["mach das"],"must_not":["do it","yes"]}
+{"id":"tech-short-2","input":"Passt, push es.","must":["passt"],"must_not":["fine","okay, push"]}
+{"id":"tech-short-3","input":"Okay, cool, danke dir.","must":["danke"],"must_not":["thank"]}
+{"id":"tech-pr","input":"Kannst du den Pull Request mergen, wenn die CI grün ist?","must":["mergen|merge","grün"],"must_not":["green","if the"],"lang":"de"}
+{"id":"tech-english","input":"Can you check why the tunnel is so slow today?","must":["tunnel","slow"],"must_not":["warum","langsam"],"lang":"en"}
+{"id":"tech-english-2","input":"Okay, let's ship it.","must":["ship it"],"must_not":["lass"]}

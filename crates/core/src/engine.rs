@@ -51,17 +51,19 @@ impl TranscribeOptions {
 /// every phrase was detected clearly (the right language at 0.87 or more, mostly 0.99).
 pub const SHORT_DICTATION_MS: u64 = 3_000;
 
-/// In a short dictation another language than the first chosen needs at least this
-/// probability ("more likely than not")...
+/// Another language than the first chosen needs at least this probability ("more likely than
+/// not") - at any length: Fabi's log of 2026-11-07, 372 picks, had long dictations at 0.9 or
+/// more but one, a 3.7 s first part at 0.12 against 0.10 that turned German into English...
 pub const CLEAR_LANGUAGE: f64 = 0.5;
 
-/// ...and this many times the first one's. English phrases cleared both at 0.64-1.0; the
-/// German ones taken for English stayed below 0.47.
+/// ...and in a short dictation this many times the first one's. English phrases cleared both
+/// at 0.64-1.0; the German ones taken for English stayed below 0.47.
 pub const CLEAR_MARGIN: f64 = 2.0;
 
 /// Of [allowed], the language to recognize [audio_ms] of speech in, by whisper.cpp's
-/// [probabilities] (`{"de": 0.2, ...}`): the likeliest of them - in a short dictation the first
-/// chosen unless another is clearly likelier ([SHORT_DICTATION_MS]). The first, too, when it
+/// [probabilities] (`{"de": 0.2, ...}`): the likeliest of them when Whisper is fairly sure
+/// ([CLEAR_LANGUAGE]) - in a short dictation the first chosen unless another is clearly
+/// likelier ([SHORT_DICTATION_MS]). The first, too, when it
 /// heard none of them or two equally. Short German speech is easily taken for Turkish; among
 /// German and English only, it can no longer be.
 pub fn pick_language(probabilities: &serde_json::Value, allowed: &[String], audio_ms: u64) -> String {
@@ -73,8 +75,11 @@ pub fn pick_language(probabilities: &serde_json::Value, allowed: &[String], audi
             best = code.clone();
         }
     }
-    let unclear = p(&best) < CLEAR_LANGUAGE || p(&best) < CLEAR_MARGIN * p(&first);
-    let picked = if audio_ms <= SHORT_DICTATION_MS && unclear { first } else { best };
+    // Below CLEAR_LANGUAGE Whisper is guessing at any length; in a short dictation another
+    // language must also be clearly ahead of the first.
+    let unsure = p(&best) < CLEAR_LANGUAGE;
+    let behind = audio_ms <= SHORT_DICTATION_MS && p(&best) < CLEAR_MARGIN * p(&first);
+    let picked = if unsure || behind { first } else { best };
     if allowed.len() > 1 {
         note(language_note(probabilities, allowed, audio_ms, &picked));
     }
@@ -556,10 +561,11 @@ mod tests {
 
     #[test]
     fn the_likeliest_allowed_language_wins() {
-        // A long dictation: the likeliest, whatever the margin.
+        // A long dictation: the likeliest, whatever the margin - once Whisper is fairly sure.
         let long = 6_000;
         let allowed = ["de".to_string(), "en".to_string()];
-        assert_eq!(pick_language(&serde_json::json!({"tr": 0.5, "en": 0.3, "de": 0.2}), &allowed, long), "en");
+        assert_eq!(pick_language(&serde_json::json!({"tr": 0.1, "en": 0.6, "de": 0.3}), &allowed, long), "en");
+        assert_eq!(pick_language(&serde_json::json!({"tr": 0.5, "en": 0.3, "de": 0.2}), &allowed, long), "de", "unsure: the first");
         // Turkish is not allowed; neither listed language heard at all: the first.
         assert_eq!(pick_language(&serde_json::json!({"tr": 0.9}), &allowed, long), "de");
         assert_eq!(pick_language(&serde_json::json!({"de": 0.4, "en": 0.4}), &allowed, long), "de", "a tie: the first");
@@ -596,8 +602,21 @@ mod tests {
         // A tie and none of them: the first, short or long.
         assert_eq!(pick(0.4, 0.4, 900), "de");
         assert_eq!(pick_language(&serde_json::json!({"tr": 0.9}), &de_en, 900), "de");
-        // Long: the likeliest again.
-        assert_eq!(pick(0.177, 0.300, SHORT_DICTATION_MS + 1), "en");
+        // Long: the likeliest again - when Whisper is anywhere near sure.
+        assert_eq!(pick(0.177, 0.600, SHORT_DICTATION_MS + 1), "en");
+    }
+
+    #[test]
+    fn an_unsure_guess_keeps_the_first_language_at_any_length() {
+        let de_en = ["de".to_string(), "en".to_string()];
+        let pick = |de: f64, en: f64, ms: u64| pick_language(&serde_json::json!({"de": de, "en": en}), &de_en, ms);
+        // Fabi's dictation of 2026-11-07, its first part of 3.7 s: German taken for English at
+        // 0.12 to 0.10 - and every later part recognized in English too.
+        assert_eq!(pick(0.10, 0.12, 3_700), "de");
+        assert_eq!(pick(0.177, 0.300, 9_000), "de");
+        // Long and sure, as nearly all are (236 of 243 in Fabi's log at 0.9 or more).
+        assert_eq!(pick(0.01, 0.98, 6_200), "en");
+        assert_eq!(pick(0.216, 0.587, 7_390), "en");
     }
 
     #[test]
