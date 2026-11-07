@@ -57,7 +57,7 @@ enum Command {
     },
     /// The phone's address, with a QR code
     Url {
-        /// The address of this key (default: the first)
+        /// The address and API key of this key (default: the first)
         #[arg(long)]
         key: Option<String>,
     },
@@ -117,7 +117,7 @@ enum ConfigAction {
 
 #[derive(Subcommand)]
 enum KeyAction {
-    /// A new key for another device, with its address
+    /// A new key for another device, with its address and API key
     Add {
         name: String,
         /// Only these models (ids, comma-separated); default: every model
@@ -127,7 +127,7 @@ enum KeyAction {
         #[arg(long)]
         per_day: Option<u32>,
     },
-    /// A new secret for a key: devices with its old address are locked out
+    /// A new secret for a key: devices with the old one are locked out
     New { name: Option<String> },
     /// Remove a key: its devices are locked out, the others go on
     Remove { name: String },
@@ -209,7 +209,7 @@ fn setup_command(quick: bool) -> Result<(), String> {
     };
     println!("\nReady: speech model {}, cleanup {}.", config.speech, config.cleanup.as_deref().unwrap_or("off"));
     println!("Start it in the background: amber-server service install");
-    println!("The phone's address:        amber-server url");
+    println!("Address and API key:        amber-server url");
     if config.cleanup.is_none() {
         println!("A cleanup model:            amber-server cleanup");
     }

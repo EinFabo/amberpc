@@ -168,9 +168,13 @@ export interface ModelInfo {
 }
 
 export interface KeyInfo extends PhoneKey {
+  /** The address in the home network and from anywhere - no key in them. */
   url?: string | null;
-  qr?: string | null;
   publicUrl?: string | null;
+  /** The API key, sent apart as "Authorization: Bearer". */
+  secret: string;
+  /** The pairing link (address and key) as a QR code. */
+  qr?: string | null;
 }
 
 export interface PhoneInfo {

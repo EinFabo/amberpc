@@ -6,14 +6,30 @@ offer to Amber for Android and to any OpenAI-compatible client. The implementati
 
 ## Address and key
 
-`http://<host>:<port>/<key>/v1` in the home network, `https://<tunnel-host>/<key>/v1` through
-a Cloudflare tunnel. The key is part of the path; `Authorization: Bearer <key>` works too.
+As with OpenAI, an address and, apart from it, an API key:
+
+- **Address:** `http://<host>:<port>/v1` in the home network, `https://<tunnel-host>/v1`
+  through a Cloudflare tunnel - no key in it. It can be read out, shown, written down.
+- **API key:** `Authorization: Bearer <key>` on every request but `GET /health`. A header
+  leaves no trace where a path does (tunnel and proxy logs, browser history, crash reports),
+  and a client can keep the key bound to the host it was entered for.
+- **Pairing link**, both in one, for the QR code and for copying in one go:
+  `amber://server?url=<address, percent-encoded>&key=<key, percent-encoded>`. Amber for
+  Android (0.30.0 or newer) splits a scanned or pasted link into its two fields; a camera app
+  shows it as text to copy.
+
 Without a valid key: `401`. Ten wrong keys from one sender: `429` for 15 minutes.
 
+**Older form:** the key in the path, `http://<host>:<port>/<key>/v1`, as Amber PC and Amber
+Server showed it up to 0.4.7 and Amber for Android up to 0.29.0 sends it. It is still accepted -
+nothing shows it any more, and Amber for Android 0.30.0 moves a stored address of this form to
+address and key by itself. No log line holds the path, so a key in it is not written down.
+Dropping the older form is a later decision.
+
 A server may have several keys (Amber PC 0.4.4 and Amber Server 0.4.4), one per device or
-person, each with its own address. A key may be limited to some models and has its own quota:
-120 requests per 10 minutes, and 2000 a day unless its owner set another number; then `429`.
-Removing a key locks out its devices only.
+person, all under the same address. A key may be limited to some models and has its own
+quota: 120 requests per 10 minutes, and 2000 a day unless its owner set another number; then
+`429`. Removing a key locks out its devices only.
 
 ## Endpoints
 

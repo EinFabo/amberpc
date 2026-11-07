@@ -163,9 +163,11 @@ cd streamdeck && npm run setup && npm test && npm run pack   # -> dist/
 ## Phone API (optional)
 
 Amber on the Android phone can use this PC as its server - same network, the PC's GPU,
-no change to the phone app. Turn it on under *Settings → Phone*; it shows the address to
-enter in the phone's *Engine → Own server* (as text and as a QR code), e.g.
-`http://192.168.178.30:8765/<key>/v1`.
+no change to the phone app. Turn it on under *Settings → Phone*; it shows what to enter in
+the phone's *Engine → Own server*, as with OpenAI: the **address** (e.g.
+`http://192.168.178.30:8765/v1`) and, apart, the **API key** (hidden until *Show*), each with
+a copy button - or both at once as a pairing link in a QR code
+(`amber://server?url=…&key=…`, Amber for Android 0.30.0 or newer).
 
 - OpenAI-compatible: `POST /v1/audio/transcriptions` (multipart, WAV or Ogg Opus) answers
   `{"text": …}`; `GET /v1/models` lists every downloaded speech and cleanup model and the
@@ -174,10 +176,10 @@ enter in the phone's *Engine → Own server* (as text and as a QR code), e.g.
 - `POST /v1/chat/completions` answers the phone's own cleanup (Amber for Android 0.17 and
   later asks for it separately, with its styles per app) with the cleanup model it names -
   local or the provider under Cleanup - or the PC's own.
-- The phone's own-server engine has no API key field, so the access key is part of the
-  path; a `Bearer` header with the key works too. Several keys, one per device or person,
-  each with its own address, the models it may use and its requests a day (*Phone → Access
-  keys*); a new secret or removing a key locks out only its devices.
+- The key goes as `Authorization: Bearer`; the older form with the key in the path
+  (`/<key>/v1`, Amber for Android up to 0.29.0) is still accepted, and never logged. Several
+  keys, one per device or person, each with the models it may use and its requests a day
+  (*Phone → Access keys*); a new key or removing one locks out only its devices.
 - Only devices in the private network (192.168/16, 10/8, 172.16/12, Tailscale's 100.64/10,
   loopback) are answered. Off by default; Windows asks once to let Amber through its
   firewall.
@@ -188,8 +190,8 @@ enter in the phone's *Engine → Own server* (as text and as a QR code), e.g.
 - **From anywhere**: a Cloudflare Tunnel on the user's own domain. The user creates the
   tunnel in Cloudflare (public hostname -> `http://localhost:<port>`) and pastes its token;
   Amber downloads cloudflared (pinned, checksum-verified), keeps it running with the token in
-  its environment (never on the command line), and shows `https://<host>/<key>/v1` with a QR
-  code. Requests arrive from 127.0.0.1 through cloudflared; the access key keeps strangers
+  its environment (never on the command line), and shows the address `https://<host>/v1` and
+  the pairing link as a QR code. Requests arrive from 127.0.0.1 through cloudflared; the access key keeps strangers
   out, and refusals are logged at most every 10 s with the sender Cloudflare names.
   One command does all of it from WSL: `tools/setup-tunnel.sh amber-x7k2.example.com` logs
   in to Cloudflare (browser, once), creates the tunnel, routes the hostname, and hands token

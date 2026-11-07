@@ -35,9 +35,30 @@ pub fn new_key() -> String {
     key
 }
 
-/// The address the phone gets, key included.
-pub fn phone_url(ip: Ipv4Addr, port: u16, key: &str) -> String {
-    format!("http://{ip}:{port}/{key}/v1")
+/// The address the phone gets in the home network - no key: that goes apart, as
+/// `Authorization: Bearer` (docs/phone-api.md, "Address and key").
+pub fn phone_url(ip: Ipv4Addr, port: u16) -> String {
+    format!("http://{ip}:{port}/v1")
+}
+
+/// Address and key in one link, for the QR code and for copying in one go:
+/// `amber://server?url=<address, percent-encoded>&key=<key>`. Amber for Android splits it into
+/// its two fields; a camera app shows it as text.
+pub fn pairing_link(url: &str, key: &str) -> String {
+    format!("amber://server?url={}&key={}", percent_encode(url), percent_encode(key))
+}
+
+/// Everything but letters, digits and `-._~` as %XX (RFC 3986's unreserved characters stay).
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 3);
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// What the user typed as the tunnel's hostname, as a bare hostname: "https://Amber.Example.com/x"
@@ -56,9 +77,10 @@ pub fn public_host(typed: &str) -> String {
     }
 }
 
-/// The address the phone gets through the tunnel - HTTPS, Cloudflare holds the certificate.
-pub fn public_url(host: &str, key: &str) -> String {
-    format!("https://{host}/{key}/v1")
+/// The address the phone gets through the tunnel - HTTPS, Cloudflare holds the certificate;
+/// no key, as [phone_url].
+pub fn public_url(host: &str) -> String {
+    format!("https://{host}/v1")
 }
 
 /// The tunnel token out of whatever was pasted - the token alone, or the whole install command
@@ -644,7 +666,38 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
         assert!(!a.contains(['l', 'o', '0', '1', 'i']));
-        assert_eq!(phone_url(Ipv4Addr::new(192, 168, 1, 20), 8765, "k"), "http://192.168.1.20:8765/k/v1");
+        assert_eq!(phone_url(Ipv4Addr::new(192, 168, 1, 20), 8765), "http://192.168.1.20:8765/v1");
+    }
+
+    #[test]
+    fn the_address_has_no_key_and_the_pairing_link_carries_both() {
+        let address = phone_url(Ipv4Addr::new(192, 168, 1, 20), 8765);
+        assert!(!address.contains("k3ysecret"));
+        let link = pairing_link(&address, "k3ysecret");
+        assert_eq!(link, "amber://server?url=http%3A%2F%2F192.168.1.20%3A8765%2Fv1&key=k3ysecret");
+        // Read back as a phone does: the address and the key, unchanged.
+        let decode = |s: &str| {
+            let bytes = s.as_bytes();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'%' {
+                    out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).unwrap());
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            String::from_utf8(out).unwrap()
+        };
+        let query = link.strip_prefix("amber://server?").unwrap();
+        let fields: std::collections::HashMap<&str, String> = query.split('&').map(|kv| kv.split_once('=').unwrap()).map(|(k, v)| (k, decode(v))).collect();
+        assert_eq!(fields["url"], address);
+        assert_eq!(fields["key"], "k3ysecret");
+        let public = public_url("amber.example.com");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(pairing_link(&public, "a b&c"), "amber://server?url=https%3A%2F%2Famber.example.com%2Fv1&key=a%20b%26c");
     }
 
     #[test]
@@ -940,6 +993,20 @@ mod tests {
         assert!((300..3_000).contains(&ms), "the upload's time, the pause included: {line}");
     }
 
+    /// Phones up to Amber for Android 0.29 send the key in the path: it still works, and
+    /// neither it nor a wrong one ends up in the log.
+    #[test]
+    fn a_key_in_the_path_never_reaches_the_log() {
+        let (srv, _, log) = server(Ok("hallo".into()));
+        let client = OpenAiTranscriber::new(&format!("http://{}/testkey/v1", srv.addr), "", "whisper-1");
+        assert_eq!(client.transcribe(&speech(), &TranscribeOptions::default()).unwrap(), "hallo");
+        let wrong = reqwest::blocking::get(format!("http://{}/wrongsecret123/v1/models", srv.addr)).unwrap();
+        assert_eq!(wrong.status().as_u16(), 401);
+        let lines = log.lock().unwrap().clone();
+        assert!(lines.len() >= 2, "{lines:?}");
+        assert!(lines.iter().all(|l| !l.contains("testkey") && !l.contains("wrongsecret123")), "{lines:?}");
+    }
+
     #[test]
     fn a_phone_that_cleans_up_itself_gets_no_cleanup_from_the_pc() {
         // The phone's own prompt for the phone's dictations, the PC's for the PC's.
@@ -1227,7 +1294,7 @@ mod tests {
         assert_eq!(public_host("amber.example.com:443"), "amber.example.com");
         assert_eq!(public_host("localhost"), "", "a public name has a dot");
         assert_eq!(public_host("amber example.com"), "");
-        assert_eq!(public_url("amber.example.com", "k3y"), "https://amber.example.com/k3y/v1");
+        assert_eq!(public_url("amber.example.com"), "https://amber.example.com/v1");
         let token = format!("eyJhIjoi{}", "x".repeat(150));
         assert_eq!(tunnel_token(&token).as_deref(), Some(token.as_str()));
         assert_eq!(tunnel_token(&format!("cloudflared.exe service install {token}")).as_deref(), Some(token.as_str()));

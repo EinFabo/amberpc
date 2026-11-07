@@ -179,10 +179,14 @@ pub struct KeyInfo {
     name: String,
     models: Option<Vec<String>>,
     per_day: Option<u32>,
-    /// In the home network (the first address), and from anywhere when the tunnel is on.
+    /// In the home network (the first address), and from anywhere when the tunnel is on -
+    /// without the key, which goes apart as the API key.
     url: Option<String>,
-    qr: Option<String>,
     public_url: Option<String>,
+    secret: String,
+    /// The pairing link (address and key) as a QR code - with the address from anywhere where
+    /// there is one, it works at home too.
+    qr: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -198,10 +202,11 @@ pub struct Info {
     running: bool,
     error: Option<String>,
     addresses: Vec<Address>,
-    /// The first address as a QR code (SVG), to scan with the phone's camera.
+    /// The pairing link of the first address and key as a QR code (SVG), to scan with the
+    /// phone's camera.
     qr: Option<String>,
     /// From anywhere: cloudflared's state, whether it is downloaded and has its token, and the
-    /// public address with its QR code.
+    /// public address with the first key's pairing link as a QR code.
     tunnel: crate::tunnel::Status,
     tunnel_downloaded: bool,
     tunnel_token: bool,
@@ -220,30 +225,20 @@ pub fn info(core: &Core) -> Info {
     let interfaces: Vec<(String, std::net::IpAddr)> =
         if running { if_addrs::get_if_addrs().unwrap_or_default().into_iter().map(|i| (i.name.clone(), i.ip())).collect() } else { Vec::new() };
     let home_ips = api::phone_addresses(&interfaces);
-    let addresses: Vec<Address> = if running {
-        let key = key(core);
-        home_ips.iter().map(|(name, ip)| Address { name: name.clone(), url: api::phone_url(*ip, settings.port, &key) }).collect()
-    } else {
-        Vec::new()
-    };
-    let qr = addresses.first().and_then(|a| qr_svg(&a.url));
-    let public_url = (settings.tunnel && !settings.public_host.is_empty()).then(|| api::public_url(&settings.public_host, &key(core)));
-    let public_qr = public_url.as_deref().and_then(qr_svg);
+    let addresses: Vec<Address> =
+        if running { home_ips.iter().map(|(name, ip)| Address { name: name.clone(), url: api::phone_url(*ip, settings.port) }).collect() } else { Vec::new() };
+    let first_key = key(core);
+    let qr = addresses.first().and_then(|a| qr_svg(&api::pairing_link(&a.url, &first_key)));
+    let public_url = (settings.tunnel && !settings.public_host.is_empty()).then(|| api::public_url(&settings.public_host));
+    let public_qr = public_url.as_deref().and_then(|url| qr_svg(&api::pairing_link(url, &first_key)));
     let keys = settings
         .keys
         .iter()
         .map(|k| {
             let secret = secret(core, &k.id);
-            let url = home_ips.first().map(|(_, ip)| api::phone_url(*ip, settings.port, &secret));
-            KeyInfo {
-                id: k.id.clone(),
-                name: k.name.clone(),
-                models: k.models.clone(),
-                per_day: k.per_day,
-                qr: url.as_deref().and_then(qr_svg),
-                url,
-                public_url: (settings.tunnel && !settings.public_host.is_empty()).then(|| api::public_url(&settings.public_host, &secret)),
-            }
+            let url = addresses.first().map(|a| a.url.clone());
+            let qr = public_url.as_deref().or(url.as_deref()).and_then(|address| qr_svg(&api::pairing_link(address, &secret)));
+            KeyInfo { id: k.id.clone(), name: k.name.clone(), models: k.models.clone(), per_day: k.per_day, url, public_url: public_url.clone(), secret, qr }
         })
         .collect();
     Info {

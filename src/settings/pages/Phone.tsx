@@ -1,5 +1,5 @@
-// Amber on the phone uses this PC as its "own server": the address to enter there, as text
-// and as a QR code to scan with the phone's camera.
+// Amber on the phone uses this PC as its "own server": the address and, apart, the API key to
+// enter there - as with OpenAI - or both at once as a pairing link in a QR code.
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -31,16 +31,17 @@ export function PhonePage(props: PageProps) {
     };
   }, [s.phone.enabled, s.phone.port]);
 
-  const copy = async (url: string) => {
+  const copy = async (text: string, what = "Address") => {
     try {
-      await navigator.clipboard.writeText(url);
-      toast("Address copied.", true);
+      await navigator.clipboard.writeText(text);
+      toast(`${what} copied.`, true);
     } catch (e) {
       toast(`Could not copy: ${e}`);
     }
   };
 
   const first = info?.addresses[0];
+  const firstKey = info?.keys[0];
   return (
     <>
       <h1>Phone</h1>
@@ -101,10 +102,7 @@ export function PhonePage(props: PageProps) {
                   <li>
                     In Amber on the phone: <b>Engine → Own server</b>.
                   </li>
-                  <li>
-                    As the address, scan the code with the camera and paste it, or type:
-                    <div className="url">{first.url}</div>
-                  </li>
+                  <li>Scan the code with the camera and paste it: Amber fills in the address and the API key. Or copy them one by one below.</li>
                   <li>Model: anything, for example whisper-1. Then tap "Test connection".</li>
                 </ol>
               </div>
@@ -113,13 +111,14 @@ export function PhonePage(props: PageProps) {
                 <div className="note error">This PC has no address in a home network right now - is it connected to your router?</div>
               </div>
             )}
-            {info.addresses.map((a) => (
-              <Row key={a.url} label={a.name} hint={a.url}>
+            {info.addresses.map((a, i) => (
+              <Row key={a.url} label={i === 0 ? "Address" : `Address (${a.name})`} hint={a.url}>
                 <button className="btn" onClick={() => copy(a.url)}>
                   Copy
                 </button>
               </Row>
             ))}
+            {first && firstKey && <ApiKeyRow secret={firstKey.secret} name={info.keys.length > 1 ? firstKey.name : undefined} copy={copy} />}
           </Section>
           <Section title="Text">
             <Row
@@ -146,7 +145,7 @@ export function PhonePage(props: PageProps) {
                       : "History and statistics are off: nothing of the phone's dictations is kept."
               } />
           </Section>
-          {info && <TunnelSection {...props} info={info} reload={reload} />}
+          {info && <TunnelSection {...props} info={info} reload={reload} copy={copy} />}
           {info && <KeysSection {...props} info={info} setInfo={setInfo} copy={copy} />}
           <p className="note">
             The phone uses the engine from the Engine page. The first time, Windows asks whether Amber may accept connections - allow it for private networks, otherwise the
@@ -173,7 +172,7 @@ function hostOf(typed: string): string {
 }
 
 /** The phone API from anywhere: a Cloudflare Tunnel on the user's own domain. */
-function TunnelSection({ s, save, toast, info, reload }: PageProps & { info: PhoneInfo; reload: () => Promise<void> }) {
+function TunnelSection({ s, save, toast, info, reload, copy }: PageProps & { info: PhoneInfo; reload: () => Promise<void>; copy: (text: string, what?: string) => void }) {
   const [dl, setDl] = useState<DownloadEvent | null>(null);
   const [token, setToken] = useState("");
   const [host, setHost] = useState(s.phone.publicHost);
@@ -288,14 +287,19 @@ function TunnelSection({ s, save, toast, info, reload }: PageProps & { info: Pho
                 <li>
                   In Amber on the phone: <b>Engine → Own server</b>.
                 </li>
-                <li>
-                  As the address, scan the code or type:
-                  <div className="url">{info.publicUrl}</div>
-                </li>
+                <li>Scan the code and paste it, or copy the address and the API key below.</li>
                 <li>It works at home and away. The cleanup through this PC (above) takes the same address.</li>
               </ol>
             </div>
           )}
+          {info.publicUrl && (
+            <Row label="Address from anywhere" hint={info.publicUrl}>
+              <button className="btn" onClick={() => copy(info.publicUrl!)}>
+                Copy
+              </button>
+            </Row>
+          )}
+          {info.publicUrl && info.keys[0] && <ApiKeyRow secret={info.keys[0].secret} copy={copy} />}
         </>
       )}
     </Section>
@@ -307,7 +311,7 @@ function TunnelSection({ s, save, toast, info, reload }: PageProps & { info: Pho
  * requests a day, its own address; one can be locked out without the others. The first is
  * the one in the address above.
  */
-function KeysSection({ s, save, toast, info, setInfo, copy }: PageProps & { info: PhoneInfo; setInfo: (i: PhoneInfo) => void; copy: (url: string) => void }) {
+function KeysSection({ s, save, toast, info, setInfo, copy }: PageProps & { info: PhoneInfo; setInfo: (i: PhoneInfo) => void; copy: (text: string, what?: string) => void }) {
   const [adding, setAdding] = useState("");
   const [open, setOpen] = useState<string | null>(null);
   const keys = s.phone.keys;
@@ -332,8 +336,8 @@ function KeysSection({ s, save, toast, info, setInfo, copy }: PageProps & { info
   return (
     <Section title="Access keys">
       <p className="hint">
-        Each key is its own way in, with its own address: give every device or person one. A key can be limited to some models and to a number of requests a day, and locked out
-        without the others. The first is the one in the address above.
+        Each key is its own way in: the same address, its own API key - give every device or person one. A key can be limited to some models and to a number of requests a day,
+        and locked out without the others. The first is the one shown above.
       </p>
       {keys.map((k, i) => {
         const shown = info.keys.find((x) => x.id === k.id);
@@ -350,7 +354,7 @@ function KeysSection({ s, save, toast, info, setInfo, copy }: PageProps & { info
             onChange={(edit) => change(k.id, edit)}
             taken={(name) => keys.some((x) => x.id !== k.id && x.name.toLowerCase() === name.toLowerCase())}
             toast={toast}
-            onRenew={() => call("phone_new_key", { id: k.id }, `New secret for “${k.name}” - its devices need the new address.`)}
+            onRenew={() => call("phone_new_key", { id: k.id }, `New API key for “${k.name}” - its devices need it.`)}
             onRemove={() => call("phone_remove_key", { id: k.id }, `“${k.name}” removed - its devices are locked out.`)}
             copy={copy}
           />
@@ -377,7 +381,7 @@ function KeyRow(p: {
   onChange: (edit: (k: PhoneKey) => void) => void;
   onRenew: () => void;
   onRemove: () => void;
-  copy: (url: string) => void;
+  copy: (text: string, what?: string) => void;
   taken: (name: string) => boolean;
   toast: (message: string, ok?: boolean) => void;
 }) {
@@ -408,7 +412,7 @@ function KeyRow(p: {
     <div className="row column">
       <div className="label" style={{ cursor: "pointer" }} onClick={p.onOpen}>
         <div>
-          {k.name} {p.first && <span className="hint">(the address above)</span>}
+          {k.name} {p.first && <span className="hint">(the key shown above)</span>}
         </div>
         <div className="hint">
           {summary}, {k.perDay ?? 2000} requests a day {p.open ? "▴" : "▾"}
@@ -427,12 +431,13 @@ function KeyRow(p: {
             </Row>
           )}
           {shown?.publicUrl && (
-            <Row label="From anywhere" hint={shown.publicUrl}>
+            <Row label="Address from anywhere" hint={shown.publicUrl}>
               <button className="btn" onClick={() => p.copy(shown.publicUrl!)}>
                 Copy
               </button>
             </Row>
           )}
+          {shown && <ApiKeyRow secret={shown.secret} copy={p.copy} />}
           {!p.first && shown?.qr && <div className="qr" dangerouslySetInnerHTML={{ __html: shown.qr }} />}
           <div className="row column">
             <div className="label">
@@ -461,9 +466,9 @@ function KeyRow(p: {
               }}
             />
           </Row>
-          <Row label="Secret" hint="A new secret locks out the devices with this key's address; the other keys go on.">
+          <Row label="Renew or remove" hint="A new API key locks out the devices that have this one; the other keys go on.">
             <button className="btn danger" onClick={p.onRenew}>
-              New secret
+              New API key
             </button>
             {!p.last && (
               <button className="btn danger" onClick={p.onRemove}>
@@ -474,5 +479,20 @@ function KeyRow(p: {
         </>
       )}
     </div>
+  );
+}
+
+/** The API key: hidden until "Show", copied on its own - an address can be shown, a key not. */
+function ApiKeyRow({ secret, name, copy }: { secret: string; name?: string; copy: (text: string, what?: string) => void }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <Row label={name ? `API key (${name})` : "API key"} hint={<span className="url">{shown ? secret : "•".repeat(Math.min(secret.length, 20))}</span>}>
+      <button className="btn" onClick={() => setShown(!shown)}>
+        {shown ? "Hide" : "Show"}
+      </button>
+      <button className="btn" onClick={() => copy(secret, "API key")}>
+        Copy
+      </button>
+    </Row>
   );
 }

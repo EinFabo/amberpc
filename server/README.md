@@ -59,12 +59,12 @@ a request for a model the server does not have gets the server's default.
 | `amber-server cleanup off` | switch the cleanup off (the files stay) |
 | `amber-server config` | every setting |
 | `amber-server config get language` / `config set language de` | one setting |
-| `amber-server url` | the phone's address and QR code |
+| `amber-server url` | what the phone needs: the address, the API key apart, and both as a pairing link and QR code |
 | `amber-server key` | the access keys: name, models, requests a day |
-| `amber-server key add Laptop --models futo-multilingual-74 --per-day 300` | a key for another device, limited to some models and a quota (both optional), and its address |
+| `amber-server key add Laptop --models futo-multilingual-74 --per-day 300` | a key for another device, limited to some models and a quota (both optional) |
 | `amber-server key new [<name>]` | a new secret for a key (the first if none named): its devices are locked out, the others go on |
 | `amber-server key remove <name>` | remove a key - not the last one |
-| `amber-server url --key <name>` | the address of that key |
+| `amber-server url --key <name>` | the same for that key |
 | `amber-server tunnel` | whether the tunnel is on and answers through Cloudflare |
 | `amber-server tunnel setup amber.example.com` | reach the server from anywhere (see below); the token is pasted, never typed on the command line |
 | `amber-server tunnel off` | the home network only again (the token is kept) |
@@ -126,8 +126,9 @@ the router, HTTPS all the way to Cloudflare, your own domain:
 The server downloads cloudflared (pinned, checksum-checked), keeps it running with the token in
 its environment, and tries again after it ends - 30 s, then longer each time it fails, up to
 10 minutes. `amber-server url` then shows every
-key's address from anywhere as well, and its QR code. The access key is what keeps strangers
-out - wrong keys are paused; keep the address like a password.
+key's address from anywhere as well, with the pairing link and its QR code. The API key is what
+keeps strangers out - wrong keys are paused; keep it like a password (the address alone opens
+nothing).
 
 ## Firewall
 
@@ -136,8 +137,9 @@ The phone reaches the server on its port (8765):
 - Ubuntu with ufw: `sudo ufw allow 8765/tcp`; firewalld: `sudo firewall-cmd --add-port=8765/tcp --permanent && sudo firewall-cmd --reload`.
 - Windows asks the first time the server starts: allow private networks.
 
-The server answers only devices in private networks (home network, Tailscale) and only with the
-key in the address; wrong keys are paused.
+The server answers only devices in private networks (home network, Tailscale) and only with a
+valid API key (`Authorization: Bearer`; the older form with the key in the path still works);
+wrong keys are paused.
 
 ## Uninstall
 
